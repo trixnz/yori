@@ -23,13 +23,13 @@
           pname = "yori";
           version = "0.1.0";
 
-          src = pkgs.lib.cleanSourceWith {
-            src = ./.;
-            filter = path: type:
-              let name = baseNameOf path;
-              in
-              !builtins.elem name [ ".direnv" "target" ]
-              && pkgs.lib.cleanSourceFilter path type;
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              ./Cargo.lock
+              ./Cargo.toml
+              ./crates
+            ];
           };
 
           cargoLock.lockFile = ./Cargo.lock;
