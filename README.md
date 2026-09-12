@@ -39,6 +39,38 @@ Pass file arguments after `--`:
 nix run github:trixnz/yori -- BASELINE LOCAL
 ```
 
+### Optional binary cache
+
+CI publishes builds to the `trixnz-yori` Cachix cache. Nix can build yori
+without it, but configuring the cache avoids rebuilding available revisions.
+
+Configure it automatically with Cachix:
+
+```sh
+nix run nixpkgs#cachix -- use trixnz-yori
+```
+
+Or add it to a NixOS configuration:
+
+```nix
+nix.settings = {
+  extra-substituters = [
+    "https://trixnz-yori.cachix.org"
+  ];
+  extra-trusted-public-keys = [
+    "trixnz-yori.cachix.org-1:v0OV3ETheOdXTYZRhtaDUeO5dEtzzboH0fB6mRag3Z0="
+  ];
+};
+```
+
+For other multi-user Nix installations, add the equivalent settings to
+`/etc/nix/nix.conf`:
+
+```ini
+extra-substituters = https://trixnz-yori.cachix.org
+extra-trusted-public-keys = trixnz-yori.cachix.org-1:v0OV3ETheOdXTYZRhtaDUeO5dEtzzboH0fB6mRag3Z0=
+```
+
 ## Building from source
 
 ```sh
