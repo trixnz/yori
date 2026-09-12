@@ -41,26 +41,9 @@
           ];
           buildInputs = runtimeLibraries;
 
-          # The Nix build sandbox does not provide a session bus or a filesystem
-          # with user xattr support. The normal local gate runs these tests.
-          checkFlags = [
-            "--skip"
-            "instance::tests::concurrent_launches_elect_exactly_one_owner"
-            "--skip"
-            "instance::tests::invalid_and_oversized_requests_are_rejected_before_ui_dispatch"
-            "--skip"
-            "instance::tests::merge_handoff_preserves_all_four_roles_until_workspace_acknowledgment"
-            "--skip"
-            "instance::tests::secondary_waits_for_workspace_acknowledgment_and_preserves_path_bytes"
-            "--skip"
-            "instance::tests::workspace_errors_are_returned_without_becoming_a_second_instance"
-            "--skip"
-            "cli_forwards_diff_and_merge_roles_and_exits_only_after_the_reply"
-            "--skip"
-            "invalid_arguments_and_missing_bus_fail_without_starting_a_window"
-            "--skip"
-            "storage::tests::atomic_save_preserves_source_bytes_permissions_attributes_and_old_open_handles"
-          ];
+          # The Rust CI job runs the complete test suite. This derivation only
+          # verifies that the release package builds and installs correctly.
+          doCheck = false;
 
           postInstall = ''
             wrapProgram "$out/bin/yori" \
