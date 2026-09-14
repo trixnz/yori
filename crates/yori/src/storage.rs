@@ -88,6 +88,7 @@ fn read_snapshot(path: &Path) -> Result<Snapshot, String> {
     let Some(path_before) = regular_file_metadata(path)? else {
         return Ok(Snapshot::Missing);
     };
+
     let mut file = File::open(path).map_err(|error| error.to_string())?;
     let before = file.metadata().map_err(|error| error.to_string())?;
     if !before.is_file() {
