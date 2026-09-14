@@ -31,6 +31,21 @@ fn wait_for_connection_count(instance: &Instance, expected: usize) {
     }
 }
 
+fn receive_request(instance: &Instance) -> OpenRequest {
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    loop {
+        match instance.requests.try_recv() {
+            Ok(request) => return request,
+            Err(async_channel::TryRecvError::Closed) => panic!("request channel closed"),
+            Err(async_channel::TryRecvError::Empty) => {}
+        }
+
+        assert!(Instant::now() < deadline, "request was not dispatched");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[cfg(unix)]
 fn unusual_path(directory: &Path) -> PathBuf {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
@@ -68,7 +83,7 @@ fn secondary_waits_for_workspace_acknowledgment_and_preserves_native_paths() {
             .unwrap();
     });
 
-    let request = primary.requests.recv_blocking().unwrap();
+    let request = receive_request(&primary);
     assert_eq!(request.comparisons, expected);
     assert!(
         completion.recv_timeout(Duration::from_millis(30)).is_err(),
@@ -100,7 +115,7 @@ fn merge_handoff_preserves_all_four_roles() {
     let comparisons = expected.clone();
     let client = thread::spawn(move || Instance::establish(&name, &comparisons).unwrap().is_none());
 
-    let request = primary.requests.recv_blocking().unwrap();
+    let request = receive_request(&primary);
     assert_eq!(request.comparisons, expected);
     assert!(!client.is_finished());
 
@@ -118,7 +133,7 @@ fn workspace_errors_are_returned_without_starting_a_second_instance() {
             .expect("handoff should fail")
     });
 
-    let request = primary.requests.recv_blocking().unwrap();
+    let request = receive_request(&primary);
     assert!(
         request.comparisons.is_empty(),
         "an empty request activates the window"
@@ -159,7 +174,7 @@ fn concurrent_launches_elect_exactly_one_owner() {
                 let instance = Instance::establish(&name, &[]).unwrap();
                 if let Some(primary) = &instance {
                     for _ in 0..3 {
-                        primary.requests.recv_blocking().unwrap().complete(Ok(()));
+                        receive_request(primary).complete(Ok(()));
                     }
                 }
 
@@ -191,13 +206,18 @@ fn excess_connections_are_rejected_before_ui_dispatch() {
     wait_for_connection_count(&primary, MAX_PENDING_CONNECTIONS);
 
     let mut excess = connect(&name);
-    excess
-        .set_recv_timeout(Some(Duration::from_secs(1)))
-        .unwrap();
-    let result = protocol::write_request(&mut excess, &[])
-        .and_then(|()| protocol::read_response(&mut excess));
+    let (finished, completion) = mpsc::channel();
+    let client = thread::spawn(move || {
+        let result = protocol::write_request(&mut excess, &[])
+            .and_then(|()| protocol::read_response(&mut excess));
+        finished.send(result).unwrap();
+    });
+    let result = completion
+        .recv_timeout(Duration::from_secs(1))
+        .expect("excess connection was not rejected promptly");
 
     assert!(result.is_err());
+    client.join().unwrap();
     assert!(primary.requests.try_recv().is_err());
 
     drop(held);
