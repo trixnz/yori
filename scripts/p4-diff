@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+yori="$repo_root/target/debug/yori"
+
+if [[ ! -x "$yori" ]]; then
+    echo "yori is not built; run: direnv exec . cargo build -p yori" >&2
+    exit 1
+fi
+
+exec direnv exec "$repo_root" "$yori" "$@"
