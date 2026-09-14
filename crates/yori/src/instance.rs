@@ -190,6 +190,7 @@ impl Instance {
             .wait_mode(ConnectWaitMode::Timeout(REQUEST_TIMEOUT))
             .connect_sync()
             .map_err(HandoffError::OwnerUnavailable)?;
+        #[cfg(not(windows))]
         configure_timeouts(&stream).map_err(HandoffError::Failed)?;
 
         protocol::write_request(&mut stream, comparisons).map_err(|error| {
@@ -250,6 +251,7 @@ fn accept_requests(
 }
 
 fn handle_request(stream: &mut Stream, requests: &Sender<OpenRequest>) {
+    #[cfg(not(windows))]
     if let Err(error) = configure_timeouts(stream) {
         let _ = protocol::write_response(stream, Err(error));
         return;
@@ -292,6 +294,7 @@ fn handle_request(stream: &mut Stream, requests: &Sender<OpenRequest>) {
     let _ = protocol::write_response(stream, result);
 }
 
+#[cfg(not(windows))]
 fn configure_timeouts(stream: &Stream) -> Result<(), String> {
     stream
         .set_recv_timeout(Some(REQUEST_TIMEOUT))
