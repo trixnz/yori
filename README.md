@@ -7,8 +7,8 @@ three-way merges, change restoration, conflict resolution, and multiple open fil
 a tabbed workspace.
 
 > [!NOTE]
-> yori is under active development. Linux is currently the primary development and
-> testing platform. Windows and macOS support are planned but not yet validated.
+> yori is under active development. Linux remains the primary development platform.
+> Linux and Windows are tested in CI; macOS is not yet supported.
 
 ## Features
 
@@ -114,8 +114,9 @@ The merge view displays `LOCAL`, `RESULT`, and `INCOMING`. `BASE` provides the
 common ancestor, while `RESULT` identifies the output destination.
 
 Additional invocations open files in the existing application window. Automated
-external-tool integrations should be considered experimental until process waiting
-and completion signaling are implemented.
+invocations exit once the workspace accepts the request; they do not wait for editing
+or merge completion. External-tool integrations requiring that lifecycle remain
+experimental.
 
 ## Keyboard shortcuts
 
