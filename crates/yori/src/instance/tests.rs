@@ -190,7 +190,10 @@ fn excess_connections_are_rejected_before_ui_dispatch() {
         .collect::<Vec<_>>();
     wait_for_connection_count(&primary, MAX_PENDING_CONNECTIONS);
 
-    let mut excess = deadline_stream(connect(&name), Duration::from_secs(1)).unwrap();
+    let mut excess = connect(&name);
+    excess
+        .set_recv_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
     let result = protocol::write_request(&mut excess, &[])
         .and_then(|()| protocol::read_response(&mut excess));
 

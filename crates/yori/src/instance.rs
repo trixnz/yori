@@ -9,7 +9,7 @@ mod protocol;
 mod tests;
 
 use std::{
-    io::{self, Read, Write},
+    io,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -31,7 +31,6 @@ use crate::comparison::ComparisonPaths;
 
 const INSTANCE_NAME: &str = "io.github.trixnz.yori.instance.v1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const IO_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ELECTION_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_PENDING_CONNECTIONS: usize = 16;
@@ -68,76 +67,6 @@ pub(super) struct Instance {
 }
 
 struct ConnectionPermit(Arc<AtomicUsize>);
-
-struct DeadlineIo<T> {
-    inner: T,
-    deadline: Instant,
-    timeout: Duration,
-}
-
-impl<T> DeadlineIo<T> {
-    fn new(inner: T, timeout: Duration) -> Self {
-        Self {
-            inner,
-            deadline: Instant::now() + timeout,
-            timeout,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.deadline = Instant::now() + self.timeout;
-    }
-
-    fn wait_until_ready(&self) -> io::Result<()> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "local socket operation timed out",
-            ));
-        }
-
-        thread::sleep(IO_POLL_INTERVAL.min(remaining));
-        Ok(())
-    }
-}
-
-impl<T: Read> Read for DeadlineIo<T> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        loop {
-            match self.inner.read(buffer) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    self.wait_until_ready()?;
-                }
-                result => return result,
-            }
-        }
-    }
-}
-
-impl<T: Write> Write for DeadlineIo<T> {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        loop {
-            match self.inner.write(buffer) {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    self.wait_until_ready()?;
-                }
-                result => return result,
-            }
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        loop {
-            match self.inner.flush() {
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    self.wait_until_ready()?;
-                }
-                result => return result,
-            }
-        }
-    }
-}
 
 impl ConnectionPermit {
     fn acquire(active: Arc<AtomicUsize>) -> Option<Self> {
@@ -244,18 +173,16 @@ impl Instance {
         let socket_name = name.to_ns_name::<GenericNamespaced>().map_err(|error| {
             HandoffError::Failed(format!("invalid yori instance name: {error}"))
         })?;
-        let stream = interprocess::local_socket::ConnectOptions::new()
+        let mut stream = interprocess::local_socket::ConnectOptions::new()
             .name(socket_name)
             .wait_mode(ConnectWaitMode::Timeout(REQUEST_TIMEOUT))
             .connect_sync()
             .map_err(HandoffError::OwnerUnavailable)?;
-        let mut stream = deadline_stream(stream, REQUEST_TIMEOUT).map_err(HandoffError::Failed)?;
+        configure_timeouts(&stream).map_err(HandoffError::Failed)?;
 
         protocol::write_request(&mut stream, comparisons).map_err(|error| {
             HandoffError::Failed(format!("cannot send request to running yori: {error}"))
         })?;
-        stream.reset();
-
         protocol::read_response(&mut stream).map_err(|error| {
             HandoffError::Failed(format!("handoff to running yori failed: {error}"))
         })
@@ -292,7 +219,8 @@ fn accept_requests(
                     .name("yori-instance-request".into())
                     .spawn(move || {
                         let _permit = permit;
-                        handle_request(stream, &requests);
+                        let mut stream = stream;
+                        handle_request(&mut stream, &requests);
                     });
                 if let Err(error) = result {
                     eprintln!("yori: cannot handle local request: {error}");
@@ -309,15 +237,16 @@ fn accept_requests(
     }
 }
 
-fn handle_request(stream: Stream, requests: &Sender<OpenRequest>) {
-    let Ok(mut stream) = deadline_stream(stream, REQUEST_TIMEOUT) else {
+fn handle_request(stream: &mut Stream, requests: &Sender<OpenRequest>) {
+    if let Err(error) = configure_timeouts(stream) {
+        let _ = protocol::write_response(stream, Err(error));
         return;
-    };
+    }
 
-    let comparisons = match protocol::read_request(&mut stream) {
+    let comparisons = match protocol::read_request(stream) {
         Ok(comparisons) => comparisons,
         Err(error) => {
-            let _ = protocol::write_response(&mut stream, Err(format!("invalid request: {error}")));
+            let _ = protocol::write_response(stream, Err(format!("invalid request: {error}")));
             return;
         }
     };
@@ -331,7 +260,7 @@ fn handle_request(stream: Stream, requests: &Sender<OpenRequest>) {
         .is_err()
     {
         let _ = protocol::write_response(
-            &mut stream,
+            stream,
             Err("yori is busy or shutting down; retry the request".into()),
         );
         return;
@@ -348,14 +277,12 @@ fn handle_request(stream: Stream, requests: &Sender<OpenRequest>) {
             Err("yori closed before opening the comparison".into())
         }
     };
-    stream.reset();
-    let _ = protocol::write_response(&mut stream, result);
+    let _ = protocol::write_response(stream, result);
 }
 
-fn deadline_stream(stream: Stream, timeout: Duration) -> Result<DeadlineIo<Stream>, String> {
+fn configure_timeouts(stream: &Stream) -> Result<(), String> {
     stream
-        .set_nonblocking(true)
-        .map_err(|error| format!("cannot configure local socket: {error}"))?;
-
-    Ok(DeadlineIo::new(stream, timeout))
+        .set_recv_timeout(Some(REQUEST_TIMEOUT))
+        .and_then(|()| stream.set_send_timeout(Some(REQUEST_TIMEOUT)))
+        .map_err(|error| format!("cannot configure local socket timeout: {error}"))
 }
