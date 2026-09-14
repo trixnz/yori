@@ -68,9 +68,10 @@ fn read_only_files_are_not_replaced() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("source.rs");
     std::fs::write(&path, "before").unwrap();
-    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-    permissions.set_readonly(true);
-    std::fs::set_permissions(&path, permissions).unwrap();
+    let writable_permissions = std::fs::metadata(&path).unwrap().permissions();
+    let mut read_only_permissions = writable_permissions.clone();
+    read_only_permissions.set_readonly(true);
+    std::fs::set_permissions(&path, read_only_permissions).unwrap();
     let snapshot = Snapshot::read(&path).unwrap();
 
     assert!(matches!(
@@ -79,18 +80,27 @@ fn read_only_files_are_not_replaced() {
     ));
     assert_eq!(std::fs::read(&path).unwrap(), b"before");
 
-    #[cfg(unix)]
-    std::fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
-    #[cfg(windows)]
-    {
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-        #[expect(
-            clippy::permissions_set_readonly_false,
-            reason = "Windows exposes the read-only file attribute through this portable API"
-        )]
-        permissions.set_readonly(false);
-        std::fs::set_permissions(&path, permissions).unwrap();
-    }
+    std::fs::set_permissions(&path, writable_permissions).unwrap();
+}
+
+#[test]
+fn file_becoming_read_only_during_staging_is_not_replaced() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("source.rs");
+    std::fs::write(&path, "before").unwrap();
+    let expected = Snapshot::read(&path).unwrap();
+    let writable_permissions = std::fs::metadata(&path).unwrap().permissions();
+    let mut read_only_permissions = writable_permissions.clone();
+    read_only_permissions.set_readonly(true);
+
+    let result = save_with_before_replace(&path, &expected, b"ours", || {
+        std::fs::set_permissions(&path, read_only_permissions).unwrap();
+    });
+
+    assert!(matches!(result, Err(SaveError::Failed(_))));
+    assert_eq!(std::fs::read(&path).unwrap(), b"before");
+
+    std::fs::set_permissions(&path, writable_permissions).unwrap();
 }
 
 #[cfg(unix)]

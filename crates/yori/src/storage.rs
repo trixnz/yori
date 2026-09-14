@@ -150,16 +150,12 @@ fn save_with_before_replace(
     if &current != expected {
         return Err(SaveError::Changed(current));
     }
-    if let Snapshot::File(file) = &current {
-        if file.bytes.as_ref() == bytes {
-            return Ok(current);
-        }
-        if file.permissions.readonly() {
-            return Err(SaveError::Failed(
-                "file is read-only; check it out or change its permissions first".into(),
-            ));
-        }
+    if let Snapshot::File(file) = &current
+        && file.bytes.as_ref() == bytes
+    {
+        return Ok(current);
     }
+    ensure_writable(&current)?;
 
     let permissions = match &current {
         Snapshot::Missing => None,
@@ -185,6 +181,7 @@ fn save_with_before_replace(
         if &current != expected {
             return Err(StageError::Changed(current));
         }
+        ensure_writable(&current).map_err(StageError::Failed)?;
 
         Ok(())
     });
@@ -213,4 +210,14 @@ fn save_with_before_replace(
         "destination changed immediately after saving; your editor contents are still retained"
             .into(),
     ))
+}
+
+fn ensure_writable(snapshot: &Snapshot) -> Result<(), String> {
+    if let Snapshot::File(file) = snapshot
+        && file.permissions.readonly()
+    {
+        return Err("file is read-only; check it out or change its permissions first".into());
+    }
+
+    Ok(())
 }
