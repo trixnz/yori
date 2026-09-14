@@ -18,6 +18,19 @@ fn instance_name() -> String {
     )
 }
 
+fn connect(name: &str) -> Stream {
+    let name = name.to_ns_name::<GenericNamespaced>().unwrap();
+    Stream::connect(name).unwrap()
+}
+
+fn wait_for_connection_count(instance: &Instance, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while instance.active_connections.load(AtomicOrdering::Acquire) != expected {
+        assert!(Instant::now() < deadline, "connection count did not settle");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[cfg(unix)]
 fn unusual_path(directory: &Path) -> PathBuf {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
@@ -166,6 +179,29 @@ fn concurrent_launches_elect_exactly_one_owner() {
             .count(),
         1
     );
+}
+
+#[test]
+fn excess_connections_are_rejected_before_ui_dispatch() {
+    let name = instance_name();
+    let primary = Instance::establish(&name, &[]).unwrap().unwrap();
+    let held = (0..MAX_PENDING_CONNECTIONS)
+        .map(|_| connect(&name))
+        .collect::<Vec<_>>();
+    wait_for_connection_count(&primary, MAX_PENDING_CONNECTIONS);
+
+    let mut excess = connect(&name);
+    excess
+        .set_recv_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let result = protocol::write_request(&mut excess, &[])
+        .and_then(|()| protocol::read_response(&mut excess));
+
+    assert!(result.is_err());
+    assert!(primary.requests.try_recv().is_err());
+
+    drop(held);
+    wait_for_connection_count(&primary, 0);
 }
 
 #[test]

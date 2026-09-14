@@ -12,7 +12,7 @@ use std::{
     io,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -33,6 +33,7 @@ const INSTANCE_NAME: &str = "io.github.trixnz.yori.instance.v1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ELECTION_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_PENDING_CONNECTIONS: usize = 16;
 
 #[derive(Debug)]
 enum HandoffError {
@@ -61,6 +62,28 @@ pub(super) struct Instance {
     requests: Receiver<OpenRequest>,
     shutdown: Arc<AtomicBool>,
     listener: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    active_connections: Arc<AtomicUsize>,
+}
+
+struct ConnectionPermit(Arc<AtomicUsize>);
+
+impl ConnectionPermit {
+    fn acquire(active: Arc<AtomicUsize>) -> Option<Self> {
+        active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < MAX_PENDING_CONNECTIONS).then_some(count + 1)
+            })
+            .ok()?;
+
+        Some(Self(active))
+    }
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
 }
 
 impl Instance {
@@ -123,15 +146,26 @@ impl Instance {
         let (requests, incoming) = async_channel::bounded(16);
         let shutdown = Arc::new(AtomicBool::new(false));
         let listener_shutdown = Arc::clone(&shutdown);
+        let active_connections = Arc::new(AtomicUsize::new(0));
+        let listener_connections = Arc::clone(&active_connections);
         let worker = thread::Builder::new()
             .name("yori-instance-listener".into())
-            .spawn(move || accept_requests(&listener, &requests, &listener_shutdown))
+            .spawn(move || {
+                accept_requests(
+                    &listener,
+                    &requests,
+                    &listener_shutdown,
+                    &listener_connections,
+                );
+            })
             .map_err(|error| format!("cannot start yori's local socket listener: {error}"))?;
 
         Ok(Some(Self {
             requests: incoming,
             shutdown,
             listener: Some(worker),
+            #[cfg(test)]
+            active_connections,
         }))
     }
 
@@ -168,14 +202,23 @@ impl Drop for Instance {
     }
 }
 
-fn accept_requests(listener: &Listener, requests: &Sender<OpenRequest>, shutdown: &AtomicBool) {
+fn accept_requests(
+    listener: &Listener,
+    requests: &Sender<OpenRequest>,
+    shutdown: &AtomicBool,
+    active_connections: &Arc<AtomicUsize>,
+) {
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
             Ok(stream) => {
+                let Some(permit) = ConnectionPermit::acquire(Arc::clone(active_connections)) else {
+                    continue;
+                };
                 let requests = requests.clone();
                 let result = thread::Builder::new()
                     .name("yori-instance-request".into())
                     .spawn(move || {
+                        let _permit = permit;
                         let mut stream = stream;
                         handle_request(&mut stream, &requests);
                     });
