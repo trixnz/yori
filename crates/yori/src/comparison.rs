@@ -137,8 +137,9 @@ mod tests {
         let input = directory.path().join("local.rs");
         std::fs::write(&input, "keep me").unwrap();
         let output = directory.path().join("result.rs");
+        let resolved_output = directory.path().canonicalize().unwrap().join("result.rs");
 
-        assert_eq!(resolve_result(&output).unwrap(), output);
+        assert_eq!(resolve_result(&output).unwrap(), resolved_output);
         assert!(!output.exists());
         assert_eq!(
             resolve_result(&input).unwrap(),
