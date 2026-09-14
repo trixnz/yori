@@ -32,6 +32,13 @@ use crate::comparison::ComparisonPaths;
 const INSTANCE_NAME: &str = "io.github.trixnz.yori.instance.v1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const ELECTION_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+
+#[derive(Debug)]
+enum HandoffError {
+    OwnerUnavailable(io::Error),
+    Failed(String),
+}
 
 pub(super) struct OpenRequest {
     pub comparisons: Vec<ComparisonPaths>,
@@ -65,24 +72,50 @@ impl Instance {
     }
 
     fn establish(name: &str, comparisons: &[ComparisonPaths]) -> Result<Option<Self>, String> {
+        Self::establish_with_before_handoff(name, comparisons, || {})
+    }
+
+    fn establish_with_before_handoff(
+        name: &str,
+        comparisons: &[ComparisonPaths],
+        mut before_handoff: impl FnMut(),
+    ) -> Result<Option<Self>, String> {
         let mut validation = Vec::new();
         protocol::write_request(&mut validation, comparisons)
             .map_err(|error| format!("invalid comparison request: {error}"))?;
+        let election_started = Instant::now();
 
-        let socket_name = name
-            .to_ns_name::<GenericNamespaced>()
-            .map_err(|error| format!("invalid yori instance name: {error}"))?;
-        match ListenerOptions::new()
-            .name(socket_name)
-            .nonblocking(ListenerNonblockingMode::Accept)
-            .create_sync()
-        {
-            Ok(listener) => Self::serve(listener),
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                Self::handoff(name, comparisons)?;
-                Ok(None)
+        loop {
+            let socket_name = name
+                .to_ns_name::<GenericNamespaced>()
+                .map_err(|error| format!("invalid yori instance name: {error}"))?;
+            match ListenerOptions::new()
+                .name(socket_name)
+                .nonblocking(ListenerNonblockingMode::Accept)
+                .create_sync()
+            {
+                Ok(listener) => return Self::serve(listener),
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                    before_handoff();
+                    match Self::handoff(name, comparisons) {
+                        Ok(()) => return Ok(None),
+                        Err(HandoffError::OwnerUnavailable(_))
+                            if election_started.elapsed() < REQUEST_TIMEOUT =>
+                        {
+                            thread::sleep(ELECTION_RETRY_INTERVAL);
+                        }
+                        Err(HandoffError::OwnerUnavailable(error)) => {
+                            return Err(format!(
+                                "cannot connect to running yori: {error}; no second window was started"
+                            ));
+                        }
+                        Err(HandoffError::Failed(error)) => return Err(error),
+                    }
+                }
+                Err(error) => {
+                    return Err(format!("cannot claim yori's local socket: {error}"));
+                }
             }
-            Err(error) => Err(format!("cannot claim yori's local socket: {error}")),
         }
     }
 
@@ -102,23 +135,23 @@ impl Instance {
         }))
     }
 
-    fn handoff(name: &str, comparisons: &[ComparisonPaths]) -> Result<(), String> {
-        let socket_name = name
-            .to_ns_name::<GenericNamespaced>()
-            .map_err(|error| format!("invalid yori instance name: {error}"))?;
+    fn handoff(name: &str, comparisons: &[ComparisonPaths]) -> Result<(), HandoffError> {
+        let socket_name = name.to_ns_name::<GenericNamespaced>().map_err(|error| {
+            HandoffError::Failed(format!("invalid yori instance name: {error}"))
+        })?;
         let mut stream = interprocess::local_socket::ConnectOptions::new()
             .name(socket_name)
             .wait_mode(ConnectWaitMode::Timeout(REQUEST_TIMEOUT))
             .connect_sync()
-            .map_err(|error| {
-                format!("cannot connect to running yori: {error}; no second window was started")
-            })?;
-        configure_timeouts(&stream)?;
+            .map_err(HandoffError::OwnerUnavailable)?;
+        configure_timeouts(&stream).map_err(HandoffError::Failed)?;
 
-        protocol::write_request(&mut stream, comparisons)
-            .map_err(|error| format!("cannot send request to running yori: {error}"))?;
-        protocol::read_response(&mut stream)
-            .map_err(|error| format!("handoff to running yori failed: {error}"))
+        protocol::write_request(&mut stream, comparisons).map_err(|error| {
+            HandoffError::Failed(format!("cannot send request to running yori: {error}"))
+        })?;
+        protocol::read_response(&mut stream).map_err(|error| {
+            HandoffError::Failed(format!("handoff to running yori failed: {error}"))
+        })
     }
 
     pub async fn next(&self) -> Result<OpenRequest, async_channel::RecvError> {

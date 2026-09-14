@@ -121,6 +121,19 @@ fn workspace_errors_are_returned_without_starting_a_second_instance() {
 }
 
 #[test]
+fn launcher_becomes_primary_when_the_previous_owner_exits_before_handoff() {
+    let name = instance_name();
+    let mut primary = Some(Instance::establish(&name, &[]).unwrap().unwrap());
+
+    let replacement = Instance::establish_with_before_handoff(&name, &[], || {
+        drop(primary.take());
+    })
+    .unwrap();
+
+    assert!(replacement.is_some());
+}
+
+#[test]
 fn concurrent_launches_elect_exactly_one_owner() {
     let name = instance_name();
     let barrier = Arc::new(Barrier::new(4));
