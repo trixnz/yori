@@ -1,6 +1,11 @@
 //! Native aligned editor: viewport rendering, syntax, selection, and input.
 
-use std::{cell::Cell, ops::Range, path::PathBuf, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    ops::Range,
+    path::PathBuf,
+    rc::Rc,
+};
 
 mod change_navigation;
 mod chrome;
@@ -101,11 +106,18 @@ impl Selection {
     }
 }
 
+#[derive(Clone, Copy)]
+struct RowHighlighting<'a> {
+    syntax: &'a highlighting::VisibleSyntax,
+    intraline: &'a IntralineDiff,
+}
+
 pub(super) struct PaneDocument {
     path: PathBuf,
     max_display_columns: usize,
     document: Document,
     highlighter: Option<SyntaxHighlighter>,
+    syntax_cache: RefCell<highlighting::SyntaxCache>,
     language_override: Option<Language>,
     line_endings: LineEndings,
 }
@@ -121,6 +133,7 @@ impl PaneDocument {
             max_display_columns,
             document,
             highlighter,
+            syntax_cache: RefCell::default(),
             language_override: None,
             line_endings,
         }
@@ -132,7 +145,7 @@ impl PaneDocument {
     }
 
     fn highlighter_for(language: Language, document: &Document) -> Option<SyntaxHighlighter> {
-        let grammar = language.grammar()?;
+        let grammar = highlighting::grammar_for(language)?;
         let mut highlighter = SyntaxHighlighter::new(grammar);
         highlighter.update(None, &Rope::from(document.text()), None);
 
@@ -147,10 +160,12 @@ impl PaneDocument {
         }
 
         self.highlighter = Self::highlighter_for(self.language(), &self.document);
+        self.syntax_cache.get_mut().clear();
     }
 
     fn refresh_after_edit(&mut self, edit: &EditOutcome) {
         self.max_display_columns = max_display_columns(&self.document, TAB_WIDTH);
+        self.syntax_cache.get_mut().clear();
         self.line_endings = LineEndings::from_document(&self.document);
 
         if let Some(highlighter) = &mut self.highlighter {
@@ -641,24 +656,16 @@ impl AlignedEditor {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
-    fn syntax_highlights(
-        pane: &PaneDocument,
-        source_range: Range<usize>,
-        display: &DisplayLine,
-        cx: &Context<Self>,
-    ) -> Vec<(Range<usize>, HighlightStyle)> {
-        let Some(highlighter) = &pane.highlighter else {
-            return Vec::new();
-        };
+    fn visible_source_lines(
+        &self,
+        side: Side,
+        display_rows: Range<usize>,
+    ) -> Option<std::ops::RangeInclusive<usize>> {
+        let mut lines = display_rows.filter_map(|row| self.line_for_row(side, row));
+        let first = lines.next()?;
+        let last = lines.last().unwrap_or(first);
 
-        highlighter
-            .styles(&source_range, cx.theme().highlight_theme.as_ref())
-            .into_iter()
-            .filter_map(|(range, style)| {
-                let display_range = display.display_range(range);
-                (!display_range.is_empty()).then_some((display_range, style))
-            })
-            .collect()
+        Some(first..=last)
     }
 
     fn text_highlights(
@@ -667,11 +674,11 @@ impl AlignedEditor {
         pane: &PaneDocument,
         line_index: usize,
         display: &DisplayLine,
-        intraline: &IntralineDiff,
+        highlighting: RowHighlighting<'_>,
         cx: &Context<Self>,
     ) -> Vec<(Range<usize>, HighlightStyle)> {
         let source_range = pane.document.lines()[line_index].content.clone();
-        let syntax = Self::syntax_highlights(pane, source_range.clone(), display, cx);
+        let syntax = highlighting.syntax.line(line_index);
 
         let selected = self.selection.as_ref().and_then(|selection| {
             if selection.side != side {
@@ -690,8 +697,8 @@ impl AlignedEditor {
             .filter(|range| !range.is_empty());
 
         let changed: Vec<_> = match side {
-            Side::Left => &intraline.left,
-            Side::Right | Side::Incoming => &intraline.right,
+            Side::Left => &highlighting.intraline.left,
+            Side::Right | Side::Incoming => &highlighting.intraline.right,
         }
         .iter()
         .map(|range| display.display_range(range.clone()))
@@ -700,7 +707,7 @@ impl AlignedEditor {
 
         highlighting::compose(
             display.text.len(),
-            &syntax,
+            syntax,
             &changed,
             selected.as_ref(),
             marked.as_ref(),
@@ -744,7 +751,7 @@ impl AlignedEditor {
         row_index: usize,
         top: f32,
         geometry: EditorGeometry,
-        intraline: &IntralineDiff,
+        highlighting: RowHighlighting<'_>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let pane_width = geometry.pane_width();
@@ -789,7 +796,8 @@ impl AlignedEditor {
                 source_line.content.start,
                 TAB_WIDTH,
             );
-            let highlights = self.text_highlights(side, pane, line_index, &display, intraline, cx);
+            let highlights =
+                self.text_highlights(side, pane, line_index, &display, highlighting, cx);
             let whitespace = self.show_whitespace.then(|| {
                 self.render_whitespace(
                     &display,
@@ -905,6 +913,31 @@ impl AlignedEditor {
         let visible_count =
             whole_rows((geometry.rows_viewport_height() / LINE_HEIGHT).ceil()) + OVERSCAN_ROWS;
         let end_row = (first_row + visible_count).min(self.alignment.rows().len());
+        let visible_rows = first_row..end_row;
+        let theme = &cx.theme().highlight_theme;
+        let left_syntax = self.left.syntax_cache.borrow_mut().visible(
+            self.left.highlighter.as_ref(),
+            &self.left.document,
+            self.visible_source_lines(Side::Left, visible_rows.clone()),
+            theme,
+            TAB_WIDTH,
+        );
+        let right_syntax = self.right.syntax_cache.borrow_mut().visible(
+            self.right.highlighter.as_ref(),
+            &self.right.document,
+            self.visible_source_lines(Side::Right, visible_rows.clone()),
+            theme,
+            TAB_WIDTH,
+        );
+        let incoming_syntax = self.merge.as_ref().map_or_else(Default::default, |merge| {
+            merge.incoming.syntax_cache.borrow_mut().visible(
+                merge.incoming.highlighter.as_ref(),
+                &merge.incoming.document,
+                self.visible_source_lines(Side::Incoming, visible_rows.clone()),
+                theme,
+                TAB_WIDTH,
+            )
+        });
 
         let mut rows = div()
             .id("rows-viewport")
@@ -942,8 +975,28 @@ impl AlignedEditor {
                     .intraline(&self.left.document, &self.right.document, row_index);
 
             rows = rows
-                .child(self.render_pane_row(Side::Left, row_index, top, geometry, &intraline, cx))
-                .child(self.render_pane_row(Side::Right, row_index, top, geometry, &intraline, cx));
+                .child(self.render_pane_row(
+                    Side::Left,
+                    row_index,
+                    top,
+                    geometry,
+                    RowHighlighting {
+                        syntax: &left_syntax,
+                        intraline: &intraline,
+                    },
+                    cx,
+                ))
+                .child(self.render_pane_row(
+                    Side::Right,
+                    row_index,
+                    top,
+                    geometry,
+                    RowHighlighting {
+                        syntax: &right_syntax,
+                        intraline: &intraline,
+                    },
+                    cx,
+                ));
             if self.merge.is_some() {
                 let result = self
                     .line_for_row(Side::Right, row_index)
@@ -959,7 +1012,10 @@ impl AlignedEditor {
                     row_index,
                     top,
                     geometry,
-                    &intraline,
+                    RowHighlighting {
+                        syntax: &incoming_syntax,
+                        intraline: &intraline,
+                    },
                     cx,
                 ));
             }

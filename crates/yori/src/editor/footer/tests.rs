@@ -47,6 +47,40 @@ fn assert_matches_fresh_highlighting(pane: &PaneDocument) {
 }
 
 #[test]
+fn cpp_highlighting_composes_c_and_cpp_queries() {
+    let source = "#include \"file.hpp\"\nclass Widget {};\n";
+    let pane = pane("main.cpp", source);
+    let theme = HighlightTheme::default_dark();
+    let styles = pane
+        .highlighter
+        .as_ref()
+        .unwrap()
+        .styles(&(0..source.len()), theme.as_ref());
+
+    let is_styled = |target: &str| {
+        let start = source.find(target).unwrap();
+        let target = start..start + target.len();
+
+        styles.iter().any(|(range, style)| {
+            range.start < target.end && range.end > target.start && style.color.is_some()
+        })
+    };
+
+    assert!(
+        is_styled("#include"),
+        "C query did not style the include directive: {styles:?}"
+    );
+    assert!(
+        is_styled("\"file.hpp\""),
+        "C query did not style the include path: {styles:?}"
+    );
+    assert!(
+        is_styled("class"),
+        "C++ query did not style the class keyword: {styles:?}"
+    );
+}
+
+#[test]
 fn all_four_grammars_track_edits_and_undo_without_changing_source_fidelity() {
     let sources = [
         (
