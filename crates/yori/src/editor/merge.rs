@@ -40,7 +40,9 @@ impl AlignedEditor {
     #[cfg(test)]
     pub(crate) fn merge_fixture(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let source = |text: &str| {
-            Document::from_bytes(text.as_bytes().to_vec()).expect("valid merge fixture")
+            let text = text.replace("\r\n", "\n");
+
+            Document::from_bytes(text.into_bytes()).expect("valid merge fixture")
         };
         let session = MergeSession::new(
             source(include_str!("../../fixtures/merge/base.rs")),
