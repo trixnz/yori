@@ -1,33 +1,34 @@
 //! Exercise the real CLI as a secondary process, without a display server.
 
-#[path = "support/bus.rs"]
-mod bus;
+#[expect(
+    dead_code,
+    reason = "the CLI fixture shares production wire types without using their UI methods"
+)]
+#[path = "../src/comparison.rs"]
+mod comparison;
+#[expect(
+    dead_code,
+    reason = "the fake primary uses only the server half of the production protocol"
+)]
+#[path = "../src/instance/protocol.rs"]
+mod protocol;
 
-use bus::TestBus;
+use comparison::ComparisonPaths;
+use interprocess::local_socket::{GenericNamespaced, ListenerOptions, prelude::*};
 use std::{
     ffi::OsString,
     io::Read,
-    os::unix::ffi::{OsStrExt, OsStringExt},
     process::{Child, Command, Stdio},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
+    thread,
     time::Duration,
 };
 
-type Comparisons = Vec<Vec<Vec<u8>>>;
-type Pending = (Comparisons, async_channel::Sender<zbus::fdo::Result<()>>);
-
-struct WorkspaceStub {
-    requests: mpsc::Sender<Pending>,
-}
-
-#[zbus::interface(name = "io.github.trixnz.yori.Instance2")]
-impl WorkspaceStub {
-    async fn open_comparisons(&self, paths: Comparisons) -> zbus::fdo::Result<()> {
-        let (reply, response) = async_channel::bounded(1);
-        self.requests.send((paths, reply)).unwrap();
-        response.recv().await.unwrap()
-    }
-}
+static NEXT_NAME: AtomicUsize = AtomicUsize::new(0);
+type Pending = (Vec<ComparisonPaths>, mpsc::SyncSender<Result<(), String>>);
 
 struct RunningCli(Child);
 
@@ -38,12 +39,42 @@ impl Drop for RunningCli {
     }
 }
 
-fn cli(bus: &TestBus, directory: &std::path::Path) -> Command {
+fn instance_name() -> String {
+    format!(
+        "yori-cli-test-{}-{}",
+        std::process::id(),
+        NEXT_NAME.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn workspace_stub(
+    name: &str,
+    request_count: usize,
+) -> (mpsc::Receiver<Pending>, thread::JoinHandle<()>) {
+    let socket_name = name.to_ns_name::<GenericNamespaced>().unwrap();
+    let listener = ListenerOptions::new()
+        .name(socket_name)
+        .create_sync()
+        .unwrap();
+    let (requests, incoming) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        for _ in 0..request_count {
+            let mut stream = listener.accept().unwrap();
+            let comparisons = protocol::read_request(&mut stream).unwrap();
+            let (reply, response) = mpsc::sync_channel(1);
+            requests.send((comparisons, reply)).unwrap();
+            protocol::write_response(&mut stream, response.recv().unwrap()).unwrap();
+        }
+    });
+
+    (incoming, worker)
+}
+
+fn cli(name: &str, directory: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_yori"));
     command
         .current_dir(directory)
-        .env("DBUS_SESSION_BUS_ADDRESS", &bus.address)
-        .env("XDG_RUNTIME_DIR", directory)
+        .env("YORI_INSTANCE_NAME", name)
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
         .stdout(Stdio::null())
@@ -52,28 +83,47 @@ fn cli(bus: &TestBus, directory: &std::path::Path) -> Command {
     command
 }
 
-#[test]
-fn cli_forwards_diff_and_merge_roles_and_exits_only_after_the_reply() {
-    let bus = TestBus::new();
-    let directory = tempfile::tempdir().unwrap();
-    let (requests, incoming) = mpsc::channel();
-    let _owner = bus
-        .builder()
-        .serve_at("/io/github/trixnz/yori", WorkspaceStub { requests })
-        .unwrap()
-        .name("io.github.trixnz.yori")
-        .unwrap()
-        .build()
-        .unwrap();
-    let paths = [
+#[cfg(unix)]
+fn paths() -> [OsString; 4] {
+    use std::os::unix::ffi::OsStringExt;
+
+    [
         OsString::from("base with spaces.rs"),
         OsString::from_vec(b"local\xff.rs".to_vec()),
         OsString::from("incoming\nfile.go"),
         OsString::from_vec(b"result\xfe.cpp".to_vec()),
-    ];
+    ]
+}
+
+#[cfg(windows)]
+fn paths() -> [OsString; 4] {
+    use std::os::windows::ffi::OsStringExt;
+
+    let unusual = |stem: &str, surrogate| {
+        OsString::from_wide(
+            &stem
+                .encode_utf16()
+                .chain([surrogate, u16::from(b'.'), u16::from(b'r'), u16::from(b's')])
+                .collect::<Vec<_>>(),
+        )
+    };
+    [
+        OsString::from("base with spaces.rs"),
+        unusual("local", 0xd800),
+        OsString::from("incoming\nfile.go"),
+        unusual("result", 0xd801),
+    ]
+}
+
+#[test]
+fn cli_forwards_diff_and_merge_roles_and_exits_only_after_the_reply() {
+    let name = instance_name();
+    let directory = tempfile::tempdir().unwrap();
+    let (incoming, worker) = workspace_stub(&name, 5);
+    let paths = paths();
 
     for (count, fail) in [(2, false), (0, false), (2, true), (4, false), (4, true)] {
-        let mut command = cli(&bus, directory.path());
+        let mut command = cli(&name, directory.path());
         command.args(&paths[..count]);
         let mut child = RunningCli(command.spawn().unwrap());
         let (comparisons, reply) = incoming.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -81,10 +131,13 @@ fn cli_forwards_diff_and_merge_roles_and_exits_only_after_the_reply() {
             Vec::new()
         } else {
             vec![
-                paths[..count]
-                    .iter()
-                    .map(|path| directory.path().join(path).as_os_str().as_bytes().to_vec())
-                    .collect::<Vec<_>>(),
+                ComparisonPaths::from_paths(
+                    &paths[..count]
+                        .iter()
+                        .map(|path| directory.path().join(path))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap(),
             ]
         };
         assert_eq!(comparisons, expected);
@@ -94,10 +147,8 @@ fn cli_forwards_diff_and_merge_roles_and_exits_only_after_the_reply() {
         );
 
         reply
-            .send_blocking(if fail {
-                Err(zbus::fdo::Error::Failed(
-                    "temporary input unreadable".into(),
-                ))
+            .send(if fail {
+                Err("temporary input unreadable".into())
             } else {
                 Ok(())
             })
@@ -116,31 +167,20 @@ fn cli_forwards_diff_and_merge_roles_and_exits_only_after_the_reply() {
             assert!(stderr.contains("temporary input unreadable"));
         }
     }
+
+    worker.join().unwrap();
 }
 
 #[test]
-fn invalid_arguments_and_missing_bus_fail_without_starting_a_window() {
-    let bus = TestBus::new();
+fn invalid_arguments_fail_before_instance_startup() {
+    let name = instance_name();
     let directory = tempfile::tempdir().unwrap();
     for count in [1, 3, 5, 6] {
-        let result = cli(&bus, directory.path())
+        let result = cli(&name, directory.path())
             .args(vec!["file.rs"; count])
             .output()
             .unwrap();
         assert_eq!(result.status.code(), Some(2));
         assert!(String::from_utf8_lossy(&result.stderr).contains("usage:"));
     }
-
-    let result = cli(&bus, directory.path())
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!(
-                "unix:path={}",
-                directory.path().join("missing-bus").display()
-            ),
-        )
-        .output()
-        .unwrap();
-    assert_eq!(result.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&result.stderr).contains("session-bus connection"));
 }

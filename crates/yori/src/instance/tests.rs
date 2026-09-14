@@ -1,32 +1,57 @@
-//! Real D-Bus requests on isolated buses; never contact the user's desktop bus.
-
-#[path = "../../tests/support/bus.rs"]
-mod bus;
-
 use super::*;
-use bus::TestBus;
 use std::{
-    sync::{Arc, Barrier, mpsc},
-    thread,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        mpsc,
+    },
 };
 
+static NEXT_NAME: AtomicUsize = AtomicUsize::new(0);
+
+fn instance_name() -> String {
+    format!(
+        "yori-test-{}-{}",
+        std::process::id(),
+        NEXT_NAME.fetch_add(1, AtomicOrdering::Relaxed)
+    )
+}
+
+#[cfg(unix)]
+fn unusual_path(directory: &Path) -> PathBuf {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+    directory.join(OsString::from_vec(b"baseline with spaces\xff.rs".to_vec()))
+}
+
+#[cfg(windows)]
+fn unusual_path(directory: &Path) -> PathBuf {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+
+    let units = "baseline with spaces".encode_utf16().chain([
+        0xd800,
+        u16::from(b'.'),
+        u16::from(b'r'),
+        u16::from(b's'),
+    ]);
+    directory.join(OsString::from_wide(&units.collect::<Vec<_>>()))
+}
+
 #[test]
-fn secondary_waits_for_workspace_acknowledgment_and_preserves_path_bytes() {
-    let bus = TestBus::new();
-    let primary = Instance::establish(bus.builder(), &[]).unwrap().unwrap();
-    let pairs = vec![ComparisonPaths::diff(
-        PathBuf::from(OsString::from_vec(
-            b"/tmp/baseline with spaces\xff.rs".to_vec(),
-        )),
-        PathBuf::from("/tmp/local\nfile.rs"),
+fn secondary_waits_for_workspace_acknowledgment_and_preserves_native_paths() {
+    let name = instance_name();
+    let directory = tempfile::tempdir().unwrap();
+    let primary = Instance::establish(&name, &[]).unwrap().unwrap();
+    let comparisons = vec![ComparisonPaths::diff(
+        unusual_path(directory.path()),
+        directory.path().join("local\nfile.rs"),
     )];
-    let expected = pairs.clone();
-    let address = bus.address.clone();
+    let expected = comparisons.clone();
     let (finished, completion) = mpsc::channel();
     let client = thread::spawn(move || {
-        let result = Instance::establish(Builder::address(address.as_str()).unwrap(), &pairs);
         finished
-            .send(result.map(|instance| instance.is_none()))
+            .send(Instance::establish(&name, &comparisons).map(|instance| instance.is_none()))
             .unwrap();
     });
 
@@ -34,8 +59,9 @@ fn secondary_waits_for_workspace_acknowledgment_and_preserves_path_bytes() {
     assert_eq!(request.comparisons, expected);
     assert!(
         completion.recv_timeout(Duration::from_millis(30)).is_err(),
-        "delivery alone must not release Perforce's temporary files"
+        "delivery alone must not release temporary inputs"
     );
+
     request.complete(Ok(()));
     assert!(
         completion
@@ -47,38 +73,34 @@ fn secondary_waits_for_workspace_acknowledgment_and_preserves_path_bytes() {
 }
 
 #[test]
-fn merge_handoff_preserves_all_four_roles_until_workspace_acknowledgment() {
-    let bus = TestBus::new();
-    let primary = Instance::establish(bus.builder(), &[]).unwrap().unwrap();
+fn merge_handoff_preserves_all_four_roles() {
+    let name = instance_name();
+    let directory = tempfile::tempdir().unwrap();
+    let primary = Instance::establish(&name, &[]).unwrap().unwrap();
     let paths = [
-        PathBuf::from("/base.rs"),
-        PathBuf::from("/local.rs"),
-        PathBuf::from("/incoming.rs"),
-        PathBuf::from(OsString::from_vec(b"/result\xff.rs".to_vec())),
+        directory.path().join("base.rs"),
+        directory.path().join("local.rs"),
+        directory.path().join("incoming.rs"),
+        unusual_path(directory.path()),
     ];
     let expected = vec![ComparisonPaths::from_paths(&paths).unwrap()];
-    let request = expected.clone();
-    let address = bus.address.clone();
-    let client = thread::spawn(move || {
-        Instance::establish(Builder::address(address.as_str()).unwrap(), &request)
-            .unwrap()
-            .is_none()
-    });
+    let comparisons = expected.clone();
+    let client = thread::spawn(move || Instance::establish(&name, &comparisons).unwrap().is_none());
 
     let request = primary.requests.recv_blocking().unwrap();
     assert_eq!(request.comparisons, expected);
     assert!(!client.is_finished());
+
     request.complete(Ok(()));
     assert!(client.join().unwrap());
 }
 
 #[test]
-fn workspace_errors_are_returned_without_becoming_a_second_instance() {
-    let bus = TestBus::new();
-    let primary = Instance::establish(bus.builder(), &[]).unwrap().unwrap();
-    let address = bus.address.clone();
+fn workspace_errors_are_returned_without_starting_a_second_instance() {
+    let name = instance_name();
+    let primary = Instance::establish(&name, &[]).unwrap().unwrap();
     let client = thread::spawn(move || {
-        Instance::establish(Builder::address(address.as_str()).unwrap(), &[])
+        Instance::establish(&name, &[])
             .err()
             .expect("handoff should fail")
     });
@@ -89,6 +111,7 @@ fn workspace_errors_are_returned_without_becoming_a_second_instance() {
         "an empty request activates the window"
     );
     request.complete(Err("cannot read temporary baseline".into()));
+
     assert!(
         client
             .join()
@@ -99,23 +122,21 @@ fn workspace_errors_are_returned_without_becoming_a_second_instance() {
 
 #[test]
 fn concurrent_launches_elect_exactly_one_owner() {
-    let bus = TestBus::new();
+    let name = instance_name();
     let barrier = Arc::new(Barrier::new(4));
     let clients = (0..4)
         .map(|_| {
-            let address = bus.address.clone();
+            let name = name.clone();
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
                 barrier.wait();
-                let instance =
-                    Instance::establish(Builder::address(address.as_str()).unwrap(), &[]).unwrap();
+                let instance = Instance::establish(&name, &[]).unwrap();
                 if let Some(primary) = &instance {
                     for _ in 0..3 {
                         primary.requests.recv_blocking().unwrap().complete(Ok(()));
                     }
                 }
 
-                // Keep the winning connection alive until all replies are delivered.
                 instance
             })
         })
@@ -124,6 +145,7 @@ fn concurrent_launches_elect_exactly_one_owner() {
         .into_iter()
         .map(|client| client.join().unwrap())
         .collect::<Vec<_>>();
+
     assert_eq!(
         outcomes
             .iter()
@@ -134,35 +156,17 @@ fn concurrent_launches_elect_exactly_one_owner() {
 }
 
 #[test]
-fn invalid_and_oversized_requests_are_rejected_before_ui_dispatch() {
-    for paths in [
-        vec![vec![b"relative.rs".to_vec(), b"/local".to_vec()]],
-        vec![vec![b"/base\0".to_vec(), b"/local".to_vec()]],
-        vec![vec![b"/base".to_vec(), b"/local".to_vec()]; MAX_COMPARISONS + 1],
-        vec![vec![vec![b'/'; MAX_PATH_BYTES], b"/local".to_vec()]],
-        vec![vec![]],
-        vec![vec![b"/file".to_vec(); 3]],
-        vec![vec![b"/file".to_vec(); 5]],
-        vec![vec![
-            b"/file".to_vec(),
-            b"/file".to_vec(),
-            b"/file".to_vec(),
-            b"relative".to_vec(),
-        ]],
-    ] {
-        assert!(decode_comparisons(paths).is_err());
-    }
-
-    let bus = TestBus::new();
-    let primary = Instance::establish(bus.builder(), &[]).unwrap().unwrap();
-    let connection = bus.builder().build().unwrap();
-    let result = connection.call_method(
-        Some(BUS_NAME),
-        OBJECT_PATH,
-        Some(INTERFACE),
-        "OpenComparisons",
-        &(vec![vec![b"relative".to_vec(), b"/local".to_vec()]],),
+fn protocol_rejects_invalid_requests_before_dispatch() {
+    let directory = tempfile::tempdir().unwrap();
+    let relative = ComparisonPaths::diff(
+        PathBuf::from("relative.rs"),
+        directory.path().join("local.rs"),
     );
-    assert!(result.is_err());
-    assert!(primary.requests.try_recv().is_err());
+    assert!(protocol::write_request(&mut Vec::new(), &[relative]).is_err());
+
+    let malformed = [3, 0, 0, 0, 0xff, 0xff, 0xff];
+    assert!(protocol::read_request(&mut malformed.as_slice()).is_err());
+
+    let oversized = u32::MAX.to_le_bytes();
+    assert!(protocol::read_request(&mut oversized.as_slice()).is_err());
 }

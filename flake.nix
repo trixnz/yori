@@ -93,7 +93,6 @@
           default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [
               pkg-config
-              dbus # isolated session buses for IPC tests
             ];
             buildInputs = runtimeLibraries;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibraries;

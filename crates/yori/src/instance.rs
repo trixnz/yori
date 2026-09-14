@@ -1,40 +1,42 @@
-//! Session-bus ownership and acknowledged file handoff, independent of GPUI.
+//! Cross-platform single-instance ownership and acknowledged file handoff.
 //!
-//! The first connection exclusively owns the application name. Later invocations
-//! call its versioned interface and exit only after the workspace replies.
+//! The first process owns a local socket name. Later invocations connect to it
+//! and exit only after the workspace acknowledges the request.
+
+mod protocol;
 
 #[cfg(test)]
 mod tests;
 
 use std::{
-    ffi::OsString,
-    os::unix::ffi::{OsStrExt, OsStringExt},
-    path::PathBuf,
+    io,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 use async_channel::{Receiver, Sender};
-use zbus::{
-    blocking::{Connection, connection::Builder},
-    fdo,
+use interprocess::{
+    ConnectWaitMode,
+    local_socket::{
+        GenericNamespaced, Listener, ListenerNonblockingMode, ListenerOptions, Stream, prelude::*,
+    },
 };
 
 use crate::comparison::ComparisonPaths;
 
-const BUS_NAME: &str = "io.github.trixnz.yori";
-const OBJECT_PATH: &str = "/io/github/trixnz/yori";
-const INTERFACE: &str = "io.github.trixnz.yori.Instance2";
+const INSTANCE_NAME: &str = "io.github.trixnz.yori.instance.v1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_COMPARISONS: usize = 128;
-const MAX_PATH_BYTES: usize = 1024 * 1024;
-
-/// Path bytes avoid D-Bus string normalization and preserve non-UTF-8 filenames.
-type WireComparisons = Vec<Vec<Vec<u8>>>;
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub(super) struct OpenRequest {
     pub comparisons: Vec<ComparisonPaths>,
     received: Instant,
-    reply: Sender<Result<(), String>>,
+    reply: mpsc::SyncSender<Result<(), String>>,
 }
 
 impl OpenRequest {
@@ -48,99 +50,75 @@ impl OpenRequest {
     }
 }
 
-struct Endpoint {
-    requests: Sender<OpenRequest>,
-}
-
-#[zbus::interface(name = "io.github.trixnz.yori.Instance2")]
-impl Endpoint {
-    async fn open_comparisons(&self, paths: WireComparisons) -> fdo::Result<()> {
-        let comparisons = decode_comparisons(paths)?;
-        let (reply, response) = async_channel::bounded(1);
-        self.requests
-            .try_send(OpenRequest {
-                comparisons,
-                received: Instant::now(),
-                reply,
-            })
-            .map_err(|_| {
-                fdo::Error::Failed("yori is busy or shutting down; retry the request".into())
-            })?;
-
-        // This is a workspace acknowledgment, not merely a transport receipt.
-        // Perforce may delete its temporary baseline as soon as the sender exits.
-        response
-            .recv()
-            .await
-            .map_err(|_| fdo::Error::Failed("yori closed before opening the comparison".into()))?
-            .map_err(fdo::Error::Failed)
-    }
-}
-
 pub(super) struct Instance {
-    // Retain ownership for the entire application lifetime.
-    _connection: Connection,
     requests: Receiver<OpenRequest>,
+    shutdown: Arc<AtomicBool>,
+    listener: Option<JoinHandle<()>>,
 }
 
 impl Instance {
     /// Return the primary instance, or `None` after a successful handoff. Failure
     /// never falls back to a second window: a timed-out request may have started.
     pub fn start(comparisons: &[ComparisonPaths]) -> Result<Option<Self>, String> {
-        let builder = Builder::session()
-            .map_err(|error| format!("cannot connect to the desktop session bus: {error}"))?;
-        Self::establish(builder, comparisons)
+        let name = std::env::var("YORI_INSTANCE_NAME").unwrap_or_else(|_| INSTANCE_NAME.into());
+        Self::establish(&name, comparisons)
     }
 
-    fn establish(
-        builder: Builder<'_>,
-        comparisons: &[ComparisonPaths],
-    ) -> Result<Option<Self>, String> {
-        let wire = encode_comparisons(comparisons);
-        // Validate first launches too, before claiming the name or starting GPUI.
-        decode_comparisons(wire.clone()).map_err(|error| error.to_string())?;
-        let (requests, incoming) = async_channel::bounded(16);
-        let connection = builder
-            .method_timeout(REQUEST_TIMEOUT)
-            .serve_at(OBJECT_PATH, Endpoint { requests })
-            .and_then(Builder::build)
-            .map_err(|error| format!("cannot initialize yori's session-bus connection: {error}"))?;
+    fn establish(name: &str, comparisons: &[ComparisonPaths]) -> Result<Option<Self>, String> {
+        let mut validation = Vec::new();
+        protocol::write_request(&mut validation, comparisons)
+            .map_err(|error| format!("invalid comparison request: {error}"))?;
 
-        // Register the interface before claiming the name so concurrent launches
-        // can be queued safely even while the primary is initializing its window.
-        match connection.request_name_with_flags(BUS_NAME, fdo::RequestNameFlags::DoNotQueue.into())
+        let socket_name = name
+            .to_ns_name::<GenericNamespaced>()
+            .map_err(|error| format!("invalid yori instance name: {error}"))?;
+        match ListenerOptions::new()
+            .name(socket_name)
+            .nonblocking(ListenerNonblockingMode::Accept)
+            .create_sync()
         {
-            Ok(fdo::RequestNameReply::PrimaryOwner | fdo::RequestNameReply::AlreadyOwner) => {
-                Ok(Some(Self {
-                    _connection: connection,
-                    requests: incoming,
-                }))
-            }
-            Err(zbus::Error::NameTaken) | Ok(fdo::RequestNameReply::Exists) => {
-                connection
-                    .call_method(
-                        Some(BUS_NAME),
-                        OBJECT_PATH,
-                        Some(INTERFACE),
-                        "OpenComparisons",
-                        &(wire,),
-                    )
-                    .map_err(|error| {
-                        format!(
-                            "handoff to running yori failed: {error}; no second window was started"
-                        )
-                    })?
-                    .body()
-                    .deserialize::<()>()
-                    .map_err(|error| format!("invalid reply from running yori: {error}"))?;
-
+            Ok(listener) => Self::serve(listener),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                Self::handoff(name, comparisons)?;
                 Ok(None)
             }
-            Ok(fdo::RequestNameReply::InQueue) => {
-                Err("unexpected queued instance ownership; refusing to start another window".into())
-            }
-            Err(error) => Err(format!("cannot claim yori's session-bus name: {error}")),
+            Err(error) => Err(format!("cannot claim yori's local socket: {error}")),
         }
+    }
+
+    fn serve(listener: Listener) -> Result<Option<Self>, String> {
+        let (requests, incoming) = async_channel::bounded(16);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let listener_shutdown = Arc::clone(&shutdown);
+        let worker = thread::Builder::new()
+            .name("yori-instance-listener".into())
+            .spawn(move || accept_requests(&listener, &requests, &listener_shutdown))
+            .map_err(|error| format!("cannot start yori's local socket listener: {error}"))?;
+
+        Ok(Some(Self {
+            requests: incoming,
+            shutdown,
+            listener: Some(worker),
+        }))
+    }
+
+    fn handoff(name: &str, comparisons: &[ComparisonPaths]) -> Result<(), String> {
+        let socket_name = name
+            .to_ns_name::<GenericNamespaced>()
+            .map_err(|error| format!("invalid yori instance name: {error}"))?;
+        let mut stream = interprocess::local_socket::ConnectOptions::new()
+            .name(socket_name)
+            .wait_mode(ConnectWaitMode::Timeout(REQUEST_TIMEOUT))
+            .connect_sync()
+            .map_err(|error| {
+                format!("cannot connect to running yori: {error}; no second window was started")
+            })?;
+        configure_timeouts(&stream)?;
+
+        protocol::write_request(&mut stream, comparisons)
+            .map_err(|error| format!("cannot send request to running yori: {error}"))?;
+        protocol::read_response(&mut stream)
+            .map_err(|error| format!("handoff to running yori failed: {error}"))
     }
 
     pub async fn next(&self) -> Result<OpenRequest, async_channel::RecvError> {
@@ -148,56 +126,87 @@ impl Instance {
     }
 }
 
-fn encode_comparisons(comparisons: &[ComparisonPaths]) -> WireComparisons {
-    comparisons
-        .iter()
-        .map(|comparison| {
-            comparison
-                .paths()
-                .iter()
-                .map(|path| path.as_os_str().as_bytes().to_vec())
-                .collect()
-        })
-        .collect()
+impl Drop for Instance {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        if let Some(listener) = self.listener.take() {
+            let _ = listener.join();
+        }
+    }
 }
 
-fn decode_comparisons(comparisons: WireComparisons) -> fdo::Result<Vec<ComparisonPaths>> {
-    if comparisons.len() > MAX_COMPARISONS
-        || comparisons.iter().flatten().map(Vec::len).sum::<usize>() > MAX_PATH_BYTES
-        || comparisons
-            .iter()
-            .any(|paths| !matches!(paths.len(), 2 | 4))
-    {
-        return Err(fdo::Error::InvalidArgs(
-            "expected two or four paths per comparison, within request size limits".into(),
-        ));
+fn accept_requests(listener: &Listener, requests: &Sender<OpenRequest>, shutdown: &AtomicBool) {
+    while !shutdown.load(Ordering::Acquire) {
+        match listener.accept() {
+            Ok(stream) => {
+                let requests = requests.clone();
+                let result = thread::Builder::new()
+                    .name("yori-instance-request".into())
+                    .spawn(move || {
+                        let mut stream = stream;
+                        handle_request(&mut stream, &requests);
+                    });
+                if let Err(error) = result {
+                    eprintln!("yori: cannot handle local request: {error}");
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(ACCEPT_POLL_INTERVAL);
+            }
+            Err(error) => {
+                eprintln!("yori: local socket listener failed: {error}");
+                thread::sleep(ACCEPT_POLL_INTERVAL);
+            }
+        }
+    }
+}
+
+fn handle_request(stream: &mut Stream, requests: &Sender<OpenRequest>) {
+    if let Err(error) = configure_timeouts(stream) {
+        let _ = protocol::write_response(stream, Err(error));
+        return;
     }
 
-    let decode = |bytes: Vec<u8>| {
-        if bytes.contains(&0) {
-            return Err(fdo::Error::InvalidArgs(
-                "file paths must not contain NUL bytes".into(),
-            ));
+    let comparisons = match protocol::read_request(stream) {
+        Ok(comparisons) => comparisons,
+        Err(error) => {
+            let _ = protocol::write_response(stream, Err(format!("invalid request: {error}")));
+            return;
         }
-
-        let path = PathBuf::from(OsString::from_vec(bytes));
-        if !path.is_absolute() {
-            return Err(fdo::Error::InvalidArgs(
-                "file paths must be absolute".into(),
-            ));
-        }
-
-        Ok(path)
     };
-
-    comparisons
-        .into_iter()
-        .map(|paths| {
-            let paths = paths
-                .into_iter()
-                .map(decode)
-                .collect::<fdo::Result<Vec<_>>>()?;
-            ComparisonPaths::from_paths(&paths).map_err(fdo::Error::InvalidArgs)
+    let (reply, response) = mpsc::sync_channel(1);
+    if requests
+        .try_send(OpenRequest {
+            comparisons,
+            received: Instant::now(),
+            reply,
         })
-        .collect()
+        .is_err()
+    {
+        let _ = protocol::write_response(
+            stream,
+            Err("yori is busy or shutting down; retry the request".into()),
+        );
+        return;
+    }
+
+    // This is a workspace acknowledgment, not merely a transport receipt.
+    // Perforce may delete its temporary baseline as soon as the sender exits.
+    let result = match response.recv_timeout(REQUEST_TIMEOUT) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err("yori did not open the comparison before the request timed out".into())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("yori closed before opening the comparison".into())
+        }
+    };
+    let _ = protocol::write_response(stream, result);
+}
+
+fn configure_timeouts(stream: &Stream) -> Result<(), String> {
+    stream
+        .set_recv_timeout(Some(REQUEST_TIMEOUT))
+        .and_then(|()| stream.set_send_timeout(Some(REQUEST_TIMEOUT)))
+        .map_err(|error| format!("cannot configure local socket timeout: {error}"))
 }

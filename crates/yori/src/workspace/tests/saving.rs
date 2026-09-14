@@ -1,9 +1,8 @@
 //! Native save/reload flows operate on disposable files, never repository fixtures.
 
 use super::*;
-use crate::storage::Snapshot;
 use crate::workspace::files::Role;
-use std::{os::unix::fs::PermissionsExt, path::PathBuf};
+use std::path::{Path, PathBuf};
 
 fn open_diff(
     workspace: &Entity<Workspace>,
@@ -386,21 +385,11 @@ fn saving_on_close_succeeds_or_preserves_the_tab_on_failure(cx: &mut TestAppCont
     let (workspace, cx) = harness(cx);
     let directory = tempfile::tempdir().unwrap();
     let (id, local) = open_diff(&workspace, cx, directory.path());
-    std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o444)).unwrap();
-    // Open-time permission state may change too; acknowledge that exact version
-    // to exercise write failure rather than the preceding external-change prompt.
-    let snapshot = Snapshot::read(&local).unwrap();
+    let writable_permissions = std::fs::metadata(&local).unwrap().permissions();
+    let mut read_only_permissions = writable_permissions.clone();
+    read_only_permissions.set_readonly(true);
+    std::fs::set_permissions(&local, read_only_permissions).unwrap();
     cx.update(|window, cx| {
-        workspace.update(cx, |view, _| {
-            view.tabs
-                .entries
-                .iter_mut()
-                .find(|tab| tab.id == id)
-                .unwrap()
-                .content
-                .files
-                .accept(Role::Local, snapshot);
-        });
         select_pane(window, cx, 0.75);
         window.input("X", cx);
         window.press("ctrl-w", cx);
@@ -413,13 +402,11 @@ fn saving_on_close_succeeds_or_preserves_the_tab_on_failure(cx: &mut TestAppCont
         assert!(editor(&workspace, id, cx).read(cx).needs_save());
     });
     assert_eq!(std::fs::read_to_string(&local).unwrap(), "local\r\n");
-    std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&local, writable_permissions).unwrap();
     cx.update(|window, cx| {
         window.press("ctrl-w", cx);
         window.click("save-and-close", cx);
     });
-    cx.run_until_parked();
-    cx.update(|window, cx| window.click("ok", cx));
     cx.run_until_parked();
 
     cx.update(|_, cx| assert!(workspace.read(cx).tabs.get(id).is_none()));

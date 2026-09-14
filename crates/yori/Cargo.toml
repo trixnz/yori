@@ -19,11 +19,12 @@ gpui-kit = { version = "=0.6.1", features = ["tree-sitter-c", "tree-sitter-cpp",
 ropey = "=2.0.0-beta.1"
 unicode-width = "=0.2.2"
 tree-sitter = "=0.26.13"
-zbus = "=5.13.2"
+interprocess = "=2.4.4"
+bitcode = "=0.6.9"
+atomicwrites = "=0.4.4"
 async-channel = "=2.5.0"
 notify = "=8.2.0"
-tempfile = "=3.27.0"
-rustix = { version = "=1.1.4", features = ["fs"] }
 
 [dev-dependencies]
 gpui-kit = { version = "=0.6.1", features = ["test-support"] }
+tempfile = "=3.27.0"

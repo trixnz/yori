@@ -147,13 +147,16 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&input).unwrap(), "keep me");
         assert!(resolve_result(directory.path()).is_err());
 
-        let alias = directory.path().join("alias.rs");
-        std::os::unix::fs::symlink(&input, &alias).unwrap();
-        assert_eq!(
-            resolve_result(&alias).unwrap(),
-            input.canonicalize().unwrap()
-        );
-        std::fs::remove_file(&input).unwrap();
-        assert!(resolve_result(&alias).is_err());
+        #[cfg(unix)]
+        {
+            let alias = directory.path().join("alias.rs");
+            std::os::unix::fs::symlink(&input, &alias).unwrap();
+            assert_eq!(
+                resolve_result(&alias).unwrap(),
+                input.canonicalize().unwrap()
+            );
+            std::fs::remove_file(&input).unwrap();
+            assert!(resolve_result(&alias).is_err());
+        }
     }
 }
