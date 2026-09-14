@@ -35,6 +35,18 @@ const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ELECTION_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_PENDING_CONNECTIONS: usize = 16;
 
+fn socket_name_is_occupied(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::AddrInUse {
+        return true;
+    }
+
+    #[cfg(windows)]
+    return error.kind() == io::ErrorKind::PermissionDenied;
+
+    #[cfg(not(windows))]
+    false
+}
+
 #[derive(Debug)]
 enum HandoffError {
     OwnerUnavailable(io::Error),
@@ -118,7 +130,7 @@ impl Instance {
                 .create_sync()
             {
                 Ok(listener) => return Self::serve(listener),
-                Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                Err(error) if socket_name_is_occupied(&error) => {
                     before_handoff();
                     match Self::handoff(name, comparisons) {
                         Ok(()) => return Ok(None),
