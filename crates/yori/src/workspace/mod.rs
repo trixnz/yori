@@ -430,14 +430,11 @@ impl Workspace {
 
     fn render_open_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .h(px(32.0))
             .px(px(5.0))
             .flex()
             .flex_shrink_0()
             .items_center()
             .gap(px(2.0))
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(
                 Button::new("open-merge")
                     .icon(gpui_kit::assets::IconName::GitMerge)
@@ -550,6 +547,7 @@ impl Render for Workspace {
             .with_size(px(38.0))
             .track_scroll(&self.tab_scroll)
             .max_width(px(260.0))
+            .suffix(self.render_open_controls(cx))
             .children(tabs)
             .on_click(cx.listener(move |this, index: &usize, window, cx| {
                 if let Some(id) = ids.get(*index) {
@@ -604,8 +602,7 @@ impl Render for Workspace {
                     .flex()
                     .items_center()
                     .bg(cx.theme().tab_bar)
-                    .child(div().flex_1().min_w_0().overflow_hidden().child(bar))
-                    .child(self.render_open_controls(cx)),
+                    .child(div().flex_1().min_w_0().overflow_hidden().child(bar)),
             )
             .child(
                 div()
