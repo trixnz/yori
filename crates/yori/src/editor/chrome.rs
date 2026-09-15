@@ -5,8 +5,12 @@ use std::path::Path;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
+    tooltip::Tooltip,
 };
-use gpui_kit::{Context, FontWeight, IntoElement, ParentElement, Styled, div, px};
+use gpui_kit::{
+    Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Role,
+    StatefulInteractiveElement, Styled, TestSupportExt, div, px,
+};
 use yori::{geometry::display_units, navigation::ChangeDirection};
 
 use super::{AlignedEditor, HEADER_HEIGHT, NextChange, PreviousChange, Side};
@@ -26,6 +30,14 @@ fn path_labels(path: &Path) -> (String, String) {
         .to_string();
 
     (name, directory)
+}
+
+fn pane_id(side: Side) -> usize {
+    match side {
+        Side::Left => 0,
+        Side::Right => 1,
+        Side::Incoming => 2,
+    }
 }
 
 struct ReviewNavigation {
@@ -162,6 +174,7 @@ impl AlignedEditor {
         &self,
         side: Side,
         directory: String,
+        full_path: String,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut detail = div()
@@ -185,7 +198,17 @@ impl AlignedEditor {
                     .child(format!("{unresolved} unresolved"));
             }
         } else {
-            detail = detail.truncate().child(directory);
+            detail = detail.child(
+                div()
+                    .id(("pane-directory", pane_id(side)))
+                    .test_support()
+                    .w_full()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis_start()
+                    .child(directory)
+                    .tooltip(move |window, cx| Tooltip::new(full_path.clone()).build(window, cx)),
+            );
         }
 
         detail
@@ -197,7 +220,10 @@ impl AlignedEditor {
         pane_width: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (name, directory) = path_labels(&self.document(side).path);
+        let path = &self.document(side).path;
+        let (name, directory) = path_labels(path);
+        let full_path = path.display().to_string();
+        let filename_tooltip = full_path.clone();
 
         div()
             .absolute()
@@ -238,11 +264,20 @@ impl AlignedEditor {
                     )
                     .child(
                         div()
+                            .id(("pane-filename", pane_id(side)))
+                            .test_support()
+                            .role(Role::Label)
+                            .aria_label(full_path.clone())
                             .min_w_0()
                             .flex_1()
-                            .truncate()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis_middle()
                             .font_weight(FontWeight::MEDIUM)
-                            .child(name),
+                            .child(name)
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(filename_tooltip.clone()).build(window, cx)
+                            }),
                     )
                     .children((side == Side::Left).then(|| {
                         div()
@@ -264,7 +299,7 @@ impl AlignedEditor {
                             .child("Incoming · Read-only")
                     })),
             )
-            .child(self.render_header_detail(side, directory, cx))
+            .child(self.render_header_detail(side, directory, full_path, cx))
     }
 }
 
@@ -274,7 +309,7 @@ mod tests {
     use crate::editor::{AlignedEditor, GUTTER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PaneDocument};
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{AppContext, TestAppContext};
+    use gpui_kit::{AppContext, Role, TestAppContext};
     use std::{fmt::Write as _, path::Path};
     use yori::geometry::EditorGeometry;
     use yori_document::Document;
@@ -315,6 +350,33 @@ mod tests {
                 assert_eq!(window.find("next-change").bounds(), initial);
             });
         }
+    }
+
+    #[gpui_kit::test]
+    fn pane_filename_exposes_the_complete_path_to_accessibility(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::appearance::init(cx);
+            crate::editor::init(cx);
+        });
+
+        let full_path = "/tmp/perforce/workspace/generated/very-long-generated-filename.rs";
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let document = Document::from_bytes(Vec::new()).unwrap();
+            let left = PaneDocument::new(full_path.into(), document.clone());
+            let right = PaneDocument::new("local.rs".into(), document);
+            let editor = cx.new(|cx| AlignedEditor::new(left, right, window, cx));
+
+            Root::new(editor, window, cx)
+        });
+        cx.update(TestWindowExt::render_frame);
+
+        cx.update(|window, _| {
+            let filename = window.find(("pane-filename", 0usize));
+
+            assert_eq!(filename.role(), Some(Role::Label));
+            assert_eq!(filename.label(), Some(full_path));
+        });
     }
 
     #[test]
