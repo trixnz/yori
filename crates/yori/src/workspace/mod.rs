@@ -430,19 +430,33 @@ impl Workspace {
 
     fn render_open_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .h(px(32.0))
+            .px(px(5.0))
             .flex()
+            .flex_shrink_0()
             .items_center()
+            .gap(px(2.0))
+            .border_b_1()
+            .border_color(cx.theme().border)
             .child(
                 Button::new("open-merge")
                     .icon(gpui_kit::assets::IconName::GitMerge)
                     .ghost()
-                    .with_size(px(28.0))
+                    .with_size(px(20.0))
+                    .size(px(28.0))
                     .accessibility_label("Open merge")
                     .tooltip("Open three-way merge (Ctrl+Shift+M)")
                     .disabled(self.picking_files)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.choose_merge(&OpenMerge, window, cx);
                     })),
+            )
+            .child(
+                div()
+                    .mx(px(1.0))
+                    .h(px(16.0))
+                    .w(px(1.0))
+                    .bg(cx.theme().border),
             )
             .child(
                 Button::new("open-comparison")
@@ -536,7 +550,6 @@ impl Render for Workspace {
             .with_size(px(38.0))
             .track_scroll(&self.tab_scroll)
             .max_width(px(260.0))
-            .menu(true)
             .children(tabs)
             .on_click(cx.listener(move |this, index: &usize, window, cx| {
                 if let Some(id) = ids.get(*index) {

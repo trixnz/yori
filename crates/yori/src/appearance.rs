@@ -92,8 +92,8 @@ pub(super) fn gap() -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AppAssets;
     use gpui_kit::AssetSource;
-    use gpui_kit::assets::Assets;
     use gpui_kit::component::{IconName, IconNamed};
 
     #[test]
@@ -122,19 +122,28 @@ mod tests {
     }
 
     #[test]
-    fn every_used_icon_is_available_in_the_existing_component_bundle() {
+    fn every_used_icon_is_available_in_the_application_bundle() {
+        let assets = AppAssets::default();
+
         for icon in [
             IconName::ArrowUp,
             IconName::ArrowDown,
+            IconName::ArrowLeft,
             IconName::ArrowRight,
             IconName::FileText,
             IconName::Plus,
             IconName::Close,
         ] {
             let path = icon.path();
-            let bytes = Assets.load(path.as_ref()).unwrap().unwrap();
+            let bytes = assets.load(path.as_ref()).unwrap().unwrap();
 
             assert!(!bytes.is_empty(), "missing icon: {path}");
         }
+
+        let merge_icon = gpui_kit::assets::IconName::GitMerge;
+        let path = merge_icon.path();
+        let bytes = assets.load(path.as_ref()).unwrap().unwrap();
+
+        assert!(!bytes.is_empty(), "missing icon: {path}");
     }
 }

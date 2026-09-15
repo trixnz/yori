@@ -8,9 +8,41 @@ mod storage;
 mod workspace;
 use comparison::ComparisonPaths;
 use gpui_kit::component::Root;
-use gpui_kit::{AppContext, WindowOptions};
-use std::{env, path::PathBuf, process};
+use gpui_kit::{AppContext, AssetSource, SharedString, WindowOptions};
+use std::{borrow::Cow, env, path::PathBuf, process};
 use workspace::Workspace;
+
+gpui_kit::assets::icon_assets!(MergeIconAssets, [GitMerge]);
+
+struct AppAssets {
+    components: gpui_kit::assets::Assets,
+}
+
+impl Default for AppAssets {
+    fn default() -> Self {
+        Self {
+            components: gpui_kit::assets::Assets::new(""),
+        }
+    }
+}
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(bytes) = MergeIconAssets.load(path)? {
+            return Ok(Some(bytes));
+        }
+
+        self.components.load(path)
+    }
+
+    fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
+        let mut paths = self.components.list(path)?;
+        paths.extend(MergeIconAssets.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+}
 
 fn usage(program: &str) -> String {
     format!("usage: {program} [<baseline> <local> | <base> <local> <incoming> <result>]")
@@ -70,7 +102,7 @@ fn main() {
     };
 
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(AppAssets::default())
         .run(move |cx| {
             gpui_kit::init(cx);
             appearance::init(cx);
