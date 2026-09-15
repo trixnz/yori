@@ -6,6 +6,10 @@ Never capture screenshots of the user's system, desktop, windows, or application
 including through tools, scripts, or subagents. When visual evidence is needed,
 ask the user to take and provide a screenshot instead.
 
+## Native UI
+
+For GPUI styling, layout, icon work, or screenshot feedback, read `docs/agents/native-ui.md`.
+
 ## Rust readability
 
 Write for human scanning, not minimum vertical space. Use blank lines as logical
