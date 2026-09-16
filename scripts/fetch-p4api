@@ -6,7 +6,8 @@ readonly version="2025.1.3042095"
 readonly target="${1:-$(rustc -vV | awk '/^host:/ { print $2 }')}"
 readonly destination_input="${2:-.cache/p4api/$target}"
 mkdir -p "$(dirname "$destination_input")"
-readonly destination="$(cd "$(dirname "$destination_input")" && pwd)/$(basename "$destination_input")"
+destination="$(cd "$(dirname "$destination_input")" && pwd)/$(basename "$destination_input")"
+readonly destination
 
 case "$target" in
   x86_64-unknown-linux-gnu)
