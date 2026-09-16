@@ -4,25 +4,27 @@ set -euo pipefail
 readonly release="r25.1"
 readonly version="2025.1.3042095"
 readonly target="${1:-$(rustc -vV | awk '/^host:/ { print $2 }')}"
-readonly destination="${2:-.cache/p4api/$target}"
+readonly destination_input="${2:-.cache/p4api/$target}"
+mkdir -p "$(dirname "$destination_input")"
+readonly destination="$(cd "$(dirname "$destination_input")" && pwd)/$(basename "$destination_input")"
 
 case "$target" in
   x86_64-unknown-linux-gnu)
-    archive="p4api-glibc2.3-openssl3.tgz"
+    archive="p4api-glibc2.3-openssl3.5.tgz"
     format="tar"
-    sha256="ee54ca7f0cd191b88a151e5c07a2e5cb53e4345da70335fd76bf2545efdeb821"
+    sha256="466352f49f585f514bfee13efcb927e93ea567bcc2dde200ef2c750d8555a0dc"
     url="https://ftp.perforce.com/perforce/$release/bin.linux26x86_64/$archive"
     ;;
   aarch64-unknown-linux-gnu)
-    archive="p4api-openssl3.tgz"
+    archive="p4api-openssl3.5.tgz"
     format="tar"
-    sha256="fd950aa1cfe4110e279508aba144a035cbc704a58d20acee08bfd11de6c60f4f"
+    sha256="3bba25b44917341ddbc2416bdc68ab84118d2dc37ca90edc5ec829064ade2b63"
     url="https://ftp.perforce.com/perforce/$release/bin.linux26aarch64/$archive"
     ;;
   x86_64-pc-windows-msvc)
-    archive="p4api_vs2022_dyn_openssl3.zip"
+    archive="p4api_vs2022_dyn_openssl3.5.zip"
     format="zip"
-    sha256="ad91d06dde00453a16dafd9601192c8e06a1c3477c12df5c54d6d0dfeba79f54"
+    sha256="b05db557dc5dd8d3b3e316632afb457bb1c4bdf4b696ffc14e5df78acc743a57"
     url="https://ftp.perforce.com/perforce/$release/bin.ntx64/$archive"
     ;;
   *)
@@ -40,7 +42,7 @@ fi
 cache="${destination}.download"
 mkdir -p "$(dirname "$destination")" "$cache"
 curl --fail --location --retry 3 --silent --show-error --output "$cache/$archive" "$url"
-printf '%s  %s\n' "$sha256" "$cache/$archive" | sha256sum --check
+printf '%s  %s\n' "$sha256" "$cache/$archive" | sha256sum --check >/dev/null
 
 rm -rf "$destination"
 mkdir -p "$destination"

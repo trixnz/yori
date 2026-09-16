@@ -17,13 +17,14 @@ the archive SHA-256 before extraction.
 
 | Target | P4API 2025.1 patch 3042095 artifact | SHA-256 |
 | --- | --- | --- |
-| `x86_64-unknown-linux-gnu` | `p4api-glibc2.3-openssl3.tgz` | `ee54ca7f0cd191b88a151e5c07a2e5cb53e4345da70335fd76bf2545efdeb821` |
-| `aarch64-unknown-linux-gnu` | `p4api-openssl3.tgz` | `fd950aa1cfe4110e279508aba144a035cbc704a58d20acee08bfd11de6c60f4f` |
-| `x86_64-pc-windows-msvc` | `p4api_vs2022_dyn_openssl3.zip` | `ad91d06dde00453a16dafd9601192c8e06a1c3477c12df5c54d6d0dfeba79f54` |
+| `x86_64-unknown-linux-gnu` | `p4api-glibc2.3-openssl3.5.tgz` | `466352f49f585f514bfee13efcb927e93ea567bcc2dde200ef2c750d8555a0dc` |
+| `aarch64-unknown-linux-gnu` | `p4api-openssl3.5.tgz` | `3bba25b44917341ddbc2416bdc68ab84118d2dc37ca90edc5ec829064ade2b63` |
+| `x86_64-pc-windows-msvc` | `p4api_vs2022_dyn_openssl3.5.zip` | `b05db557dc5dd8d3b3e316632afb457bb1c4bdf4b696ffc14e5df78acc743a57` |
 
-The Windows dynamic-runtime archive matches Rust's default MSVC `/MD` runtime.
-Linux and Windows builds link compatible OpenSSL 3 libraries supplied by the
-build environment. Nix pins both the P4API fetch and OpenSSL dependency.
+P4API and OpenSSL 3.5 are statically linked on every supported platform.
+`openssl-src` builds the pinned OpenSSL source during the Rust build, avoiding a
+runtime OpenSSL dependency or mismatch. The Windows P4API artifact's `dyn`
+marker refers to its MSVC `/MD` runtime compatibility, not OpenSSL linkage.
 
 Binary packages must ship the repository's `THIRD_PARTY_NOTICES.md` alongside
 the Yori license. The Nix package installs both under `share/doc/yori`.

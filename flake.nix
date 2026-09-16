@@ -17,13 +17,13 @@
         let
           artifact = {
             x86_64-linux = {
-              name = "p4api-glibc2.3-openssl3.tgz";
-              hash = "sha256-JouBcM8u6tG+nvv6euJ7LgR5ZprXmmrOGusaefcNhR0=";
+              name = "p4api-glibc2.3-openssl3.5.tgz";
+              hash = "sha256-F/9Qhf5cAiiDcy0RhhGNc2mT7LlB8VKpVxDL+SY6zcg=";
               platform = "bin.linux26x86_64";
             };
             aarch64-linux = {
-              name = "p4api-openssl3.tgz";
-              hash = "sha256-OmGjBbPvYBKxrnyvaj67J3QGxiKPgSc75g4I8l2TZRY=";
+              name = "p4api-openssl3.5.tgz";
+              hash = "sha256-CPwH5PPIWc8ACCWuN53gRcEWBmBF0xflVpEclOxhJJs=";
               platform = "bin.linux26aarch64";
             };
           }.${system};
@@ -66,9 +66,10 @@
 
           nativeBuildInputs = with pkgs; [
             makeWrapper
+            perl
             pkg-config
           ];
-          buildInputs = runtimeLibraries ++ [ pkgs.openssl ];
+          buildInputs = runtimeLibraries;
           P4API_ROOT = p4api;
 
           # CI runs the complete suite. The package repeats only the native
@@ -78,7 +79,7 @@
 
           postInstall = ''
             wrapProgram "$out/bin/yori" \
-              --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath (runtimeLibraries ++ [ pkgs.openssl ])}"
+              --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath runtimeLibraries}"
             install -Dm644 LICENSE "$out/share/doc/yori/LICENSE"
             install -Dm644 THIRD_PARTY_NOTICES.md "$out/share/doc/yori/THIRD_PARTY_NOTICES.md"
           '';
@@ -125,10 +126,11 @@
           ];
           shellAttributes = {
             nativeBuildInputs = with pkgs; [
+              perl
               pkg-config
             ];
-            buildInputs = runtimeLibraries ++ [ pkgs.openssl ];
-            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibraries ++ [ pkgs.openssl ]);
+            buildInputs = runtimeLibraries;
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibraries;
             P4API_ROOT = p4api;
           };
           kachePackage = kache.packages.${system}.kache;

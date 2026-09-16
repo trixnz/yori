@@ -20,7 +20,7 @@ missing_panics_doc = "allow"
 [dependencies]
 async-channel = "=2.5.0"
 cxx = "=1.0.194"
-openssl-sys = "=0.9.117"
 
 [build-dependencies]
 cxx-build = "=1.0.194"
+openssl-src = "=300.5.5"

@@ -72,8 +72,8 @@ fn main() {
         println!("cargo:rustc-link-lib=static=libclient");
         println!("cargo:rustc-link-lib=static=librpc");
         println!("cargo:rustc-link-lib=static=libsupp");
-        println!("cargo:rustc-link-lib=libssl");
-        println!("cargo:rustc-link-lib=libcrypto");
+
+        link_openssl();
 
         for library in [
             "advapi32", "bcrypt", "crypt32", "iphlpapi", "kernel32", "oldnames", "user32", "ws2_32",
@@ -84,10 +84,23 @@ fn main() {
         println!("cargo:rustc-link-lib=static=client");
         println!("cargo:rustc-link-lib=static=rpc");
         println!("cargo:rustc-link-lib=static=supp");
-        println!("cargo:rustc-link-lib=ssl");
-        println!("cargo:rustc-link-lib=crypto");
+
+        link_openssl();
+
         println!("cargo:rustc-link-lib=pthread");
         println!("cargo:rustc-link-lib=dl");
         println!("cargo:rustc-link-lib=rt");
+    }
+}
+
+fn link_openssl() {
+    let openssl = openssl_src::Build::new().build();
+    println!(
+        "cargo:rustc-link-search=native={}",
+        openssl.lib_dir().display()
+    );
+
+    for library in openssl.libs() {
+        println!("cargo:rustc-link-lib=static={library}");
     }
 }

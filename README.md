@@ -79,8 +79,9 @@ cargo build --release -p yori
 ```
 
 The fetch script downloads the pinned P4API for the host target and verifies its
-SHA-256 before extraction. OpenSSL 3 development libraries are also required.
-Nix provisions both dependencies automatically.
+SHA-256 before extraction. P4API and the pinned OpenSSL 3.5 source are statically
+linked; building requires Perl and the platform C/C++ toolchain, but no system
+OpenSSL development package. Nix provisions the required build tools.
 
 ### Nix
 
