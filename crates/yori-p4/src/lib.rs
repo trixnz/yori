@@ -42,13 +42,6 @@ fn cancellation_requested(state: &CancellationState) -> bool {
         || state.parent.as_deref().is_some_and(cancellation_requested)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the diagnostic capture entry point exists only for the native invalid-UTF-8 regression"
-    )
-)]
 #[expect(
     unsafe_code,
     reason = "cxx generates the unsafe FFI implementation behind this safe, audited bridge"
@@ -124,3 +117,14 @@ use bridge::ffi;
 #[cfg(test)]
 use ffi::RawField;
 use ffi::{RawMessage, RawRecord, RawResult};
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "this wrapper exists only for the native invalid-UTF-8 regression"
+    )
+)]
+fn capture_diagnostic_for_test(diagnostic: &[u8], result: &mut RawResult) {
+    ffi::capture_diagnostic(diagnostic, result);
+}

@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -371,14 +372,17 @@ std::unique_ptr<NativeClient> connect(
 }
 
 void capture_diagnostic(rust::Slice<const std::uint8_t> diagnostic, RawResult& result) {
-    RawMessage message;
-    message.severity = E_FAILED;
-    message.generic = 0;
-    message.text.reserve(diagnostic.size());
-    for (const auto byte : diagnostic) {
-        message.text.push_back(byte);
+    if (diagnostic.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        append_internal_error(result, "P4API diagnostic exceeded the supported length");
+        return;
     }
-    result.messages.push_back(std::move(message));
+
+    append_message(
+        result,
+        E_FAILED,
+        0,
+        reinterpret_cast<const char*>(diagnostic.data()),
+        static_cast<int>(diagnostic.size()));
 }
 
 } // namespace yori::p4

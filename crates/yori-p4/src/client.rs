@@ -434,7 +434,7 @@ mod tests {
         let diagnostic = b"invalid byte: \xff";
         let mut result = RawResult::default();
 
-        ffi::capture_diagnostic(diagnostic, &mut result);
+        crate::capture_diagnostic_for_test(diagnostic, &mut result);
 
         assert_eq!(result.messages[0].text, diagnostic);
         let error = Error::from_messages(&result.messages).unwrap();
