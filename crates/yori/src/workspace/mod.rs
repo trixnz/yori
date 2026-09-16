@@ -90,13 +90,14 @@ impl Workspace {
         let (disk_watch, monitor) = Self::start_monitor(window, cx);
         cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
-                this.watch_paths();
+                this.watch_paths(cx);
+                Self::reload_config(window, cx);
                 this.scan_disk(cx);
             }
         })
         .detach();
 
-        Self {
+        let mut workspace = Self {
             tabs: Tabs::default(),
             focus,
             tab_scroll: ScrollHandle::new(),
@@ -109,6 +110,15 @@ impl Workspace {
             watch_error: disk_watch.is_none().then(|| "Live file watching is unavailable. Disk is still checked on activation and before saving.".into()),
             disk_watch,
             monitor,
+        };
+        workspace.watch_paths(cx);
+
+        workspace
+    }
+
+    fn reload_config(window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(diagnostic) = crate::config::reload(cx) {
+            window.push_notification(Notification::error(diagnostic), cx);
         }
     }
 
@@ -229,7 +239,7 @@ impl Workspace {
         );
 
         self.disk_epoch += 1;
-        self.watch_paths();
+        self.watch_paths(cx);
         self.scan_disk(cx);
         cx.notify();
         Ok(())
@@ -300,7 +310,7 @@ impl Workspace {
         }
         self.tabs.remove(id);
         self.disk_epoch += 1;
-        self.watch_paths();
+        self.watch_paths(cx);
 
         self.focus_active(window, cx);
         cx.notify();

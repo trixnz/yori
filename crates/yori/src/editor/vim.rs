@@ -2,6 +2,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
+use gpui_kit::component::{WindowExt, notification::Notification};
 use gpui_kit::{App, Context, Global, KeyDownEvent, Window};
 use yori::vim::{EditTarget, Mode, Register};
 use yori_document::editing::{EditUpdate, TextSelection};
@@ -10,7 +11,6 @@ use super::{AlignedEditor, Selection, Side, completion::Placement};
 
 #[derive(Default)]
 pub(super) struct VimPreferences {
-    pub enabled: bool,
     register: Rc<RefCell<Register>>,
 }
 
@@ -25,7 +25,7 @@ pub(super) fn init(cx: &mut App) {
 
 impl AlignedEditor {
     pub(super) fn vim_enabled(cx: &App) -> bool {
-        cx.global::<VimPreferences>().enabled
+        crate::config::editor(cx).vim_keybindings
     }
 
     pub(super) fn accepts_text(&self, cx: &App) -> bool {
@@ -207,8 +207,15 @@ impl AlignedEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mut config = crate::config::editor(cx);
+        config.vim_keybindings = enabled;
+        if let Err(error) = crate::config::update_editor(config, cx) {
+            window.push_notification(Notification::error(error), cx);
+            return;
+        }
+
         self.cancel_vim();
-        cx.global_mut::<VimPreferences>().enabled = enabled;
+        self.vim_keybindings = enabled.into();
         if enabled && self.selection.is_none() {
             self.selection = Some(Selection {
                 side: Side::Right,

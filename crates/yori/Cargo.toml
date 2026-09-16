@@ -24,6 +24,8 @@ bitcode = "=0.6.9"
 atomicwrites = "=0.4.4"
 async-channel = "=2.5.0"
 notify = "=8.2.0"
+dirs = "=6.0.0"
+toml_edit = "=0.22.27"
 
 [dev-dependencies]
 gpui-kit = { version = "=0.6.1", features = ["test-support"] }

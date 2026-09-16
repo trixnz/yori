@@ -2,12 +2,13 @@
 
 mod appearance;
 mod comparison;
+mod config;
 mod editor;
 mod instance;
 mod storage;
 mod workspace;
 use comparison::ComparisonPaths;
-use gpui_kit::component::Root;
+use gpui_kit::component::{Root, WindowExt, notification::Notification};
 use gpui_kit::{AppContext, AssetSource, SharedString, WindowOptions};
 use std::{borrow::Cow, env, path::PathBuf, process};
 use workspace::Workspace;
@@ -106,6 +107,7 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
             appearance::init(cx);
+            config::init(cx);
             editor::init(cx);
             workspace::init(cx);
             cx.on_window_closed(|cx, _| {
@@ -125,6 +127,12 @@ fn main() {
                     })
                     .expect("failed to open yori window");
                 let workspace = workspace.expect("workspace initialized with its window");
+
+                let _ = window.update(cx, |_, window, cx| {
+                    if let Some(diagnostic) = config::diagnostic(cx) {
+                        window.push_notification(Notification::error(diagnostic), cx);
+                    }
+                });
 
                 // Root is installed now, so error notifications and editor focus
                 // are available before handling either initial or forwarded files.

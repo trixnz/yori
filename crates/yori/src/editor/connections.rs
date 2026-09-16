@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::{ActiveTheme, WindowExt, notification::Notification};
 use gpui_kit::{
     Bounds, Context, Div, Hsla, InteractiveElement, MouseButton, ParentElement, PathBuilder,
     Pixels, StatefulInteractiveElement, Styled, Window, canvas, div, point, px,
@@ -56,6 +56,13 @@ impl AlignedEditor {
         cx: &mut Context<Self>,
     ) {
         if self.merge.is_some() {
+            return;
+        }
+
+        let mut config = crate::config::editor(cx);
+        config.show_change_connections = enabled;
+        if let Err(error) = crate::config::update_editor(config, cx) {
+            window.push_notification(Notification::error(error), cx);
             return;
         }
 

@@ -210,7 +210,7 @@ impl AlignedEditor {
             .small()
             .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
                 let whitespace_editor = editor.clone();
-                let whitespace_item = PopupMenuItem::new("Show whitespace (this comparison)")
+                let whitespace_item = PopupMenuItem::new("Show whitespace (all comparisons)")
                     .checked(whitespace)
                     .on_click(move |_, window, cx| {
                         let _ = whitespace_editor.update(cx, |editor, cx| {
@@ -220,7 +220,7 @@ impl AlignedEditor {
 
                 let connections_editor = editor.clone();
                 let connections_item =
-                    PopupMenuItem::new("Show change connections (this comparison)")
+                    PopupMenuItem::new("Show change connections (all comparisons)")
                         .checked(connections)
                         .on_click(move |_, window, cx| {
                             let _ = connections_editor.update(cx, |editor, cx| {
