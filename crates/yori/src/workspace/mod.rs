@@ -188,6 +188,7 @@ impl Workspace {
                 );
                 let editable = diff.local.editable();
                 let saveable = diff.local.save_destination().is_some();
+
                 self.deactivate(cx);
 
                 cx.new(|cx| AlignedEditor::new_diff(left, right, editable, saveable, window, cx))
