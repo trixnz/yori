@@ -152,6 +152,7 @@ pub struct WorkspaceMapping {
     pub depot_path: String,
     pub client_path: String,
     pub local_path: PathBuf,
+    pub is_exclusion: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

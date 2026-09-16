@@ -3,11 +3,18 @@
 `yori-p4` is Yori's safe asynchronous boundary around Perforce's official C++
 P4API. It does not invoke or require the `p4` executable.
 
-A dedicated worker creates, uses, and destroys the thread-affine `ClientApi`.
+A dedicated worker enters the P4API thread runtime, creates and uses the
+thread-affine `ClientApi`, destroys the client, and then leaves the thread
+runtime. Process-wide P4API libraries are reference-counted around those worker
+lifetimes. Native entry points are serialized because P4API lifecycle state is
+process-global; none of this work runs on the UI thread. Initialization and
+cleanup failures are returned as typed actionable errors.
+
 Calls use tagged output and ambient configuration from the selected working
 directory, including `P4CONFIG`, ticket, and trust files. The public API covers
 client context, pending/default and submitted changelists, opened files,
-descriptions, have revisions, workspace mappings, and depot content.
+descriptions, have revisions, inclusive and exclusion workspace mappings, and
+depot content.
 
 ## Native artifacts
 

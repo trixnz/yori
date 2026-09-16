@@ -68,7 +68,7 @@ enum WorkerRequest {
         cancellation: Arc<crate::CancellationState>,
         response: async_channel::Sender<RawResult>,
     },
-    Shutdown(Option<async_channel::Sender<()>>),
+    Shutdown(Option<async_channel::Sender<Result<()>>>),
 }
 
 impl P4Client {
@@ -84,7 +84,7 @@ impl P4Client {
 
         thread::Builder::new()
             .name("yori-p4".to_owned())
-            .spawn(move || worker_main(&cwd, incoming, initialized))
+            .spawn(move || worker_main(&cwd, &incoming, initialized))
             .map_err(|error| Error::worker_start_failed(&error))?;
 
         initialization
@@ -218,7 +218,10 @@ impl P4Client {
             .requests
             .send(WorkerRequest::Shutdown(Some(completed)))
             .map_err(|_| Error::worker_stopped())?;
-        completion.recv().await.map_err(|_| Error::worker_stopped())
+        completion
+            .recv()
+            .await
+            .map_err(|_| Error::worker_stopped())?
     }
 
     async fn execute(
@@ -260,28 +263,62 @@ impl P4Client {
 
 fn worker_main(
     cwd: &str,
-    requests: mpsc::Receiver<WorkerRequest>,
+    requests: &mpsc::Receiver<WorkerRequest>,
     initialized: async_channel::Sender<Result<()>>,
 ) {
+    let mut thread_initialization = RawResult::default();
+    let native_thread = ffi::start_thread(&mut thread_initialization);
+    let thread_ready = native_thread.as_ref().is_some_and(ffi::NativeThread::ready);
+    let thread_result = parse::lifecycle_result(&thread_initialization, "thread initialization")
+        .and_then(|()| {
+            if thread_ready {
+                Ok(())
+            } else {
+                Err(Error::lifecycle(
+                    "thread initialization",
+                    &thread_initialization.messages,
+                ))
+            }
+        });
+
+    if let Err(error) = thread_result {
+        let _ = initialized.try_send(Err(error));
+        return;
+    }
+
     let mut initialization = RawResult::default();
-    let mut client = ffi::connect(cwd, "", &mut initialization);
+    let client = ffi::connect(cwd, "", &mut initialization);
     let connected = client.as_ref().is_some_and(ffi::NativeClient::connected);
     let initialization_result = parse::check_result(&initialization).and_then(|()| {
         if connected {
             Ok(())
         } else {
-            Err(Error::worker_stopped())
+            Err(Error::lifecycle(
+                "client initialization",
+                &initialization.messages,
+            ))
         }
     });
-    let can_run = initialization_result.is_ok();
-    let _ = initialized.try_send(initialization_result);
-    drop(initialized);
 
-    if !can_run {
+    if let Err(mut error) = initialization_result {
+        if let Err(cleanup) = shutdown_native(client, native_thread) {
+            error = error.with_cleanup_failure(&cleanup);
+        }
+
+        let _ = initialized.try_send(Err(error));
         return;
     }
 
-    for request in requests {
+    let mut client = client;
+    let native_thread = native_thread;
+    let _ = initialized.try_send(Ok(()));
+    drop(initialized);
+
+    let completion = loop {
+        let Ok(request) = requests.recv() else {
+            break None;
+        };
+
         match request {
             WorkerRequest::Run {
                 command,
@@ -299,17 +336,36 @@ fn worker_main(
 
                 let _ = response.try_send(result);
             }
-            WorkerRequest::Shutdown(completed) => {
-                drop(client);
-
-                if let Some(completed) = completed {
-                    let _ = completed.try_send(());
-                }
-
-                return;
-            }
+            WorkerRequest::Shutdown(completed) => break completed,
         }
+    };
+
+    let cleanup_result = shutdown_native(client, native_thread);
+    if let Some(completed) = completion {
+        let _ = completed.try_send(cleanup_result);
     }
+}
+
+fn shutdown_native(
+    mut client: cxx::UniquePtr<ffi::NativeClient>,
+    mut native_thread: cxx::UniquePtr<ffi::NativeThread>,
+) -> Result<()> {
+    let mut client_shutdown = RawResult::default();
+    if let Some(client) = client.as_mut() {
+        client.close(&mut client_shutdown);
+    }
+    let client_result = parse::lifecycle_result(&client_shutdown, "client shutdown");
+
+    drop(client);
+
+    let mut thread_shutdown = RawResult::default();
+    if let Some(native_thread) = native_thread.as_mut() {
+        native_thread.shutdown(&mut thread_shutdown);
+    }
+    let thread_result = parse::lifecycle_result(&thread_shutdown, "thread shutdown");
+
+    drop(native_thread);
+    client_result.and(thread_result)
 }
 
 #[cfg(test)]
@@ -335,6 +391,7 @@ mod tests {
 
     #[test]
     fn native_bridge_converts_connection_failures_without_a_server() {
+        let native_thread = start_native_thread();
         let mut result = RawResult::default();
         let cancellation = crate::CancellationState::default();
         let mut client = ffi::connect(".", "127.0.0.1:1", &mut result);
@@ -347,5 +404,53 @@ mod tests {
 
         let error = parse::check_result(&result).unwrap_err();
         assert_eq!(error.kind(), crate::ErrorKind::Connectivity);
+        shutdown_native(client, native_thread).unwrap();
+    }
+
+    #[test]
+    fn native_bridge_rejects_thread_cleanup_until_clients_are_destroyed() {
+        let mut native_thread = start_native_thread();
+        let mut connection = RawResult::default();
+        let mut client = ffi::connect(".", "127.0.0.1:1", &mut connection);
+        assert!(client.as_ref().is_some());
+
+        let mut premature = RawResult::default();
+        native_thread.pin_mut().shutdown(&mut premature);
+        let error = parse::lifecycle_result(&premature, "thread shutdown").unwrap_err();
+        assert_eq!(error.kind(), crate::ErrorKind::Lifecycle);
+
+        let mut client_shutdown = RawResult::default();
+        client.pin_mut().close(&mut client_shutdown);
+        parse::lifecycle_result(&client_shutdown, "client shutdown").unwrap();
+        drop(client);
+
+        let mut thread_shutdown = RawResult::default();
+        native_thread.pin_mut().shutdown(&mut thread_shutdown);
+        parse::lifecycle_result(&thread_shutdown, "thread shutdown").unwrap();
+    }
+
+    #[test]
+    fn native_diagnostics_replace_invalid_utf8_without_losing_bytes() {
+        let diagnostic = b"invalid byte: \xff";
+        let mut result = RawResult::default();
+
+        ffi::capture_diagnostic(diagnostic, &mut result);
+
+        assert_eq!(result.messages[0].text, diagnostic);
+        let error = Error::from_messages(&result.messages).unwrap();
+        assert_eq!(error.kind(), crate::ErrorKind::Command);
+        assert_eq!(
+            error.to_string(),
+            "invalid byte: �; check the Perforce command details and retry"
+        );
+    }
+
+    fn start_native_thread() -> cxx::UniquePtr<ffi::NativeThread> {
+        let mut result = RawResult::default();
+        let native_thread = ffi::start_thread(&mut result);
+
+        parse::lifecycle_result(&result, "thread initialization").unwrap();
+        assert!(native_thread.as_ref().is_some_and(ffi::NativeThread::ready));
+        native_thread
     }
 }

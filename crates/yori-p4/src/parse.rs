@@ -59,10 +59,32 @@ impl<'a> Record<'a> {
     fn indexed_text(&self, name: &str, index: usize) -> Option<String> {
         self.text(&format!("{name}{index}"))
     }
+
+    fn indexed_number<T>(&self, name: &str, index: usize) -> Result<Option<T>>
+    where
+        T: std::str::FromStr,
+    {
+        self.number(&format!("{name}{index}"))
+    }
+
+    fn required_indexed_number<T>(&self, name: &str, index: usize) -> Result<T>
+    where
+        T: std::str::FromStr,
+    {
+        self.required_number(&format!("{name}{index}"))
+    }
 }
 
 pub(crate) fn check_result(result: &RawResult) -> Result<()> {
     Error::from_messages(&result.messages).map_or(Ok(()), Err)
+}
+
+pub(crate) fn lifecycle_result(result: &RawResult, phase: &str) -> Result<()> {
+    if result.messages.iter().any(|message| message.severity >= 3) {
+        Err(Error::lifecycle(phase, &result.messages))
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn client_info(result: &RawResult) -> Result<ClientInfo> {
@@ -188,11 +210,8 @@ pub(crate) fn changelist_description(result: &RawResult) -> Result<ChangelistDes
         let Some(depot_path) = record.indexed_text("depotFile", index) else {
             break;
         };
-        let revision = record
-            .indexed_text("rev", index)
-            .ok_or_else(|| Error::invalid_response("described file omitted its revision"))?
-            .parse()
-            .map_err(|_| Error::invalid_response("described file has an invalid revision"))?;
+
+        let revision = record.required_indexed_number("rev", index)?;
         let action = record
             .indexed_text("action", index)
             .ok_or_else(|| Error::invalid_response("described file omitted its action"))?;
@@ -202,28 +221,12 @@ pub(crate) fn changelist_description(result: &RawResult) -> Result<ChangelistDes
             revision,
             action: FileAction::from(action.as_str()),
             file_type: record.indexed_text("type", index),
-            file_size: parse_indexed_number(&record, "fileSize", index)?,
+            file_size: record.indexed_number("fileSize", index)?,
             digest: record.indexed_text("digest", index),
         });
     }
 
     Ok(ChangelistDescription { summary, files })
-}
-
-fn parse_indexed_number<T>(record: &Record<'_>, name: &str, index: usize) -> Result<Option<T>>
-where
-    T: std::str::FromStr,
-{
-    record
-        .indexed_text(name, index)
-        .map(|value| {
-            value.parse().map_err(|_| {
-                Error::invalid_response(format!(
-                    "Perforce returned an invalid {name}{index} value: {value}"
-                ))
-            })
-        })
-        .transpose()
 }
 
 pub(crate) fn have_revisions(result: &RawResult) -> Result<Vec<HaveRevision>> {
@@ -246,10 +249,9 @@ pub(crate) fn have_revisions(result: &RawResult) -> Result<Vec<HaveRevision>> {
 
 pub(crate) fn workspace_mappings(result: &RawResult) -> Result<Vec<WorkspaceMapping>> {
     check_result(result)?;
-    result
+    let mappings = result
         .records
         .iter()
-        .filter(|raw| Record::new(raw).text("unmap").is_none())
         .map(|raw| {
             let record = Record::new(raw);
 
@@ -257,9 +259,16 @@ pub(crate) fn workspace_mappings(result: &RawResult) -> Result<Vec<WorkspaceMapp
                 depot_path: record.required_text("depotFile")?,
                 client_path: record.required_text("clientFile")?,
                 local_path: PathBuf::from(record.required_text("path")?),
+                is_exclusion: record.fields.contains_key("unmap"),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+
+    if mappings.iter().all(|mapping| mapping.is_exclusion) {
+        return Err(Error::no_effective_mapping());
+    }
+
+    Ok(mappings)
 }
 
 pub(crate) fn depot_content(result: &RawResult) -> Result<Vec<u8>> {
@@ -411,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_have_and_where_and_ignores_unmapped_where_records() {
+    fn parses_have_and_preserves_inclusive_and_exclusion_mappings() {
         let have = result(vec![record(&[
             ("depotFile", "//depot/a.txt"),
             ("clientFile", "//client/a.txt"),
@@ -433,7 +442,34 @@ mod tests {
         ]);
 
         assert_eq!(have_revisions(&have).unwrap()[0].revision, 3);
-        assert_eq!(workspace_mappings(&where_result).unwrap().len(), 1);
+
+        let mappings = workspace_mappings(&where_result).unwrap();
+        assert_eq!(mappings.len(), 2);
+        assert!(!mappings[0].is_exclusion);
+        assert!(mappings[1].is_exclusion);
+    }
+
+    #[test]
+    fn exclusion_only_mapping_is_actionable() {
+        let excluded = result(vec![record(&[
+            ("depotFile", "//depot/excluded/file.txt"),
+            ("clientFile", "//client/excluded/file.txt"),
+            ("path", "/work/excluded/file.txt"),
+            ("unmap", ""),
+        ])]);
+
+        let error = workspace_mappings(&excluded).unwrap_err();
+
+        assert_eq!(error.kind(), crate::ErrorKind::Mapping);
+        assert!(error.to_string().contains("exclusion entries"));
+    }
+
+    #[test]
+    fn depot_content_preserves_arbitrary_bytes() {
+        let mut result = result(Vec::new());
+        result.output = vec![0x00, 0x7f, 0x80, 0xff];
+
+        assert_eq!(depot_content(&result).unwrap(), result.output);
     }
 
     #[test]
@@ -449,7 +485,7 @@ mod tests {
             messages: vec![RawMessage {
                 severity: 3,
                 generic: 0x26,
-                text: "Connect to server failed".to_owned(),
+                text: b"Connect to server failed".to_vec(),
             }],
             output: Vec::new(),
         };

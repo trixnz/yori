@@ -42,6 +42,13 @@ fn cancellation_requested(state: &CancellationState) -> bool {
         || state.parent.as_deref().is_some_and(cancellation_requested)
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the diagnostic capture entry point exists only for the native invalid-UTF-8 regression"
+    )
+)]
 #[expect(
     unsafe_code,
     reason = "cxx generates the unsafe FFI implementation behind this safe, audited bridge"
@@ -66,7 +73,7 @@ mod bridge {
         struct RawMessage {
             severity: i32,
             generic: i32,
-            text: String,
+            text: Vec<u8>,
         }
 
         #[derive(Clone, Debug, Default)]
@@ -85,6 +92,12 @@ mod bridge {
         unsafe extern "C++" {
             include!("p4_bridge.h");
 
+            type NativeThread;
+
+            fn start_thread(result: &mut RawResult) -> UniquePtr<NativeThread>;
+            fn ready(self: &NativeThread) -> bool;
+            fn shutdown(self: Pin<&mut NativeThread>, result: &mut RawResult);
+
             type NativeClient;
 
             fn connect(
@@ -93,6 +106,7 @@ mod bridge {
                 result: &mut RawResult,
             ) -> UniquePtr<NativeClient>;
             fn connected(self: &NativeClient) -> bool;
+            fn close(self: Pin<&mut NativeClient>, result: &mut RawResult);
             fn run(
                 self: Pin<&mut NativeClient>,
                 command: &str,
@@ -100,6 +114,8 @@ mod bridge {
                 cancellation: &CancellationState,
                 result: &mut RawResult,
             );
+
+            fn capture_diagnostic(diagnostic: &[u8], result: &mut RawResult);
         }
     }
 }

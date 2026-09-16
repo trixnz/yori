@@ -2,14 +2,25 @@
 #include "yori-p4/src/lib.rs.h"
 
 #include <p4/clientapi.h>
+#include <p4/p4libs.h>
 
 #include <cstdint>
+#include <cstring>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace yori::p4 {
 namespace {
+
+constexpr int kLibraryFlags = P4LIBRARIES_INIT_ALL;
+
+std::mutex libraries_mutex;
+std::size_t library_users = 0;
+thread_local std::size_t active_threads = 0;
+thread_local std::size_t active_clients = 0;
 
 rust::String rust_string(const char* data, int length) {
     if (data == nullptr || length <= 0) {
@@ -19,23 +30,88 @@ rust::String rust_string(const char* data, int length) {
     return rust::String(data, static_cast<std::size_t>(length));
 }
 
+void append_bytes(rust::Vec<std::uint8_t>& destination, const char* data, int length) {
+    if (data == nullptr || length <= 0) {
+        return;
+    }
+
+    const auto* begin = reinterpret_cast<const std::uint8_t*>(data);
+    destination.reserve(destination.size() + static_cast<std::size_t>(length));
+    for (int index = 0; index < length; ++index) {
+        destination.push_back(begin[index]);
+    }
+}
+
 void append_message(RawResult& result, int severity, int generic, const char* text, int length) {
     RawMessage message;
     message.severity = severity;
     message.generic = generic;
-    message.text = rust_string(text, length);
+    append_bytes(message.text, text, length);
     result.messages.push_back(std::move(message));
 }
 
-void append_error(RawResult& result, Error* error) {
+void append_internal_error(RawResult& result, const char* text) {
+    append_message(
+        result,
+        E_FAILED,
+        0,
+        text,
+        static_cast<int>(std::strlen(text)));
+}
+
+void append_error(RawResult* result, Error* error) {
+    if (result == nullptr || !error->Test()) {
+        return;
+    }
+
     StrBuf formatted;
     error->Fmt(&formatted, EF_PLAIN);
     append_message(
-        result,
+        *result,
         error->GetSeverity(),
         error->GetGeneric(),
         formatted.Text(),
         formatted.Length());
+}
+
+bool acquire_libraries(RawResult& result) {
+    const std::scoped_lock lock(libraries_mutex);
+
+    if (library_users == 0) {
+        Error error;
+        P4Libraries::Initialize(kLibraryFlags, &error);
+        if (error.Test()) {
+            append_error(&result, &error);
+
+            Error shutdown_error;
+            P4Libraries::Shutdown(kLibraryFlags, &shutdown_error);
+            append_error(&result, &shutdown_error);
+            return false;
+        }
+    }
+
+    ++library_users;
+    return true;
+}
+
+void release_libraries(RawResult* result) {
+    const std::scoped_lock lock(libraries_mutex);
+
+    if (library_users == 0) {
+        if (result != nullptr) {
+            append_internal_error(*result, "P4API library shutdown was not paired with initialization");
+        }
+        return;
+    }
+
+    --library_users;
+    if (library_users != 0) {
+        return;
+    }
+
+    Error error;
+    P4Libraries::Shutdown(kLibraryFlags, &error);
+    append_error(result, &error);
 }
 
 class CancellationKeepAlive final : public KeepAlive {
@@ -56,11 +132,11 @@ public:
     explicit CaptureClientUser(RawResult& result) : result_(result) {}
 
     void HandleError(Error* error) override {
-        append_error(result_, error);
+        append_error(&result_, error);
     }
 
     void Message(Error* error) override {
-        append_error(result_, error);
+        append_error(&result_, error);
     }
 
     void OutputError(const char* text) override {
@@ -89,14 +165,7 @@ public:
         for (int index = 0; variables->GetVar(index, name, value); ++index) {
             RawField field;
             field.name = rust_string(name.Text(), name.Length());
-
-            const auto length = static_cast<std::size_t>(value.Length());
-            const auto* begin = reinterpret_cast<const std::uint8_t*>(value.Text());
-            field.value.reserve(length);
-            for (std::size_t offset = 0; offset < length; ++offset) {
-                field.value.push_back(begin[offset]);
-            }
-
+            append_bytes(field.value, value.Text(), value.Length());
             record.fields.push_back(std::move(field));
         }
 
@@ -105,21 +174,89 @@ public:
 
 private:
     void append_output(const char* data, int length) {
-        if (data == nullptr || length <= 0) {
-            return;
-        }
-
-        const auto* begin = reinterpret_cast<const std::uint8_t*>(data);
-        result_.output.reserve(result_.output.size() + static_cast<std::size_t>(length));
-        for (int index = 0; index < length; ++index) {
-            result_.output.push_back(begin[index]);
-        }
+        append_bytes(result_.output, data, length);
     }
 
     RawResult& result_;
 };
 
 } // namespace
+
+class NativeThread::Impl {
+public:
+    bool libraries_initialized = false;
+    bool thread_initialized = false;
+};
+
+NativeThread::NativeThread(RawResult& result) : impl_(std::make_unique<Impl>()) {
+    if (!acquire_libraries(result)) {
+        return;
+    }
+    impl_->libraries_initialized = true;
+
+    Error error;
+    {
+        const std::scoped_lock lock(libraries_mutex);
+        P4Libraries::InitializeThread(kLibraryFlags, &error);
+    }
+    if (error.Test()) {
+        append_error(&result, &error);
+
+        Error shutdown_error;
+        {
+            const std::scoped_lock lock(libraries_mutex);
+            P4Libraries::ShutdownThread(kLibraryFlags, &shutdown_error);
+        }
+        append_error(&result, &shutdown_error);
+        release_libraries(&result);
+        impl_->libraries_initialized = false;
+        return;
+    }
+
+    impl_->thread_initialized = true;
+    ++active_threads;
+}
+
+NativeThread::~NativeThread() {
+    shutdown(nullptr);
+}
+
+bool NativeThread::ready() const {
+    return impl_->libraries_initialized && impl_->thread_initialized;
+}
+
+void NativeThread::shutdown(RawResult& result) {
+    shutdown(&result);
+}
+
+void NativeThread::shutdown(RawResult* result) {
+    if (!impl_->libraries_initialized) {
+        return;
+    }
+
+    if (active_clients != 0) {
+        if (result != nullptr) {
+            append_internal_error(
+                *result,
+                "P4API thread shutdown requires all native clients to be destroyed first");
+        }
+        return;
+    }
+
+    if (impl_->thread_initialized) {
+        Error error;
+        {
+            const std::scoped_lock lock(libraries_mutex);
+            P4Libraries::ShutdownThread(kLibraryFlags, &error);
+        }
+        append_error(result, &error);
+        impl_->thread_initialized = false;
+        --active_threads;
+    }
+
+    release_libraries(result);
+    impl_->libraries_initialized = false;
+}
 
 class NativeClient::Impl {
 public:
@@ -128,7 +265,16 @@ public:
 };
 
 NativeClient::NativeClient(rust::Str cwd, rust::Str port_override, RawResult& result)
-    : impl_(std::make_unique<Impl>()) {
+    : impl_(nullptr) {
+    if (active_threads == 0) {
+        append_internal_error(result, "P4API client creation requires worker-thread initialization");
+        return;
+    }
+
+    const std::scoped_lock lock(libraries_mutex);
+    impl_ = std::make_unique<Impl>();
+    ++active_clients;
+
     const std::string working_directory(cwd.data(), cwd.size());
     impl_->client.SetProtocol("tag", "");
     impl_->client.SetCwd(working_directory.c_str());
@@ -141,7 +287,7 @@ NativeClient::NativeClient(rust::Str cwd, rust::Str port_override, RawResult& re
     Error error;
     impl_->client.Init(&error);
     if (error.Test()) {
-        append_error(result, &error);
+        append_error(&result, &error);
         return;
     }
 
@@ -149,19 +295,40 @@ NativeClient::NativeClient(rust::Str cwd, rust::Str port_override, RawResult& re
 }
 
 NativeClient::~NativeClient() {
-    if (!impl_->initialized) {
+    if (impl_ == nullptr) {
         return;
     }
 
+    {
+        const std::scoped_lock lock(libraries_mutex);
+        if (impl_->initialized) {
+            Error error;
+            impl_->client.Final(&error);
+            impl_->initialized = false;
+        }
+        impl_.reset();
+    }
+
+    --active_clients;
+}
+
+void NativeClient::close(RawResult& result) {
+    if (impl_ == nullptr || !impl_->initialized) {
+        return;
+    }
+
+    const std::scoped_lock lock(libraries_mutex);
     Error error;
     impl_->client.Final(&error);
+    impl_->initialized = false;
+    append_error(&result, &error);
 }
 
 void NativeClient::run(rust::Str command,
                        rust::Slice<const rust::String> arguments,
                        const CancellationState& cancellation,
                        RawResult& result) {
-    if (!impl_->initialized) {
+    if (impl_ == nullptr || !impl_->initialized) {
         return;
     }
 
@@ -181,6 +348,7 @@ void NativeClient::run(rust::Str command,
     CancellationKeepAlive keep_alive(cancellation);
     const std::string command_name(command.data(), command.size());
 
+    const std::scoped_lock lock(libraries_mutex);
     impl_->client.SetBreak(&keep_alive);
     impl_->client.SetArgv(
         static_cast<int>(argument_pointers.size()),
@@ -190,12 +358,27 @@ void NativeClient::run(rust::Str command,
 }
 
 bool NativeClient::connected() const {
-    return impl_->initialized;
+    return impl_ != nullptr && impl_->initialized;
+}
+
+std::unique_ptr<NativeThread> start_thread(RawResult& result) {
+    return std::make_unique<NativeThread>(result);
 }
 
 std::unique_ptr<NativeClient> connect(
     rust::Str cwd, rust::Str port_override, RawResult& result) {
     return std::make_unique<NativeClient>(cwd, port_override, result);
+}
+
+void capture_diagnostic(rust::Slice<const std::uint8_t> diagnostic, RawResult& result) {
+    RawMessage message;
+    message.severity = E_FAILED;
+    message.generic = 0;
+    message.text.reserve(diagnostic.size());
+    for (const auto byte : diagnostic) {
+        message.text.push_back(byte);
+    }
+    result.messages.push_back(std::move(message));
 }
 
 } // namespace yori::p4

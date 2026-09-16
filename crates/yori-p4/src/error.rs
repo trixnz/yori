@@ -1,4 +1,8 @@
-use std::{fmt, path::Path};
+use std::{
+    borrow::Cow,
+    fmt::{self, Write as _},
+    path::Path,
+};
 
 use crate::RawMessage;
 
@@ -18,6 +22,7 @@ pub enum ErrorKind {
     Cancelled,
     WorkerStopped,
     InvalidResponse,
+    Lifecycle,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,9 +83,38 @@ impl Error {
         }
     }
 
+    pub(crate) fn no_effective_mapping() -> Self {
+        Self {
+            kind: ErrorKind::Mapping,
+            message:
+                "the requested path has no effective mapping in the active Perforce client view"
+                    .to_owned(),
+            remedy: Some("check inclusion and exclusion entries in the active P4CLIENT view"),
+        }
+    }
+
+    pub(crate) fn lifecycle(phase: &str, messages: &[RawMessage]) -> Self {
+        let detail = messages
+            .iter()
+            .find(|message| message.severity >= 3)
+            .map_or(Cow::Borrowed("P4API returned no diagnostic"), message_text);
+
+        Self {
+            kind: ErrorKind::Lifecycle,
+            message: format!("Perforce native {phase} failed: {}", detail.trim()),
+            remedy: Some("restart Yori; if the failure persists, reinstall the application"),
+        }
+    }
+
+    pub(crate) fn with_cleanup_failure(mut self, cleanup: &Self) -> Self {
+        let _ = write!(self.message, "; cleanup also failed: {}", cleanup.message);
+        self
+    }
+
     pub(crate) fn from_messages(messages: &[RawMessage]) -> Option<Self> {
         let message = messages.iter().find(|message| message.severity >= 3)?;
-        let normalized = message.text.to_ascii_lowercase();
+        let text = message_text(message);
+        let normalized = text.to_ascii_lowercase();
         let (kind, remedy) = if normalized.contains("ssl")
             && (normalized.contains("trust") || normalized.contains("fingerprint"))
         {
@@ -129,10 +163,14 @@ impl Error {
 
         Some(Self {
             kind,
-            message: message.text.trim().to_owned(),
+            message: text.trim().to_owned(),
             remedy,
         })
     }
+}
+
+fn message_text(message: &RawMessage) -> Cow<'_, str> {
+    String::from_utf8_lossy(&message.text)
 }
 
 impl fmt::Display for Error {
@@ -159,7 +197,7 @@ mod tests {
         RawMessage {
             severity: 3,
             generic,
-            text: text.to_owned(),
+            text: text.as_bytes().to_vec(),
         }
     }
 
@@ -216,7 +254,7 @@ mod tests {
         let message = RawMessage {
             severity: 1,
             generic: 0,
-            text: "no files opened".to_owned(),
+            text: b"no files opened".to_vec(),
         };
 
         assert!(Error::from_messages(&[message]).is_none());
