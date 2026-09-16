@@ -129,6 +129,7 @@ fn watcher_handles_direct_edits_atomic_replacement_deletion_and_recreation() {
     fs::write(&path, "[editor]\nshow_whitespace = true\n").unwrap();
     wait_for_change(&events);
     configuration.reload();
+
     assert!(configuration.editor.show_whitespace);
 
     drain(&events);
@@ -143,6 +144,7 @@ fn watcher_handles_direct_edits_atomic_replacement_deletion_and_recreation() {
     .unwrap();
     wait_for_change(&events);
     configuration.reload();
+
     assert!(configuration.editor.vim_keybindings);
     assert!(configuration.editor.show_change_connections);
 
@@ -150,12 +152,14 @@ fn watcher_handles_direct_edits_atomic_replacement_deletion_and_recreation() {
     fs::remove_file(&path).unwrap();
     wait_for_change(&events);
     configuration.reload();
+
     assert_eq!(configuration.editor, EditorConfig::default());
 
     drain(&events);
     fs::write(&path, "[editor]\nshow_whitespace = true\n").unwrap();
     wait_for_change(&events);
     configuration.reload();
+
     assert!(configuration.editor.show_whitespace);
 }
 
