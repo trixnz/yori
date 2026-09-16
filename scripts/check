@@ -3,6 +3,12 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+if [[ -z "${P4API_ROOT:-}" ]]; then
+  host_target="$(rustc -vV | awk '/^host:/ { print $2 }')"
+  P4API_ROOT="$(./scripts/fetch-p4api "$host_target")"
+  export P4API_ROOT
+fi
+
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked

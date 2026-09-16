@@ -32,6 +32,7 @@ jobs:
           sudo apt-get install --no-install-recommends --yes \
             libfontconfig1-dev \
             libfreetype6-dev \
+            libssl-dev \
             libvulkan-dev \
             libwayland-dev \
             libxcb1-dev \
@@ -63,6 +64,14 @@ jobs:
         with:
           cache-on-failure: false
           cache-save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Provision P4API
+        shell: bash
+        run: |
+          ./scripts/fetch-p4api x86_64-pc-windows-msvc .cache/p4api/x86_64-pc-windows-msvc
+          echo "P4API_ROOT=$PWD/.cache/p4api/x86_64-pc-windows-msvc" >> "$GITHUB_ENV"
+          echo "OPENSSL_INCLUDE_DIR=C:\\Program Files\\OpenSSL\\include" >> "$GITHUB_ENV"
+          echo "OPENSSL_LIB_DIR=C:\\Program Files\\OpenSSL\\lib\\VC\\x64\\MD" >> "$GITHUB_ENV"
 
       - name: Run checks
         run: |
