@@ -27,7 +27,7 @@ use interprocess::{
     },
 };
 
-use crate::comparison::ComparisonPaths;
+use crate::comparison::Comparison;
 
 const INSTANCE_NAME: &str = "io.github.trixnz.yori.instance.v1";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -54,7 +54,7 @@ enum HandoffError {
 }
 
 pub(super) struct OpenRequest {
-    pub comparisons: Vec<ComparisonPaths>,
+    pub comparisons: Vec<Comparison>,
     received: Instant,
     reply: mpsc::SyncSender<Result<(), String>>,
 }
@@ -101,18 +101,18 @@ impl Drop for ConnectionPermit {
 impl Instance {
     /// Return the primary instance, or `None` after a successful handoff. Failure
     /// never falls back to a second window: a timed-out request may have started.
-    pub fn start(comparisons: &[ComparisonPaths]) -> Result<Option<Self>, String> {
+    pub fn start(comparisons: &[Comparison]) -> Result<Option<Self>, String> {
         let name = std::env::var("YORI_INSTANCE_NAME").unwrap_or_else(|_| INSTANCE_NAME.into());
         Self::establish(&name, comparisons)
     }
 
-    fn establish(name: &str, comparisons: &[ComparisonPaths]) -> Result<Option<Self>, String> {
+    fn establish(name: &str, comparisons: &[Comparison]) -> Result<Option<Self>, String> {
         Self::establish_with_before_handoff(name, comparisons, || {})
     }
 
     fn establish_with_before_handoff(
         name: &str,
-        comparisons: &[ComparisonPaths],
+        comparisons: &[Comparison],
         mut before_handoff: impl FnMut(),
     ) -> Result<Option<Self>, String> {
         let mut validation = Vec::new();
@@ -181,7 +181,7 @@ impl Instance {
         }))
     }
 
-    fn handoff(name: &str, comparisons: &[ComparisonPaths]) -> Result<(), HandoffError> {
+    fn handoff(name: &str, comparisons: &[Comparison]) -> Result<(), HandoffError> {
         let socket_name = name.to_ns_name::<GenericNamespaced>().map_err(|error| {
             HandoffError::Failed(format!("invalid yori instance name: {error}"))
         })?;

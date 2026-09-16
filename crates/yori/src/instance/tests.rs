@@ -71,7 +71,7 @@ fn secondary_waits_for_workspace_acknowledgment_and_preserves_native_paths() {
     let name = instance_name();
     let directory = tempfile::tempdir().unwrap();
     let primary = Instance::establish(&name, &[]).unwrap().unwrap();
-    let comparisons = vec![ComparisonPaths::diff(
+    let comparisons = vec![Comparison::diff(
         unusual_path(directory.path()),
         directory.path().join("local\nfile.rs"),
     )];
@@ -111,7 +111,7 @@ fn merge_handoff_preserves_all_four_roles() {
         directory.path().join("incoming.rs"),
         unusual_path(directory.path()),
     ];
-    let expected = vec![ComparisonPaths::from_paths(&paths).unwrap()];
+    let expected = vec![Comparison::from_paths(&paths).unwrap()];
     let comparisons = expected.clone();
     let client = thread::spawn(move || Instance::establish(&name, &comparisons).unwrap().is_none());
 
@@ -227,7 +227,7 @@ fn excess_connections_are_rejected_before_ui_dispatch() {
 #[test]
 fn protocol_rejects_invalid_requests_before_dispatch() {
     let directory = tempfile::tempdir().unwrap();
-    let relative = ComparisonPaths::diff(
+    let relative = Comparison::diff(
         PathBuf::from("relative.rs"),
         directory.path().join("local.rs"),
     );

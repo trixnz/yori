@@ -11,7 +11,7 @@ use gpui_kit::component::{
 use gpui_kit::{Context, ParentElement, Window};
 
 use super::{Workspace, files::Role};
-use crate::{comparison::ComparisonPaths, storage::Snapshot};
+use crate::{comparison::Comparison, storage::Snapshot};
 
 #[derive(Clone)]
 pub(super) struct DiskNotice {
@@ -19,6 +19,7 @@ pub(super) struct DiskNotice {
     role: Role,
     path: PathBuf,
     observed: Result<Snapshot, String>,
+    reloadable: bool,
     merging: bool,
 }
 
@@ -27,7 +28,7 @@ impl Workspace {
         if let Some(notice) = self.disk_notice.upgrade() {
             let mut notice = notice.borrow_mut();
             if let Some(tab) = self.tabs.get(notice.tab) {
-                let current = &tab.content.files.file(notice.role).current;
+                let current = &tab.content.files.tracked(notice.role, &notice.path).current;
                 notice.observed.clone_from(current);
             }
         }
@@ -74,7 +75,8 @@ impl Workspace {
                     role: file.role,
                     path: file.path.clone(),
                     observed: file.current.clone(),
-                    merging: matches!(tab.paths, ComparisonPaths::Merge(_)),
+                    reloadable: file.reloadable(),
+                    merging: matches!(tab.paths, Comparison::Merge(_)),
                 })
             })
     }
@@ -118,10 +120,9 @@ impl Workspace {
                 Ok(_) => "The file has changed outside this comparison.".to_owned(),
                 Err(error) => format!("The disk version cannot currently be read: {error}"),
             };
-            let reloadable =
-                notice.role != Role::Result && !matches!(notice.observed, Ok(Snapshot::Missing));
-            let policy = if notice.role == Role::Result {
-                "The merge result will not be reloaded automatically. \
+            let reloadable = notice.reloadable && !matches!(notice.observed, Ok(Snapshot::Missing));
+            let policy = if !notice.reloadable {
+                "The save destination will not be reloaded into this document. \
                  Keeping it does not authorize overwriting the disk version."
             } else if !reloadable {
                 "Keep the current document to continue. If the file returns, \
@@ -150,7 +151,11 @@ impl Workspace {
                                     .iter_mut()
                                     .find(|tab| tab.id == notice.tab)
                                 {
-                                    tab.content.files.dismiss(notice.role, notice.observed);
+                                    tab.content.files.dismiss(
+                                        notice.role,
+                                        &notice.path,
+                                        notice.observed,
+                                    );
                                 }
 
                                 cx.notify();

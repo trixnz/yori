@@ -16,7 +16,7 @@ pub(crate) struct SaveCheckpoint {
 
 impl AlignedEditor {
     pub(crate) fn needs_save(&self) -> bool {
-        !self.dirty.saved_to_disk || self.is_dirty()
+        self.can_edit() && (!self.dirty.saved_to_disk || self.is_dirty())
     }
 
     pub(crate) fn set_saving(&mut self, saving: bool, cx: &mut Context<Self>) {
@@ -51,6 +51,10 @@ impl AlignedEditor {
         cx: &mut Context<Self>,
     ) -> Result<SaveCheckpoint, String> {
         self.deactivate(cx);
+        if !self.can_save() {
+            return Err("This document has no save destination.".into());
+        }
+
         let unresolved = self.unresolved_count();
         if unresolved != 0 {
             return Err(format!(
@@ -87,6 +91,8 @@ impl AlignedEditor {
         self.deactivate(cx);
         let old = if baseline { &self.left } else { &self.right };
         let mut replacement = PaneDocument::new(old.path.clone(), document);
+        replacement.editable = old.editable;
+        replacement.saveable = old.saveable;
         replacement.set_language(old.language_override);
         if baseline {
             self.left = replacement;

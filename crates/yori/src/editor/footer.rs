@@ -93,7 +93,7 @@ impl AlignedEditor {
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             }))
             .child(div().flex_1())
-            .children((side == Side::Right).then(|| {
+            .children((side == Side::Right && self.can_save()).then(|| {
                 Button::new("save-document")
                     .label("Save")
                     .small()

@@ -13,7 +13,7 @@ mod comparison;
 #[path = "../src/instance/protocol.rs"]
 mod protocol;
 
-use comparison::ComparisonPaths;
+use comparison::Comparison;
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, prelude::*};
 use std::{
     ffi::OsString,
@@ -28,7 +28,7 @@ use std::{
 };
 
 static NEXT_NAME: AtomicUsize = AtomicUsize::new(0);
-type Pending = (Vec<ComparisonPaths>, mpsc::SyncSender<Result<(), String>>);
+type Pending = (Vec<Comparison>, mpsc::SyncSender<Result<(), String>>);
 
 struct RunningCli(Child);
 
@@ -131,7 +131,7 @@ fn cli_forwards_diff_and_merge_roles_and_exits_only_after_the_reply() {
             Vec::new()
         } else {
             vec![
-                ComparisonPaths::from_paths(
+                Comparison::from_paths(
                     &paths[..count]
                         .iter()
                         .map(|path| directory.path().join(path))

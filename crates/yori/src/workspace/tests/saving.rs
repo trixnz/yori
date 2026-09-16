@@ -15,12 +15,8 @@ fn open_diff(
     std::fs::write(&local, "local\r\n").unwrap();
     let id = cx.update(|window, cx| {
         workspace.update(cx, |view, cx| {
-            view.open_comparisons(
-                &[ComparisonPaths::diff(baseline, local.clone())],
-                window,
-                cx,
-            )
-            .unwrap();
+            view.open_comparisons(&[Comparison::diff(baseline, local.clone())], window, cx)
+                .unwrap();
         });
         window.render_frame(cx);
         workspace.read(cx).tabs.active.unwrap()
@@ -476,11 +472,7 @@ fn a_save_in_another_tab_is_an_external_change_not_implicit_overwrite_approval(
     let second = cx.update(|window, cx| {
         workspace
             .update(cx, |view, cx| {
-                view.open_comparisons(
-                    &[ComparisonPaths::diff(baseline, local.clone())],
-                    window,
-                    cx,
-                )
+                view.open_comparisons(&[Comparison::diff(baseline, local.clone())], window, cx)
             })
             .unwrap();
         let second = workspace.read(cx).tabs.active.unwrap();
@@ -533,7 +525,7 @@ fn open_merge(
     let id = cx.update(|window, cx| {
         workspace
             .update(cx, |view, cx| {
-                view.open_comparisons(&[ComparisonPaths::Merge(paths.clone())], window, cx)
+                view.open_comparisons(&[Comparison::Merge(paths.clone())], window, cx)
             })
             .unwrap();
         window.render_frame(cx);

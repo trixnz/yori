@@ -290,6 +290,13 @@ impl AlignedEditor {
                                 "Baseline · Read-only"
                             })
                     }))
+                    .children((side == Side::Right && !self.can_edit()).then(|| {
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(12.0))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Local · Read-only")
+                    }))
                     .children((side == Side::Right).then(|| self.render_review_controls(cx)))
                     .children((self.merge.is_some() && side == Side::Incoming).then(|| {
                         div()

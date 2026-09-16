@@ -2,11 +2,11 @@
 
 use std::path::Path;
 
-use crate::comparison::ComparisonPaths;
+use crate::comparison::Comparison;
 
 pub(super) struct Tab<T> {
     pub id: usize,
-    pub paths: ComparisonPaths,
+    pub paths: Comparison,
     pub content: T,
 }
 
@@ -27,7 +27,7 @@ impl<T> Default for Tabs<T> {
 }
 
 impl<T> Tabs<T> {
-    pub fn find(&self, paths: &ComparisonPaths) -> Option<usize> {
+    pub fn find(&self, paths: &Comparison) -> Option<usize> {
         self.entries
             .iter()
             .find(|tab| &tab.paths == paths)
@@ -45,7 +45,7 @@ impl<T> Tabs<T> {
     }
 
     /// Duplicate opens preserve the existing content rather than replacing it.
-    pub fn insert(&mut self, paths: ComparisonPaths, content: T) -> usize {
+    pub fn insert(&mut self, paths: Comparison, content: T) -> usize {
         if let Some(id) = self.find(&paths) {
             self.activate(id);
             return id;
@@ -121,8 +121,8 @@ impl<T> Tabs<T> {
 mod tests {
     use super::*;
 
-    fn pair(left: &str, right: &str) -> ComparisonPaths {
-        ComparisonPaths::diff(left.into(), right.into())
+    fn pair(left: &str, right: &str) -> Comparison {
+        Comparison::diff(left.into(), right.into())
     }
 
     #[test]
@@ -194,7 +194,7 @@ mod tests {
             incoming: "/incoming.rs".into(),
             result: "/result.rs".into(),
         };
-        let original = ComparisonPaths::Merge(paths.clone());
+        let original = Comparison::Merge(paths.clone());
         let mut tabs = Tabs::default();
         let first = tabs.insert(original.clone(), "edited first");
         let diff = tabs.insert(pair("/base.rs", "/result.rs"), "edited diff");
@@ -218,7 +218,7 @@ mod tests {
                 ..paths.clone()
             },
         ] {
-            let id = tabs.insert(ComparisonPaths::Merge(variant), "another merge");
+            let id = tabs.insert(Comparison::Merge(variant), "another merge");
             assert_ne!(id, first);
             assert_ne!(id, diff);
         }

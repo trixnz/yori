@@ -4,14 +4,15 @@ mod merging;
 mod saving;
 
 use super::*;
+use crate::comparison::ComparisonDocument;
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{TestAppContext, VisualTestContext, point};
 use std::path::Path;
 
-fn merge_paths(result: &str) -> ComparisonPaths {
+fn merge_paths(result: &str) -> Comparison {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/merge");
-    ComparisonPaths::Merge(MergePaths {
+    Comparison::Merge(MergePaths {
         base: fixtures.join("base.rs"),
         local: fixtures.join("local.rs"),
         incoming: fixtures.join("incoming.rs"),
@@ -71,7 +72,7 @@ fn startup_and_handoff_dispatch_can_read_modal_state_and_report_file_errors(
     crate::dispatch_open(
         window,
         &workspace,
-        &[ComparisonPaths::diff(
+        &[Comparison::diff(
             fixtures.join("intraline-before.rs"),
             fixtures.join("intraline-after.rs"),
         )],
@@ -83,7 +84,7 @@ fn startup_and_handoff_dispatch_can_read_modal_state_and_report_file_errors(
     let error = crate::dispatch_open(
         window,
         &workspace,
-        &[ComparisonPaths::diff(
+        &[Comparison::diff(
             fixtures.join("missing.rs"),
             fixtures.join("after.rs"),
         )],
@@ -92,6 +93,185 @@ fn startup_and_handoff_dispatch_can_read_modal_state_and_report_file_errors(
     .unwrap_err();
     assert!(error.contains("missing.rs"));
     cx.update(|_, cx| assert_eq!(workspace.read(cx).tabs.entries.len(), 2));
+}
+
+#[gpui_kit::test]
+fn read_only_in_memory_comparison_uses_logical_paths_and_rejects_edits(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let baseline = directory.path().join("history/original.rs");
+    let local = directory.path().join("history/current.rs");
+    let comparison = Comparison::two_way(
+        ComparisonDocument::read_only_memory(baseline.clone(), b"old\n".to_vec()),
+        ComparisonDocument::read_only_memory(local.clone(), b"new\n".to_vec()),
+    );
+
+    cx.update(|window, cx| {
+        workspace
+            .update(cx, |view, cx| {
+                view.open_comparisons(&[comparison], window, cx)
+            })
+            .unwrap();
+        window.render_frame(cx);
+
+        let id = workspace.read(cx).tabs.active.unwrap();
+        let editor = workspace
+            .read(cx)
+            .tabs
+            .get(id)
+            .unwrap()
+            .content
+            .editor
+            .clone();
+        assert!(!editor.read(cx).can_edit());
+        assert!(!editor.read(cx).can_save());
+        assert_eq!(
+            window.find(("pane-filename", 0usize)).label(),
+            baseline.to_str()
+        );
+        assert_eq!(
+            window.find(("pane-filename", 1usize)).label(),
+            local.to_str()
+        );
+        assert!(window.try_find("save-document").is_none());
+
+        let width = window.find("rows-viewport").bounds().size.width;
+        window.click_at("rows-viewport", point(width * 0.75, px(11.0)), cx);
+        window.input("rejected", cx);
+        window.press("ctrl-s", cx);
+
+        assert_eq!(editor.read(cx).current_checkpoint().text, "new\n");
+        assert!(!editor.read(cx).needs_save());
+    });
+    cx.run_until_parked();
+
+    assert!(directory.path().read_dir().unwrap().next().is_none());
+}
+
+#[gpui_kit::test]
+fn editable_in_memory_document_without_destination_edits_but_exposes_no_save_action(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, cx) = harness(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let comparison = Comparison::two_way(
+        ComparisonDocument::read_only_memory(
+            directory.path().join("baseline.rs"),
+            b"old\n".to_vec(),
+        ),
+        ComparisonDocument::editable_memory(
+            directory.path().join("scratch.rs"),
+            b"new\n".to_vec(),
+            None,
+        ),
+    );
+
+    cx.update(|window, cx| {
+        workspace
+            .update(cx, |view, cx| {
+                view.open_comparisons(&[comparison], window, cx)
+            })
+            .unwrap();
+        window.render_frame(cx);
+
+        let id = workspace.read(cx).tabs.active.unwrap();
+        let editor = workspace
+            .read(cx)
+            .tabs
+            .get(id)
+            .unwrap()
+            .content
+            .editor
+            .clone();
+        assert!(editor.read(cx).can_edit());
+        assert!(!editor.read(cx).can_save());
+        assert!(window.try_find("save-document").is_none());
+
+        let width = window.find("rows-viewport").bounds().size.width;
+        window.click_at("rows-viewport", point(width * 0.75, px(11.0)), cx);
+        window.input("changed ", cx);
+        assert!(editor.read(cx).needs_save());
+
+        window.click(("tab-close-target", id), cx);
+        assert!(window.has_active_dialog(cx));
+        assert!(window.try_find("save-and-close").is_none());
+        window.press("escape", cx);
+    });
+
+    assert!(directory.path().read_dir().unwrap().next().is_none());
+}
+
+#[gpui_kit::test]
+fn in_memory_baseline_with_editable_file_saves_to_the_backing_file(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let local = directory.path().join("local.rs");
+    std::fs::write(&local, "new\n").unwrap();
+    let comparison = Comparison::two_way(
+        ComparisonDocument::read_only_memory(
+            directory.path().join("historical.rs"),
+            b"old\n".to_vec(),
+        ),
+        ComparisonDocument::editable_file(local.clone()),
+    );
+
+    cx.update(|window, cx| {
+        workspace
+            .update(cx, |view, cx| {
+                view.open_comparisons(&[comparison], window, cx)
+            })
+            .unwrap();
+        window.render_frame(cx);
+
+        let width = window.find("rows-viewport").bounds().size.width;
+        window.click_at("rows-viewport", point(width * 0.75, px(11.0)), cx);
+        window.press("home", cx);
+        window.input("saved ", cx);
+        window.press("ctrl-s", cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(std::fs::read_to_string(local).unwrap(), "saved new\n");
+    assert!(!directory.path().join("historical.rs").exists());
+}
+
+#[gpui_kit::test]
+fn editable_in_memory_document_saves_only_to_its_explicit_destination(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let logical = directory.path().join("review/current.rs");
+    let destination = directory.path().join("saved.rs");
+    let comparison = Comparison::two_way(
+        ComparisonDocument::read_only_memory(
+            directory.path().join("review/original.rs"),
+            b"old\n".to_vec(),
+        ),
+        ComparisonDocument::editable_memory(
+            logical.clone(),
+            b"new\n".to_vec(),
+            Some(destination.clone()),
+        ),
+    );
+
+    cx.update(|window, cx| {
+        workspace
+            .update(cx, |view, cx| {
+                view.open_comparisons(&[comparison], window, cx)
+            })
+            .unwrap();
+        window.render_frame(cx);
+        assert!(window.try_find("save-document").is_some());
+
+        let width = window.find("rows-viewport").bounds().size.width;
+        window.click_at("rows-viewport", point(width * 0.75, px(11.0)), cx);
+        window.press("home", cx);
+        window.input("saved ", cx);
+        window.press("ctrl-s", cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(std::fs::read_to_string(destination).unwrap(), "saved new\n");
+    assert!(!logical.exists());
 }
 
 #[gpui_kit::test]
@@ -429,12 +609,8 @@ fn forwarded_pairs_preserve_existing_edits_and_load_new_files_before_returning(
 
     cx.update(|window, cx| {
         workspace.update(cx, |view, cx| {
-            view.open_comparisons(
-                &[ComparisonPaths::diff(left.clone(), right.clone())],
-                window,
-                cx,
-            )
-            .unwrap();
+            view.open_comparisons(&[Comparison::diff(left.clone(), right.clone())], window, cx)
+                .unwrap();
         });
         assert_eq!(workspace.read(cx).tabs.entries.len(), 2);
         assert_eq!(workspace.read(cx).tabs.active, Some(1));
@@ -450,7 +626,7 @@ fn forwarded_pairs_preserve_existing_edits_and_load_new_files_before_returning(
 
         workspace.update(cx, |view, cx| {
             view.open_comparisons(
-                &[ComparisonPaths::diff(
+                &[Comparison::diff(
                     fixtures.join("before.rs"),
                     fixtures.join("after.rs"),
                 )],
@@ -488,7 +664,7 @@ fn forwarded_requests_report_errors_and_do_not_interrupt_a_discard_dialog(cx: &m
         let error = workspace
             .update(cx, |view, cx| {
                 view.open_comparisons(
-                    &[ComparisonPaths::diff(missing.clone(), missing.clone())],
+                    &[Comparison::diff(missing.clone(), missing.clone())],
                     window,
                     cx,
                 )
@@ -506,7 +682,7 @@ fn forwarded_requests_report_errors_and_do_not_interrupt_a_discard_dialog(cx: &m
         let error = workspace
             .update(cx, |view, cx| {
                 view.open_comparisons(
-                    &[ComparisonPaths::diff(missing.clone(), missing.clone())],
+                    &[Comparison::diff(missing.clone(), missing.clone())],
                     window,
                     cx,
                 )

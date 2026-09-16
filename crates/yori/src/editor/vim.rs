@@ -29,13 +29,15 @@ impl AlignedEditor {
     }
 
     pub(super) fn accepts_text(&self, cx: &App) -> bool {
-        !Self::vim_enabled(cx) || self.vim.mode() == Mode::Insert
+        self.can_edit() && (!Self::vim_enabled(cx) || self.vim.mode() == Mode::Insert)
     }
 
     pub(super) fn cancel_vim(&mut self) {
         // History always belongs to the editable pane, even when focus moved left.
         let selection = self.right_selection().unwrap_or(TextSelection::caret(0));
-        let target = if let Some(merge) = &mut self.merge {
+        let target = if !self.right.editable {
+            EditTarget::ReadOnly(&self.right.document)
+        } else if let Some(merge) = &mut self.merge {
             EditTarget::Merge(&mut merge.session)
         } else {
             EditTarget::Document(&mut self.right.document, &mut self.history)
@@ -46,7 +48,9 @@ impl AlignedEditor {
 
     pub(super) fn reposition_vim(&mut self) {
         let selection = self.right_selection().unwrap_or(TextSelection::caret(0));
-        let target = if let Some(merge) = &mut self.merge {
+        let target = if !self.right.editable {
+            EditTarget::ReadOnly(&self.right.document)
+        } else if let Some(merge) = &mut self.merge {
             EditTarget::Merge(&mut merge.session)
         } else {
             EditTarget::Document(&mut self.right.document, &mut self.history)
@@ -165,6 +169,7 @@ impl AlignedEditor {
     ) -> Result<(), yori_diff::merge::MergeError> {
         let anchor = self.view_anchor();
         let target = match side {
+            Side::Right if !self.right.editable => EditTarget::ReadOnly(&self.right.document),
             Side::Right => {
                 if let Some(merge) = &mut self.merge {
                     EditTarget::Merge(&mut merge.session)

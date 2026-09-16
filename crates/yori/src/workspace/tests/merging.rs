@@ -3,7 +3,7 @@
 use super::*;
 
 fn input_paths() -> MergePaths {
-    let ComparisonPaths::Merge(paths) = merge_paths("result.rs") else {
+    let Comparison::Merge(paths) = merge_paths("result.rs") else {
         unreachable!();
     };
 
@@ -38,7 +38,7 @@ fn merge_handoff_loads_all_inputs_and_never_reads_or_writes_the_destination(
         Document::read(&paths.incoming).unwrap(),
     )
     .unwrap();
-    let request = ComparisonPaths::Merge(paths.clone());
+    let request = Comparison::Merge(paths.clone());
     let window = cx.update(|window, _| window.window_handle().downcast::<Root>().unwrap());
 
     crate::dispatch_open(window, &workspace, &[request], &mut cx.cx).unwrap();
@@ -78,7 +78,7 @@ fn invalid_merge_input_leaves_existing_tabs_and_disk_untouched(cx: &mut TestAppC
     cx.update(|window, cx| {
         let error = workspace
             .update(cx, |view, cx| {
-                view.open_comparisons(&[ComparisonPaths::Merge(paths.clone())], window, cx)
+                view.open_comparisons(&[Comparison::Merge(paths.clone())], window, cx)
             })
             .unwrap_err();
         assert!(error.contains("missing.rs"));
@@ -141,7 +141,7 @@ fn merge_picker_opens_real_paths_and_cancellation_at_every_stage_preserves_the_w
         let id = workspace.read(cx).tabs.active.unwrap();
         assert_eq!(
             workspace.read(cx).tabs.get(id).unwrap().paths,
-            ComparisonPaths::Merge(paths.clone()).resolve().unwrap()
+            Comparison::Merge(paths.clone()).resolve().unwrap()
         );
     });
     assert!(!paths.result.exists());

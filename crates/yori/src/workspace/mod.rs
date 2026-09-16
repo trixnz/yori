@@ -24,7 +24,7 @@ use gpui_kit::{
 #[cfg(test)]
 use yori_document::Document;
 
-use crate::comparison::{ComparisonPaths, MergePaths};
+use crate::comparison::{Comparison, MergePaths};
 use crate::editor::{AlignedEditor, DirtyChanged, PaneDocument};
 use decision_dialog::{Decision, DecisionDialog, DecisionShortcut};
 use tabs::Tabs;
@@ -120,11 +120,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let result = self.open_comparison(
-            &ComparisonPaths::diff(left.into(), right.into()),
-            window,
-            cx,
-        );
+        let result = self.open_comparison(&Comparison::diff(left.into(), right.into()), window, cx);
         if let Err(error) = result {
             window.push_notification(Notification::error(error), cx);
         }
@@ -134,7 +130,7 @@ impl Workspace {
     /// loaded or rejected, not just queued; temporary files can then be released.
     pub(super) fn open_comparisons(
         &mut self,
-        comparisons: &[ComparisonPaths],
+        comparisons: &[Comparison],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
@@ -167,7 +163,7 @@ impl Workspace {
 
     fn open_comparison(
         &mut self,
-        paths: &ComparisonPaths,
+        paths: &Comparison,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
@@ -177,39 +173,30 @@ impl Workspace {
             return Ok(());
         }
 
-        // Source contents and overwrite protection come from the same read.
+        // File content and overwrite protection come from the same snapshots;
+        // in-memory content crosses the same editor seam without touching disk.
         let files = files::Files::load(&paths)?;
         let editor = match &paths {
-            ComparisonPaths::Diff { baseline, local } => {
+            Comparison::Diff(diff) => {
                 let left = PaneDocument::new(
-                    baseline.clone(),
-                    files
-                        .file(files::Role::Baseline)
-                        .accepted
-                        .document(baseline)?,
+                    diff.baseline.logical_path().to_owned(),
+                    files.document(files::Role::Baseline).clone(),
                 );
                 let right = PaneDocument::new(
-                    local.clone(),
-                    files.file(files::Role::Local).accepted.document(local)?,
+                    diff.local.logical_path().to_owned(),
+                    files.document(files::Role::Local).clone(),
                 );
+                let editable = diff.local.editable();
+                let saveable = diff.local.save_destination().is_some();
                 self.deactivate(cx);
 
-                cx.new(|cx| AlignedEditor::new(left, right, window, cx))
+                cx.new(|cx| AlignedEditor::new_diff(left, right, editable, saveable, window, cx))
             }
-            ComparisonPaths::Merge(paths) => {
+            Comparison::Merge(paths) => {
                 let session = yori_diff::merge::MergeSession::new(
-                    files
-                        .file(files::Role::Base)
-                        .accepted
-                        .document(&paths.base)?,
-                    files
-                        .file(files::Role::Local)
-                        .accepted
-                        .document(&paths.local)?,
-                    files
-                        .file(files::Role::Incoming)
-                        .accepted
-                        .document(&paths.incoming)?,
+                    files.document(files::Role::Base).clone(),
+                    files.document(files::Role::Local).clone(),
+                    files.document(files::Role::Incoming).clone(),
                 )
                 .map_err(|error| error.to_string())?;
                 self.deactivate(cx);
@@ -327,15 +314,29 @@ impl Workspace {
         self.deactivate(cx);
         self.focus_active(window, cx);
 
-        let title = target.map_or_else(
-            || "Save changes before closing yori?".to_owned(),
-            |id| format!("Save changes to {}?", self.tabs.label(id)),
-        );
+        let saveable = self.tabs.entries.iter().all(|tab| {
+            target.is_some_and(|id| tab.id != id)
+                || !tab.content.editor.read(cx).needs_save()
+                || tab.content.editor.read(cx).can_save()
+        });
+        let title = if saveable {
+            target.map_or_else(
+                || "Save changes before closing yori?".to_owned(),
+                |id| format!("Save changes to {}?", self.tabs.label(id)),
+            )
+        } else {
+            target.map_or_else(
+                || "Discard unsaved changes before closing yori?".to_owned(),
+                |id| format!("Discard changes to {}?", self.tabs.label(id)),
+            )
+        };
         let unresolved = self.tabs.entries.iter().any(|tab| {
             target.is_none_or(|id| tab.id == id)
                 && tab.content.editor.read(cx).unresolved_count() != 0
         });
-        let detail = if unresolved {
+        let detail = if !saveable {
+            "At least one changed document has no save destination. Discard the changes or keep the workspace open."
+        } else if unresolved {
             "There are unresolved conflicts. Resolve them before saving, or discard this session."
         } else {
             "Your changes have not been saved. Save them, discard them, or keep the workspace open."
@@ -350,23 +351,25 @@ impl Workspace {
                 let _ = discard_view.update(cx, |this, cx| this.close(target, window, cx));
             },
         );
-        let save = Decision::new(
-            "save-and-close",
-            if target.is_some() { "Save" } else { "Save all" },
-            DecisionShortcut::Enter,
-        )
-        .primary()
-        .disabled(unresolved)
-        .on_activate(move |window, cx| {
-            let _ = save_view.update(cx, |this, cx| {
-                this.save_before_close(target, window, cx);
+        let dialog = DecisionDialog::new(title, detail, cancel);
+        if saveable {
+            let save = Decision::new(
+                "save-and-close",
+                if target.is_some() { "Save" } else { "Save all" },
+                DecisionShortcut::Enter,
+            )
+            .primary()
+            .disabled(unresolved)
+            .on_activate(move |window, cx| {
+                let _ = save_view.update(cx, |this, cx| {
+                    this.save_before_close(target, window, cx);
+                });
             });
-        });
 
-        DecisionDialog::new(title, detail, cancel)
-            .alternate(discard)
-            .primary(save)
-            .open(window, cx);
+            dialog.alternate(discard).primary(save).open(window, cx);
+        } else {
+            dialog.alternate(discard).open(window, cx);
+        }
     }
 
     fn choose_pair(&mut self, _: &OpenComparison, window: &mut Window, cx: &mut Context<Self>) {
@@ -642,7 +645,7 @@ async fn choose_file(
 async fn choose_paths(
     cx: &mut AsyncWindowContext,
     merging: bool,
-) -> Result<Option<ComparisonPaths>, String> {
+) -> Result<Option<Comparison>, String> {
     let Some(base) = choose_file(
         cx,
         if merging {
@@ -659,7 +662,7 @@ async fn choose_paths(
         return Ok(None);
     };
     if !merging {
-        return Ok(Some(ComparisonPaths::diff(base, local)));
+        return Ok(Some(Comparison::diff(base, local)));
     }
 
     let Some(incoming) = choose_file(cx, "Select incoming file").await? else {
@@ -679,7 +682,7 @@ async fn choose_paths(
         .map_err(|error| error.to_string())?;
 
     Ok(result.map(|result| {
-        ComparisonPaths::Merge(MergePaths {
+        Comparison::Merge(MergePaths {
             base,
             local,
             incoming,

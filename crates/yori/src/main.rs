@@ -6,7 +6,7 @@ mod editor;
 mod instance;
 mod storage;
 mod workspace;
-use comparison::ComparisonPaths;
+use comparison::Comparison;
 use gpui_kit::component::Root;
 use gpui_kit::{AppContext, AssetSource, SharedString, WindowOptions};
 use std::{borrow::Cow, env, path::PathBuf, process};
@@ -48,7 +48,7 @@ fn usage(program: &str) -> String {
     format!("usage: {program} [<baseline> <local> | <base> <local> <incoming> <result>]")
 }
 
-fn load_arguments() -> Result<Vec<ComparisonPaths>, String> {
+fn load_arguments() -> Result<Vec<Comparison>, String> {
     let mut args = env::args_os();
     let program = args
         .next()
@@ -65,7 +65,7 @@ fn load_arguments() -> Result<Vec<ComparisonPaths>, String> {
         return Ok(Vec::new());
     }
 
-    ComparisonPaths::from_paths(&paths)
+    Comparison::from_paths(&paths)
         .map(|comparison| vec![comparison])
         .map_err(|_| usage(&program))
 }
@@ -73,7 +73,7 @@ fn load_arguments() -> Result<Vec<ComparisonPaths>, String> {
 fn dispatch_open<C: AppContext>(
     window: gpui_kit::WindowHandle<Root>,
     workspace: &gpui_kit::Entity<Workspace>,
-    comparisons: &[ComparisonPaths],
+    comparisons: &[Comparison],
     cx: &mut C,
 ) -> Result<(), String> {
     // The typed handle also mutably borrows Root. Workspace opening must be

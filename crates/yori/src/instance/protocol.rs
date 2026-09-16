@@ -6,7 +6,7 @@ use std::{
 
 use bitcode::{Decode, Encode};
 
-use crate::comparison::{ComparisonPaths, MergePaths};
+use crate::comparison::{Comparison, MergePaths};
 
 const VERSION: u16 = 1;
 const MAX_COMPARISONS: usize = 128;
@@ -46,7 +46,7 @@ struct WireResponse {
 
 pub(crate) fn write_request(
     writer: &mut impl Write,
-    comparisons: &[ComparisonPaths],
+    comparisons: &[Comparison],
 ) -> Result<(), String> {
     let request = WireRequest {
         version: VERSION,
@@ -56,7 +56,7 @@ pub(crate) fn write_request(
     write_frame(writer, &bitcode::encode(&request), MAX_REQUEST_FRAME_BYTES)
 }
 
-pub(crate) fn read_request(reader: &mut impl Read) -> Result<Vec<ComparisonPaths>, String> {
+pub(crate) fn read_request(reader: &mut impl Read) -> Result<Vec<Comparison>, String> {
     let frame = read_frame(reader, MAX_REQUEST_FRAME_BYTES)?;
     let request: WireRequest = bitcode::decode(&frame)
         .map_err(|error| format!("request has invalid encoding: {error}"))?;
@@ -129,7 +129,7 @@ fn read_frame(reader: &mut impl Read, limit: usize) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn encode_comparisons(comparisons: &[ComparisonPaths]) -> Result<Vec<WireComparison>, String> {
+fn encode_comparisons(comparisons: &[Comparison]) -> Result<Vec<WireComparison>, String> {
     if comparisons.len() > MAX_COMPARISONS {
         return Err("too many comparisons in one request".into());
     }
@@ -137,22 +137,26 @@ fn encode_comparisons(comparisons: &[ComparisonPaths]) -> Result<Vec<WireCompari
     let mut total_path_bytes = 0;
     comparisons
         .iter()
-        .map(|comparison| match comparison {
-            ComparisonPaths::Diff { baseline, local } => Ok(WireComparison::Diff {
-                baseline: encode_path(baseline, &mut total_path_bytes)?,
-                local: encode_path(local, &mut total_path_bytes)?,
-            }),
-            ComparisonPaths::Merge(paths) => Ok(WireComparison::Merge {
-                base: encode_path(&paths.base, &mut total_path_bytes)?,
-                local: encode_path(&paths.local, &mut total_path_bytes)?,
-                incoming: encode_path(&paths.incoming, &mut total_path_bytes)?,
-                result: encode_path(&paths.result, &mut total_path_bytes)?,
-            }),
+        .map(|comparison| {
+            let paths = comparison.file_paths()?;
+
+            match comparison {
+                Comparison::Diff(_) => Ok(WireComparison::Diff {
+                    baseline: encode_path(paths[0], &mut total_path_bytes)?,
+                    local: encode_path(paths[1], &mut total_path_bytes)?,
+                }),
+                Comparison::Merge(_) => Ok(WireComparison::Merge {
+                    base: encode_path(paths[0], &mut total_path_bytes)?,
+                    local: encode_path(paths[1], &mut total_path_bytes)?,
+                    incoming: encode_path(paths[2], &mut total_path_bytes)?,
+                    result: encode_path(paths[3], &mut total_path_bytes)?,
+                }),
+            }
         })
         .collect()
 }
 
-fn decode_comparisons(comparisons: Vec<WireComparison>) -> Result<Vec<ComparisonPaths>, String> {
+fn decode_comparisons(comparisons: Vec<WireComparison>) -> Result<Vec<Comparison>, String> {
     if comparisons.len() > MAX_COMPARISONS {
         return Err("too many comparisons in one request".into());
     }
@@ -161,16 +165,16 @@ fn decode_comparisons(comparisons: Vec<WireComparison>) -> Result<Vec<Comparison
     comparisons
         .into_iter()
         .map(|comparison| match comparison {
-            WireComparison::Diff { baseline, local } => Ok(ComparisonPaths::Diff {
-                baseline: decode_path(&baseline, &mut total_path_bytes)?,
-                local: decode_path(&local, &mut total_path_bytes)?,
-            }),
+            WireComparison::Diff { baseline, local } => Ok(Comparison::diff(
+                decode_path(&baseline, &mut total_path_bytes)?,
+                decode_path(&local, &mut total_path_bytes)?,
+            )),
             WireComparison::Merge {
                 base,
                 local,
                 incoming,
                 result,
-            } => Ok(ComparisonPaths::Merge(MergePaths {
+            } => Ok(Comparison::Merge(MergePaths {
                 base: decode_path(&base, &mut total_path_bytes)?,
                 local: decode_path(&local, &mut total_path_bytes)?,
                 incoming: decode_path(&incoming, &mut total_path_bytes)?,

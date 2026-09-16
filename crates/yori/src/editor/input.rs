@@ -35,6 +35,10 @@ impl AlignedEditor {
     }
 
     fn edit_target(&mut self) -> EditTarget<'_> {
+        if !self.right.editable {
+            return EditTarget::ReadOnly(&self.right.document);
+        }
+
         if let Some(merge) = &mut self.merge {
             EditTarget::Merge(&mut merge.session)
         } else {
@@ -56,6 +60,10 @@ impl AlignedEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.can_edit() {
+            return;
+        }
+
         // Never apply coordinates from a button rendered for a different alignment.
         if self.alignment.blocks().get(index) != Some(expected) {
             return;
@@ -156,6 +164,10 @@ impl AlignedEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.can_edit() {
+            window.play_system_bell();
+            return;
+        }
         let Some(selection) = self.right_selection() else {
             return;
         };
@@ -412,6 +424,10 @@ impl AlignedEditor {
         // surface may route these commands into the active comparison's history.
         if !self.focus.is_focused(window) {
             cx.propagate();
+            return;
+        }
+        if !self.can_edit() {
+            window.play_system_bell();
             return;
         }
 

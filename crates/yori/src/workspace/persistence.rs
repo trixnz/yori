@@ -3,7 +3,7 @@
 use super::decision_dialog::{Decision, DecisionDialog, DecisionShortcut};
 use super::files::{Files, Role};
 use super::{OpenTab, Save, Workspace};
-use crate::comparison::ComparisonPaths;
+use crate::comparison::Comparison;
 use crate::editor::{AlignedEditor, DirtyChanged};
 use crate::storage::{FileWatch, SaveError, Snapshot};
 use gpui_kit::component::WindowExt;
@@ -175,6 +175,13 @@ impl Workspace {
         let Some(id) = self.tabs.active else {
             return;
         };
+        if !self
+            .tabs
+            .get(id)
+            .is_some_and(|tab| tab.content.editor.read(cx).can_save())
+        {
+            return;
+        }
 
         self.save_next(
             SaveBatch {
@@ -198,7 +205,9 @@ impl Workspace {
             .entries
             .iter()
             .filter(|tab| {
-                target.is_none_or(|id| tab.id == id) && tab.content.editor.read(cx).needs_save()
+                target.is_none_or(|id| tab.id == id)
+                    && tab.content.editor.read(cx).needs_save()
+                    && tab.content.editor.read(cx).can_save()
             })
             .map(|tab| tab.id)
             .collect();
@@ -245,7 +254,10 @@ impl Workspace {
                 return;
             }
         };
-        let target = tab.content.files.target();
+        let Some(target) = tab.content.files.destination() else {
+            self.set_message(id, "This document has no save destination.".into(), cx);
+            return;
+        };
         let path = target.path.clone();
         let expected = approved.unwrap_or_else(|| target.accepted.clone());
         let text = checkpoint.text.clone();
@@ -355,7 +367,7 @@ impl Workspace {
         let Some(tab) = self.tabs.get(id) else {
             return;
         };
-        let merging = matches!(tab.paths, ComparisonPaths::Merge(_));
+        let merging = matches!(tab.paths, Comparison::Merge(_));
         if merging && role == Role::Result {
             return;
         }
@@ -388,7 +400,7 @@ impl Workspace {
         };
         let paths = tab.paths.clone();
         let path = tab.content.files.file(role).path.clone();
-        let merging = matches!(paths, ComparisonPaths::Merge(_));
+        let merging = matches!(paths, Comparison::Merge(_));
         let editor = tab.content.editor.clone();
         editor.update(cx, AlignedEditor::deactivate);
         let checkpoint = editor.read(cx).current_checkpoint();
@@ -457,16 +469,13 @@ impl Workspace {
         let Some(tab) = self.tabs.get(id) else {
             return Ok(());
         };
-        let ComparisonPaths::Merge(paths) = &tab.paths else {
+        let Comparison::Merge(paths) = &tab.paths else {
             return Ok(());
         };
         let session = yori_diff::merge::MergeSession::new(
-            files.file(Role::Base).accepted.document(&paths.base)?,
-            files.file(Role::Local).accepted.document(&paths.local)?,
-            files
-                .file(Role::Incoming)
-                .accepted
-                .document(&paths.incoming)?,
+            files.document(Role::Base).clone(),
+            files.document(Role::Local).clone(),
+            files.document(Role::Incoming).clone(),
         )
         .map_err(|error| error.to_string())?;
         let editor = cx.new(|cx| AlignedEditor::new_merge(paths, session, window, cx));

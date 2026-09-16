@@ -114,6 +114,8 @@ struct RowHighlighting<'a> {
 
 pub(super) struct PaneDocument {
     path: PathBuf,
+    editable: bool,
+    saveable: bool,
     max_display_columns: usize,
     document: Document,
     highlighter: Option<SyntaxHighlighter>,
@@ -130,6 +132,8 @@ impl PaneDocument {
 
         Self {
             path,
+            editable: false,
+            saveable: false,
             max_display_columns,
             document,
             highlighter,
@@ -251,6 +255,22 @@ impl AlignedEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_diff(left, right, true, true, window, cx)
+    }
+
+    pub(super) fn new_diff(
+        mut left: PaneDocument,
+        mut right: PaneDocument,
+        editable: bool,
+        saveable: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        left.editable = false;
+        left.saveable = false;
+        right.editable = editable;
+        right.saveable = editable && saveable;
+
         let alignment = Alignment::between(&left.document, &right.document);
         let dirty = DirtyState::new(right.document.text());
 
@@ -300,6 +320,14 @@ impl AlignedEditor {
                 window.viewport_size(),
             ))),
         }
+    }
+
+    pub(super) fn can_edit(&self) -> bool {
+        self.right.editable
+    }
+
+    pub(super) fn can_save(&self) -> bool {
+        self.right.saveable
     }
 
     pub(super) fn is_dirty(&self) -> bool {
