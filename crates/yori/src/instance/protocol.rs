@@ -138,7 +138,7 @@ fn encode_comparisons(comparisons: &[Comparison]) -> Result<Vec<WireComparison>,
     comparisons
         .iter()
         .map(|comparison| {
-            let paths = comparison.file_paths()?;
+            let paths = comparison.wire_paths()?;
 
             match comparison {
                 Comparison::Diff(_) => Ok(WireComparison::Diff {

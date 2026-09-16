@@ -168,6 +168,7 @@ impl AlignedEditor {
             window.play_system_bell();
             return;
         }
+
         let Some(selection) = self.right_selection() else {
             return;
         };

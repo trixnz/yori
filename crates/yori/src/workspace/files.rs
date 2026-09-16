@@ -87,6 +87,7 @@ impl Files {
                 })?)
             }
         };
+
         if let Some(document) = document {
             self.documents.push((role, document));
         }
@@ -111,6 +112,7 @@ impl Files {
     ) -> Result<(), String> {
         let accepted = Snapshot::read(path)?;
         let document = accepted.document(path)?;
+
         self.documents.push((role, document));
         self.entries.push(TrackedFile {
             role,

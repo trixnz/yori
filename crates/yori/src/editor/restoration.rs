@@ -55,6 +55,7 @@ impl AlignedEditor {
         if !self.can_edit() {
             return controls;
         }
+
         let first_row = whole_rows(self.vertical_scroll / LINE_HEIGHT);
         let viewport_end = self.vertical_scroll + geometry.rows_viewport_height();
         let button_top = |rows: &std::ops::Range<usize>| {

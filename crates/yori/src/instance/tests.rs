@@ -1,4 +1,5 @@
 use super::*;
+use crate::comparison::ComparisonDocument;
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -222,6 +223,19 @@ fn excess_connections_are_rejected_before_ui_dispatch() {
 
     drop(held);
     wait_for_connection_count(&primary, 0);
+}
+
+#[test]
+fn protocol_rejects_read_only_local_file_instead_of_losing_its_capability() {
+    let directory = tempfile::tempdir().unwrap();
+    let comparison = Comparison::two_way(
+        ComparisonDocument::read_only_file(directory.path().join("baseline.rs")),
+        ComparisonDocument::read_only_file(directory.path().join("local.rs")),
+    );
+
+    let error = protocol::write_request(&mut Vec::new(), &[comparison]).unwrap_err();
+
+    assert!(error.contains("capabilities cannot be represented"));
 }
 
 #[test]

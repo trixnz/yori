@@ -108,6 +108,7 @@ impl ComparisonDocument {
             }
             DocumentContent::Memory(bytes) => (DocumentContent::Memory(bytes.clone()), None),
         };
+
         let logical_path = resolved_source
             .as_ref()
             .filter(|(original, _)| self.logical_path == **original)
@@ -190,16 +191,31 @@ impl Comparison {
         }
     }
 
-    pub fn file_paths(&self) -> Result<Vec<&Path>, String> {
+    pub fn wire_paths(&self) -> Result<Vec<&Path>, String> {
         match self {
-            Self::Diff(diff) => Ok(vec![
-                diff.baseline
+            Self::Diff(diff) => {
+                let baseline = diff
+                    .baseline
                     .file_path()
-                    .ok_or("in-memory comparisons cannot be forwarded to another yori instance")?,
-                diff.local
+                    .ok_or("in-memory comparisons cannot be forwarded to another yori instance")?;
+                let local = diff
+                    .local
                     .file_path()
-                    .ok_or("in-memory comparisons cannot be forwarded to another yori instance")?,
-            ]),
+                    .ok_or("in-memory comparisons cannot be forwarded to another yori instance")?;
+
+                let representable = !diff.baseline.editable()
+                    && diff.baseline.save_destination().is_none()
+                    && diff.local.editable()
+                    && diff.local.save_destination() == Some(local);
+                if !representable {
+                    return Err(
+                        "comparison document capabilities cannot be represented by the current instance protocol"
+                            .into(),
+                    );
+                }
+
+                Ok(vec![baseline, local])
+            }
             Self::Merge(paths) => Ok(vec![
                 &paths.base,
                 &paths.local,

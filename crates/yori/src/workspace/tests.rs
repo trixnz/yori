@@ -123,6 +123,7 @@ fn read_only_in_memory_comparison_uses_logical_paths_and_rejects_edits(cx: &mut 
             .content
             .editor
             .clone();
+
         assert!(!editor.read(cx).can_edit());
         assert!(!editor.read(cx).can_save());
         assert_eq!(
@@ -183,6 +184,7 @@ fn editable_in_memory_document_without_destination_edits_but_exposes_no_save_act
             .content
             .editor
             .clone();
+
         assert!(editor.read(cx).can_edit());
         assert!(!editor.read(cx).can_save());
         assert!(window.try_find("save-document").is_none());
@@ -190,6 +192,7 @@ fn editable_in_memory_document_without_destination_edits_but_exposes_no_save_act
         let width = window.find("rows-viewport").bounds().size.width;
         window.click_at("rows-viewport", point(width * 0.75, px(11.0)), cx);
         window.input("changed ", cx);
+
         assert!(editor.read(cx).needs_save());
 
         window.click(("tab-close-target", id), cx);
@@ -207,6 +210,7 @@ fn in_memory_baseline_with_editable_file_saves_to_the_backing_file(cx: &mut Test
     let directory = tempfile::tempdir().unwrap();
     let local = directory.path().join("local.rs");
     std::fs::write(&local, "new\n").unwrap();
+
     let comparison = Comparison::two_way(
         ComparisonDocument::read_only_memory(
             directory.path().join("historical.rs"),
@@ -260,6 +264,7 @@ fn editable_in_memory_document_saves_only_to_its_explicit_destination(cx: &mut T
             })
             .unwrap();
         window.render_frame(cx);
+
         assert!(window.try_find("save-document").is_some());
 
         let width = window.find("rows-viewport").bounds().size.width;
