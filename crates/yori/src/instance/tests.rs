@@ -1,4 +1,5 @@
 use super::*;
+use crate::comparison::ComparisonPaths;
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -21,6 +22,10 @@ fn instance_name() -> String {
 fn connect(name: &str) -> Stream {
     let name = name.to_ns_name::<GenericNamespaced>().unwrap();
     Stream::connect(name).unwrap()
+}
+
+fn invocation(comparisons: Vec<ComparisonPaths>) -> InvocationRequest {
+    InvocationRequest::new(std::env::current_dir().unwrap(), comparisons)
 }
 
 fn wait_for_connection_count(instance: &Instance, expected: usize) {
@@ -70,21 +75,26 @@ fn unusual_path(directory: &Path) -> PathBuf {
 fn secondary_waits_for_workspace_acknowledgment_and_preserves_native_paths() {
     let name = instance_name();
     let directory = tempfile::tempdir().unwrap();
-    let primary = Instance::establish(&name, &[]).unwrap().unwrap();
-    let comparisons = vec![ComparisonPaths::diff(
+    let primary = Instance::establish(&name, &invocation(Vec::new()))
+        .unwrap()
+        .unwrap();
+    let forwarded = InvocationRequest::new(
         unusual_path(directory.path()),
-        directory.path().join("local\nfile.rs"),
-    )];
-    let expected = comparisons.clone();
+        vec![ComparisonPaths::diff(
+            unusual_path(directory.path()),
+            directory.path().join("local\nfile.rs"),
+        )],
+    );
+    let expected = forwarded.clone();
     let (finished, completion) = mpsc::channel();
     let client = thread::spawn(move || {
         finished
-            .send(Instance::establish(&name, &comparisons).map(|instance| instance.is_none()))
+            .send(Instance::establish(&name, &forwarded).map(|instance| instance.is_none()))
             .unwrap();
     });
 
     let request = receive_request(&primary);
-    assert_eq!(request.comparisons, expected);
+    assert_eq!(request.invocation, expected);
     assert!(
         completion.recv_timeout(Duration::from_millis(30)).is_err(),
         "delivery alone must not release temporary inputs"
@@ -104,7 +114,9 @@ fn secondary_waits_for_workspace_acknowledgment_and_preserves_native_paths() {
 fn merge_handoff_preserves_all_four_roles() {
     let name = instance_name();
     let directory = tempfile::tempdir().unwrap();
-    let primary = Instance::establish(&name, &[]).unwrap().unwrap();
+    let primary = Instance::establish(&name, &invocation(Vec::new()))
+        .unwrap()
+        .unwrap();
     let paths = [
         directory.path().join("base.rs"),
         directory.path().join("local.rs"),
@@ -112,11 +124,11 @@ fn merge_handoff_preserves_all_four_roles() {
         unusual_path(directory.path()),
     ];
     let expected = vec![ComparisonPaths::from_paths(&paths).unwrap()];
-    let comparisons = expected.clone();
-    let client = thread::spawn(move || Instance::establish(&name, &comparisons).unwrap().is_none());
+    let forwarded = invocation(expected.clone());
+    let client = thread::spawn(move || Instance::establish(&name, &forwarded).unwrap().is_none());
 
     let request = receive_request(&primary);
-    assert_eq!(request.comparisons, expected);
+    assert_eq!(request.invocation.comparisons, expected);
     assert!(!client.is_finished());
 
     request.complete(Ok(()));
@@ -126,16 +138,18 @@ fn merge_handoff_preserves_all_four_roles() {
 #[test]
 fn workspace_errors_are_returned_without_starting_a_second_instance() {
     let name = instance_name();
-    let primary = Instance::establish(&name, &[]).unwrap().unwrap();
+    let primary = Instance::establish(&name, &invocation(Vec::new()))
+        .unwrap()
+        .unwrap();
     let client = thread::spawn(move || {
-        Instance::establish(&name, &[])
+        Instance::establish(&name, &invocation(Vec::new()))
             .err()
             .expect("handoff should fail")
     });
 
     let request = receive_request(&primary);
     assert!(
-        request.comparisons.is_empty(),
+        request.invocation.comparisons.is_empty(),
         "an empty request activates the window"
     );
     request.complete(Err("cannot read temporary baseline".into()));
@@ -151,9 +165,10 @@ fn workspace_errors_are_returned_without_starting_a_second_instance() {
 #[test]
 fn launcher_becomes_primary_when_the_previous_owner_exits_before_handoff() {
     let name = instance_name();
-    let mut primary = Some(Instance::establish(&name, &[]).unwrap().unwrap());
+    let request = invocation(Vec::new());
+    let mut primary = Some(Instance::establish(&name, &request).unwrap().unwrap());
 
-    let replacement = Instance::establish_with_before_handoff(&name, &[], || {
+    let replacement = Instance::establish_with_before_handoff(&name, &request, || {
         drop(primary.take());
     })
     .unwrap();
@@ -171,7 +186,7 @@ fn concurrent_launches_elect_exactly_one_owner() {
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
                 barrier.wait();
-                let instance = Instance::establish(&name, &[]).unwrap();
+                let instance = Instance::establish(&name, &invocation(Vec::new())).unwrap();
                 if let Some(primary) = &instance {
                     for _ in 0..3 {
                         receive_request(primary).complete(Ok(()));
@@ -199,7 +214,9 @@ fn concurrent_launches_elect_exactly_one_owner() {
 #[test]
 fn excess_connections_are_rejected_before_ui_dispatch() {
     let name = instance_name();
-    let primary = Instance::establish(&name, &[]).unwrap().unwrap();
+    let primary = Instance::establish(&name, &invocation(Vec::new()))
+        .unwrap()
+        .unwrap();
     let held = (0..MAX_PENDING_CONNECTIONS)
         .map(|_| connect(&name))
         .collect::<Vec<_>>();
@@ -208,7 +225,7 @@ fn excess_connections_are_rejected_before_ui_dispatch() {
     let mut excess = connect(&name);
     let (finished, completion) = mpsc::channel();
     let client = thread::spawn(move || {
-        let result = protocol::write_request(&mut excess, &[])
+        let result = protocol::write_request(&mut excess, &invocation(Vec::new()))
             .and_then(|()| protocol::read_response(&mut excess));
         finished.send(result).unwrap();
     });
@@ -227,11 +244,15 @@ fn excess_connections_are_rejected_before_ui_dispatch() {
 #[test]
 fn protocol_rejects_invalid_requests_before_dispatch() {
     let directory = tempfile::tempdir().unwrap();
+    let relative_directory = InvocationRequest::new(PathBuf::from("relative"), Vec::new());
+    let error = protocol::write_request(&mut Vec::new(), &relative_directory).unwrap_err();
+    assert!(error.contains("invocation directory must be absolute"));
+
     let relative = ComparisonPaths::diff(
         PathBuf::from("relative.rs"),
         directory.path().join("local.rs"),
     );
-    assert!(protocol::write_request(&mut Vec::new(), &[relative]).is_err());
+    assert!(protocol::write_request(&mut Vec::new(), &invocation(vec![relative])).is_err());
 
     let malformed = [3, 0, 0, 0, 0xff, 0xff, 0xff];
     assert!(protocol::read_request(&mut malformed.as_slice()).is_err());

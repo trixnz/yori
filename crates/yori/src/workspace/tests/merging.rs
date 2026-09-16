@@ -38,10 +38,13 @@ fn merge_handoff_loads_all_inputs_and_never_reads_or_writes_the_destination(
         Document::read(&paths.incoming).unwrap(),
     )
     .unwrap();
-    let request = ComparisonPaths::Merge(paths.clone());
+    let request = InvocationRequest::new(
+        directory.path().to_owned(),
+        vec![ComparisonPaths::Merge(paths.clone())],
+    );
     let window = cx.update(|window, _| window.window_handle().downcast::<Root>().unwrap());
 
-    crate::dispatch_open(window, &workspace, &[request], &mut cx.cx).unwrap();
+    crate::dispatch_invocation(window, &workspace, &request, &mut cx.cx).unwrap();
     for path in [&paths.base, &paths.local, &paths.incoming] {
         std::fs::remove_file(path).unwrap();
     }

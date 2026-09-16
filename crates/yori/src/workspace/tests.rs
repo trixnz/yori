@@ -60,36 +60,46 @@ fn harness(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContex
 }
 
 #[gpui_kit::test]
-fn startup_and_handoff_dispatch_can_read_modal_state_and_report_file_errors(
+fn initial_and_forwarded_invocations_share_handling_and_update_the_directory(
     cx: &mut TestAppContext,
 ) {
     let (workspace, cx) = harness(cx);
     let window = cx.update(|window, _| window.window_handle().downcast::<Root>().unwrap());
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let repository_a = fixtures.join("repository-a");
+    let repository_b = fixtures.join("repository-b");
 
-    crate::dispatch_open(window, &workspace, &[], &mut cx.cx).unwrap();
-    crate::dispatch_open(
-        window,
-        &workspace,
-        &[ComparisonPaths::diff(
+    let initial = InvocationRequest::new(repository_a.clone(), Vec::new());
+    crate::dispatch_invocation(window, &workspace, &initial, &mut cx.cx).unwrap();
+    cx.update(|_, cx| {
+        assert_eq!(
+            workspace.read(cx).invocation_directory.as_ref(),
+            Some(&repository_a)
+        );
+    });
+
+    let forwarded = InvocationRequest::new(
+        repository_b.clone(),
+        vec![ComparisonPaths::diff(
             fixtures.join("intraline-before.rs"),
             fixtures.join("intraline-after.rs"),
         )],
-        &mut cx.cx,
-    )
-    .unwrap();
-    cx.update(|_, cx| assert_eq!(workspace.read(cx).tabs.entries.len(), 2));
+    );
+    crate::dispatch_invocation(window, &workspace, &forwarded, &mut cx.cx).unwrap();
+    cx.update(|_, cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.invocation_directory.as_ref(), Some(&repository_b));
+        assert_eq!(workspace.tabs.entries.len(), 2);
+    });
 
-    let error = crate::dispatch_open(
-        window,
-        &workspace,
-        &[ComparisonPaths::diff(
+    let invalid = InvocationRequest::new(
+        repository_b,
+        vec![ComparisonPaths::diff(
             fixtures.join("missing.rs"),
             fixtures.join("after.rs"),
         )],
-        &mut cx.cx,
-    )
-    .unwrap_err();
+    );
+    let error = crate::dispatch_invocation(window, &workspace, &invalid, &mut cx.cx).unwrap_err();
     assert!(error.contains("missing.rs"));
     cx.update(|_, cx| assert_eq!(workspace.read(cx).tabs.entries.len(), 2));
 }
