@@ -166,7 +166,7 @@ fn updates_preserve_comments_unknown_keys_and_file_permissions() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         &path,
-        "# user notes\n[editor]\nvim_keybindings = false # keep this note\nfuture_option = \"future\"\n\n[plugin]\nenabled = true\n",
+        "# user notes\n[editor]\n# key-specific note\nvim_keybindings = false # keep this inline note\nfuture_option = \"future\"\n\n[plugin]\nenabled = true\n",
     )
     .unwrap();
 
@@ -186,8 +186,10 @@ fn updates_preserve_comments_unknown_keys_and_file_permissions() {
         .unwrap();
     let updated = fs::read_to_string(&path).unwrap();
 
-    assert!(updated.contains("# user notes"));
-    assert!(updated.contains("vim_keybindings = true # keep this note"));
+    assert!(updated.contains("# user notes\n[editor]"));
+    assert!(
+        updated.contains("# key-specific note\nvim_keybindings = true # keep this inline note")
+    );
     assert!(updated.contains("future_option = \"future\""));
     assert!(updated.contains("[plugin]\nenabled = true"));
 

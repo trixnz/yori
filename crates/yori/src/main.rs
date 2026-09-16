@@ -71,15 +71,22 @@ fn load_arguments() -> Result<Vec<ComparisonPaths>, String> {
         .map_err(|_| usage(&program))
 }
 
+fn report_startup_diagnostic<C: AppContext>(window: gpui_kit::AnyWindowHandle, cx: &mut C) {
+    let _ = window.update(cx, |_, window, cx| {
+        if let Some(diagnostic) = config::diagnostic(cx) {
+            window.push_notification(Notification::error(diagnostic), cx);
+        }
+    });
+}
+
 fn dispatch_open<C: AppContext>(
-    window: gpui_kit::WindowHandle<Root>,
+    window: impl Into<gpui_kit::AnyWindowHandle>,
     workspace: &gpui_kit::Entity<Workspace>,
     comparisons: &[ComparisonPaths],
     cx: &mut C,
 ) -> Result<(), String> {
-    // The typed handle also mutably borrows Root. Workspace opening must be
-    // able to read/update Root itself for dialog checks and error notifications.
-    let window: gpui_kit::AnyWindowHandle = window.into();
+    let window = window.into();
+
     window
         .update(cx, |_, window, cx| {
             workspace.update(cx, |workspace, cx| {
@@ -128,11 +135,11 @@ fn main() {
                     .expect("failed to open yori window");
                 let workspace = workspace.expect("workspace initialized with its window");
 
-                let _ = window.update(cx, |_, window, cx| {
-                    if let Some(diagnostic) = config::diagnostic(cx) {
-                        window.push_notification(Notification::error(diagnostic), cx);
-                    }
-                });
+                // WindowExt updates Root internally. Release the typed Root handle
+                // before reporting startup diagnostics or opening comparisons.
+                let window: gpui_kit::AnyWindowHandle = window.into();
+
+                report_startup_diagnostic(window, cx);
 
                 // Root is installed now, so error notifications and editor focus
                 // are available before handling either initial or forwarded files.
@@ -153,4 +160,66 @@ fn main() {
             })
             .detach();
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::{
+        Context, IntoElement, ParentElement, Render, TestAppContext, VisualContext, Window, div,
+        test::TestWindowExt,
+    };
+
+    struct TestView;
+
+    impl Render for TestView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let notifications = Root::render_notification_layer(window, cx);
+
+            div().children(notifications)
+        }
+    }
+
+    fn assert_startup_diagnostic(contents: &str, cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("yori").join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            appearance::init(cx);
+            config::init_for_path(path, cx);
+        });
+
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| TestView);
+            Root::new(view, window, cx)
+        });
+        let window = cx.window_handle();
+
+        report_startup_diagnostic(window, cx);
+
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let _ = window.find("notification");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn malformed_startup_configuration_reports_without_reentrant_root_update(
+        cx: &mut TestAppContext,
+    ) {
+        assert_startup_diagnostic("[editor\nvim_keybindings = true", cx);
+    }
+
+    #[gpui_kit::test]
+    fn partially_invalid_startup_configuration_reports_without_reentrant_root_update(
+        cx: &mut TestAppContext,
+    ) {
+        assert_startup_diagnostic(
+            "[editor]\nvim_keybindings = true\nshow_whitespace = \"sometimes\"\n",
+            cx,
+        );
+    }
 }

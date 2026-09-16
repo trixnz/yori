@@ -103,7 +103,13 @@ pub(crate) fn init(cx: &mut App) {
         },
         |directory| Configuration::persistent(directory.join(APPLICATION_NAME).join(FILE_NAME)),
     );
+
     cx.set_global(configuration);
+}
+
+#[cfg(test)]
+pub(crate) fn init_for_path(path: PathBuf, cx: &mut App) {
+    cx.set_global(Configuration::persistent(path));
 }
 
 pub(crate) fn init_transient(cx: &mut App) {
@@ -132,6 +138,7 @@ pub(crate) fn reload(cx: &mut App) -> Option<String> {
 
         (editor, diagnostic, configuration.diagnostic.clone())
     };
+
     let configuration = cx.global::<Configuration>();
     if configuration.editor == editor && configuration.diagnostic == diagnostic {
         return None;
@@ -140,6 +147,7 @@ pub(crate) fn reload(cx: &mut App) -> Option<String> {
     let report = (diagnostic != previous_diagnostic)
         .then(|| diagnostic.clone())
         .flatten();
+
     let configuration = cx.global_mut::<Configuration>();
     configuration.editor = editor;
     configuration.diagnostic = diagnostic;
@@ -161,6 +169,7 @@ fn load(path: &Path) -> Result<(EditorConfig, Option<String>), String> {
             return Err(format!("cannot read {}: {error}", path.display()));
         }
     };
+
     let document = text
         .parse::<DocumentMut>()
         .map_err(|error| format!("invalid configuration in {}: {error}", path.display()))?;
@@ -217,6 +226,7 @@ fn update_document(path: &Path, editor: EditorConfig) -> Result<(), String> {
                     path.display()
                 ));
             }
+
             let document = text.parse::<DocumentMut>().map_err(|error| {
                 format!(
                     "cannot update {} while it contains invalid TOML: {error}",
@@ -238,6 +248,7 @@ fn update_document(path: &Path, editor: EditorConfig) -> Result<(), String> {
     {
         document["editor"] = Item::Table(Table::new());
     }
+
     let table = document["editor"]
         .as_table_like_mut()
         .expect("editor was normalized to a table");
@@ -254,6 +265,7 @@ fn update_document(path: &Path, editor: EditorConfig) -> Result<(), String> {
         .ok_or_else(|| format!("configuration path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent)
         .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+
     let bytes = document.to_string();
     let atomic = AtomicFile::new(path, AllowOverwrite);
     atomic
@@ -268,14 +280,16 @@ fn update_document(path: &Path, editor: EditorConfig) -> Result<(), String> {
 }
 
 fn set_boolean(table: &mut dyn TableLike, key: &str, enabled: bool) {
-    let decor = table
-        .get(key)
-        .and_then(Item::as_value)
-        .map(Value::decor)
-        .cloned();
-    let mut item = value(enabled);
-    if let (Some(decor), Some(value)) = (decor, item.as_value_mut()) {
+    let Some(existing) = table.get_mut(key) else {
+        table.insert(key, value(enabled));
+        return;
+    };
+
+    let decor = existing.as_value().map(Value::decor).cloned();
+    let mut replacement = value(enabled);
+    if let (Some(decor), Some(value)) = (decor, replacement.as_value_mut()) {
         *value.decor_mut() = decor;
     }
-    table.insert(key, item);
+
+    *existing = replacement;
 }
