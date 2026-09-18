@@ -92,6 +92,7 @@ impl PerforceSourceChooser {
         self.selection = 0;
         self.list_scroll.scroll_to_item(0);
         self.message = None;
+
         self.focus_current(window, cx);
         cx.notify();
     }
