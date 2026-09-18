@@ -26,7 +26,7 @@ impl PreferencesDialog {
     }
 
     pub(super) fn apply(&mut self, cx: &mut Context<Self>) -> bool {
-        match crate::config::update_preferences(self.editor, cx) {
+        match crate::config::update_editor(self.editor, cx) {
             Ok(()) => true,
             Err(error) => {
                 self.error = Some(error.into());
@@ -82,7 +82,7 @@ impl Render for PreferencesDialog {
             .child(Self::setting(
                 "show-whitespace",
                 "Show whitespace",
-                "Used as the default for comparisons opened after applying.",
+                "Applies immediately to every open editor.",
                 self.editor.show_whitespace,
                 |this, checked| this.editor.show_whitespace = checked,
                 cx,
@@ -90,7 +90,7 @@ impl Render for PreferencesDialog {
             .child(Self::setting(
                 "show-change-connections",
                 "Show change connections",
-                "Used as the default for comparisons opened after applying.",
+                "Applies immediately to every open editor.",
                 self.editor.show_change_connections,
                 |this, checked| this.editor.show_change_connections = checked,
                 cx,

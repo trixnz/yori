@@ -26,7 +26,6 @@ pub(crate) struct EditorConfig {
 pub(crate) struct Configuration {
     path: Option<PathBuf>,
     editor: EditorConfig,
-    display_revision: u64,
     diagnostic: Option<String>,
 }
 
@@ -64,39 +63,28 @@ impl Configuration {
     }
 
     fn reload(&mut self) -> Option<String> {
-        let previous_editor = self.editor;
         let previous_diagnostic = self.diagnostic.clone();
         let (editor, diagnostic) = self.refreshed();
         self.editor = editor;
         self.diagnostic = diagnostic;
-
-        if editor != previous_editor {
-            self.display_revision = self.display_revision.wrapping_add(1);
-        }
 
         (self.diagnostic != previous_diagnostic)
             .then(|| self.diagnostic.clone())
             .flatten()
     }
 
-    fn write_editor(
-        &mut self,
-        editor: EditorConfig,
-        propagate_display: bool,
-    ) -> Result<(), String> {
-        let result = if let Some(path) = &self.path {
-            update_document(path, editor)
-        } else {
-            Ok(())
+    fn update_editor(&mut self, editor: EditorConfig) -> Result<(), String> {
+        let Some(path) = &self.path else {
+            self.editor = editor;
+            self.diagnostic = None;
+            return Ok(());
         };
 
+        let result = update_document(path, editor);
         match result {
             Ok(()) => {
                 self.editor = editor;
                 self.diagnostic = None;
-                if propagate_display {
-                    self.display_revision = self.display_revision.wrapping_add(1);
-                }
                 Ok(())
             }
             Err(error) => {
@@ -104,14 +92,6 @@ impl Configuration {
                 Err(error)
             }
         }
-    }
-
-    fn update_editor(&mut self, editor: EditorConfig) -> Result<(), String> {
-        self.write_editor(editor, true)
-    }
-
-    fn update_preferences(&mut self, editor: EditorConfig) -> Result<(), String> {
-        self.write_editor(editor, false)
     }
 }
 
@@ -142,12 +122,6 @@ pub(crate) fn editor(cx: &App) -> EditorConfig {
     cx.global::<Configuration>().editor
 }
 
-pub(crate) fn editor_state(cx: &App) -> (EditorConfig, u64) {
-    let configuration = cx.global::<Configuration>();
-
-    (configuration.editor, configuration.display_revision)
-}
-
 pub(crate) fn path(cx: &App) -> Option<PathBuf> {
     cx.global::<Configuration>().path.clone()
 }
@@ -175,9 +149,6 @@ pub(crate) fn reload(cx: &mut App) -> Option<String> {
         .flatten();
 
     let configuration = cx.global_mut::<Configuration>();
-    if configuration.editor != editor {
-        configuration.display_revision = configuration.display_revision.wrapping_add(1);
-    }
     configuration.editor = editor;
     configuration.diagnostic = diagnostic;
 
@@ -186,10 +157,6 @@ pub(crate) fn reload(cx: &mut App) -> Option<String> {
 
 pub(crate) fn update_editor(editor: EditorConfig, cx: &mut App) -> Result<(), String> {
     cx.global_mut::<Configuration>().update_editor(editor)
-}
-
-pub(crate) fn update_preferences(editor: EditorConfig, cx: &mut App) -> Result<(), String> {
-    cx.global_mut::<Configuration>().update_preferences(editor)
 }
 
 fn load(path: &Path) -> Result<(EditorConfig, Option<String>), String> {

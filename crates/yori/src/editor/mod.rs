@@ -255,7 +255,6 @@ pub(super) struct AlignedEditor {
     horizontal_scroll: f32,
     show_whitespace: bool,
     show_connections: bool,
-    display_preferences_revision: u64,
     hovered_connection: Option<Range<usize>>,
     scrollbar_grab: Option<f32>,
     // Mouse events are window-local; measured bounds provide the editor's content-local inset.
@@ -271,7 +270,7 @@ impl AlignedEditor {
     ) -> Self {
         let alignment = Alignment::between(&left.document, &right.document);
         let dirty = DirtyState::new(right.document.text());
-        let (config, display_preferences_revision) = crate::config::editor_state(cx);
+        let config = crate::config::editor(cx);
 
         let focus = cx.focus_handle();
         focus.focus(window, cx);
@@ -290,7 +289,7 @@ impl AlignedEditor {
         })
         .detach();
         cx.observe_global::<crate::config::Configuration>(|this, cx| {
-            let (config, display_preferences_revision) = crate::config::editor_state(cx);
+            let config = crate::config::editor(cx);
             if VimKeybindings::from(config.vim_keybindings) != this.vim_keybindings {
                 this.cancel_vim();
                 this.vim_keybindings = config.vim_keybindings.into();
@@ -302,17 +301,13 @@ impl AlignedEditor {
                     });
                 }
             }
-            if display_preferences_revision != this.display_preferences_revision {
-                if this.show_whitespace && !config.show_whitespace {
-                    this.horizontal_scroll = 0.0;
-                }
-
-                this.show_whitespace = config.show_whitespace;
-                this.show_connections = config.show_change_connections;
-                this.display_preferences_revision = display_preferences_revision;
-                this.hovered_connection = None;
+            if this.show_whitespace && !config.show_whitespace {
+                this.horizontal_scroll = 0.0;
             }
 
+            this.show_whitespace = config.show_whitespace;
+            this.show_connections = config.show_change_connections;
+            this.hovered_connection = None;
             cx.notify();
         })
         .detach();
@@ -335,7 +330,6 @@ impl AlignedEditor {
             horizontal_scroll: 0.0,
             show_whitespace: config.show_whitespace,
             show_connections: config.show_change_connections,
-            display_preferences_revision,
             hovered_connection: None,
             scrollbar_grab: None,
             content_bounds: Rc::new(Cell::new(Bounds::new(

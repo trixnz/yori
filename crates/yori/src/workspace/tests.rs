@@ -20,12 +20,24 @@ fn merge_paths(result: &str) -> ComparisonPaths {
 }
 
 fn harness(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
-    harness_with_config(cx, None)
+    harness_with_options(cx, None, true)
+}
+
+fn empty_harness(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    harness_with_options(cx, None, false)
 }
 
 fn harness_with_config(
     cx: &mut TestAppContext,
     config_path: Option<std::path::PathBuf>,
+) -> (Entity<Workspace>, &mut VisualTestContext) {
+    harness_with_options(cx, config_path, true)
+}
+
+fn harness_with_options(
+    cx: &mut TestAppContext,
+    config_path: Option<std::path::PathBuf>,
+    open_comparison: bool,
 ) -> (Entity<Workspace>, &mut VisualTestContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
@@ -54,13 +66,15 @@ fn harness_with_config(
             view.monitor.take();
             view.disk_watch.take();
 
-            let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
-            view.open_paths(
-                &fixtures.join("before.rs"),
-                &fixtures.join("after.rs"),
-                window,
-                cx,
-            );
+            if open_comparison {
+                let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+                view.open_paths(
+                    &fixtures.join("before.rs"),
+                    &fixtures.join("after.rs"),
+                    window,
+                    cx,
+                );
+            }
         });
         window.render_frame(cx);
     });
@@ -69,12 +83,16 @@ fn harness_with_config(
     (workspace, cx)
 }
 
+fn preferences_shortcut() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "cmd-,"
+    } else {
+        "ctrl-,"
+    }
+}
+
 fn show_preferences(cx: &mut VisualTestContext) {
-    cx.update(|window, cx| {
-        window.dispatch_action(Box::new(Preferences), cx);
-        window.render_frame(cx);
-    });
-    cx.run_until_parked();
+    cx.simulate_keystrokes(preferences_shortcut());
     cx.update(TestWindowExt::render_frame);
 }
 
@@ -83,6 +101,21 @@ fn active_editor(workspace: &Entity<Workspace>, cx: &App) -> Entity<AlignedEdito
     let id = workspace.tabs.active.unwrap();
 
     workspace.tabs.get(id).unwrap().content.editor.clone()
+}
+
+#[gpui_kit::test]
+fn preferences_shortcut_opens_from_an_empty_workspace(cx: &mut TestAppContext) {
+    let (workspace, cx) = empty_harness(cx);
+
+    cx.update(|_, cx| assert!(workspace.read(cx).tabs.entries.is_empty()));
+    show_preferences(cx);
+
+    cx.update(|window, cx| {
+        assert!(window.has_active_dialog(cx));
+        assert!(workspace.read(cx).preferences.is_some());
+        window.press("escape", cx);
+    });
+    cx.run_until_parked();
 }
 
 #[gpui_kit::test]
@@ -154,13 +187,13 @@ fn cancel_discards_selections_and_restores_editor_focus(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
-fn repeated_preferences_action_focuses_one_existing_dialog(cx: &mut TestAppContext) {
+fn repeated_preferences_shortcut_focuses_one_existing_dialog(cx: &mut TestAppContext) {
     let (_, cx) = harness(cx);
     show_preferences(cx);
 
+    cx.update(|window, cx| window.click("vim-keybindings", cx));
+    cx.simulate_keystrokes(preferences_shortcut());
     cx.update(|window, cx| {
-        window.click("vim-keybindings", cx);
-        window.dispatch_action(Box::new(Preferences), cx);
         window.render_frame(cx);
 
         assert_eq!(window.find("vim-keybindings").checked(), Some(true));
@@ -182,7 +215,7 @@ fn repeated_preferences_action_focuses_one_existing_dialog(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn apply_updates_all_vim_modes_and_only_future_display_defaults(cx: &mut TestAppContext) {
+fn apply_updates_every_open_editor_and_future_editor(cx: &mut TestAppContext) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("yori").join("config.toml");
     let (workspace, cx) = harness_with_config(cx, Some(path.clone()));
@@ -220,27 +253,17 @@ fn apply_updates_all_vim_modes_and_only_future_display_defaults(cx: &mut TestApp
         .advance_clock(std::time::Duration::from_millis(300));
     cx.run_until_parked();
 
-    let expected_existing = crate::config::EditorConfig {
+    let expected = crate::config::EditorConfig {
         vim_keybindings: true,
-        show_whitespace: false,
-        show_change_connections: false,
+        show_whitespace: true,
+        show_change_connections: true,
     };
     cx.update(|window, cx| {
         assert!(!window.has_active_dialog(cx));
         assert!(focused_editor.focus_handle(cx).is_focused(window));
-        assert_eq!(
-            crate::config::editor(cx),
-            crate::config::EditorConfig {
-                vim_keybindings: true,
-                show_whitespace: true,
-                show_change_connections: true,
-            }
-        );
+        assert_eq!(crate::config::editor(cx), expected);
         for tab in &workspace.read(cx).tabs.entries {
-            assert_eq!(
-                tab.content.editor.read(cx).applied_preferences(),
-                expected_existing
-            );
+            assert_eq!(tab.content.editor.read(cx).applied_preferences(), expected);
         }
 
         workspace.update(cx, |workspace, cx| {

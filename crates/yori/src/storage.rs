@@ -16,6 +16,44 @@ use std::{
 };
 use yori_document::Document;
 
+#[cfg(test)]
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+};
+
+#[cfg(test)]
+static SAVE_DELAYS: OnceLock<Mutex<HashMap<PathBuf, async_channel::Receiver<()>>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn delay_next_save(path: &Path) -> async_channel::Sender<()> {
+    let (release, delay) = async_channel::bounded(1);
+    let previous = SAVE_DELAYS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), delay);
+    assert!(previous.is_none(), "save delay already installed for path");
+
+    release
+}
+
+#[cfg(test)]
+fn wait_for_save_delay(path: &Path) {
+    let delay = SAVE_DELAYS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(path);
+    if let Some(delay) = delay {
+        delay
+            .recv_blocking()
+            .expect("delayed save was dropped without release");
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct FileVersion {
     bytes: Arc<[u8]>,
@@ -138,6 +176,9 @@ enum StageError {
 /// Compare against the contents the user loaded or explicitly approved, then
 /// publish the complete replacement in one atomic operation.
 pub(crate) fn save(path: &Path, expected: &Snapshot, bytes: &[u8]) -> Result<Snapshot, SaveError> {
+    #[cfg(test)]
+    wait_for_save_delay(path);
+
     save_with_before_replace(path, expected, bytes, || {})
 }
 

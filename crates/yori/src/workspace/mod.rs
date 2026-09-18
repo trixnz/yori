@@ -256,6 +256,9 @@ impl Workspace {
     }
 
     fn open_preferences(&mut self, _: &Preferences, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saving || self.picking_files {
+            return;
+        }
         if let Some(preferences) = &self.preferences {
             preferences.read(cx).focus_handle().focus(window, cx);
             return;
@@ -778,7 +781,7 @@ pub(super) fn init(cx: &mut App) {
         KeyBinding::new(&format!("{command}-shift-m"), OpenMerge, Some(KEY_CONTEXT)),
         KeyBinding::new(&format!("{command}-w"), CloseComparison, Some(KEY_CONTEXT)),
         KeyBinding::new(&format!("{command}-q"), Quit, Some(KEY_CONTEXT)),
-        KeyBinding::new(&format!("{command}-comma"), Preferences, None),
+        KeyBinding::new(&format!("{command}-,"), Preferences, None),
         KeyBinding::new("ctrl-tab", NextTab, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(KEY_CONTEXT)),
     ]);
