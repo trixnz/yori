@@ -1,11 +1,7 @@
 use std::{
     num::NonZeroU32,
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{Arc, Mutex, atomic::Ordering, mpsc},
     thread,
 };
 
@@ -43,7 +39,17 @@ pub struct P4Client {
 
 struct Inner {
     requests: mpsc::Sender<WorkerRequest>,
-    stopped: AtomicBool,
+    shutdown: Arc<ShutdownCoordinator>,
+}
+
+struct ShutdownCoordinator {
+    state: Mutex<ShutdownState>,
+}
+
+enum ShutdownState {
+    Running,
+    InProgress(Vec<async_channel::Sender<Result<()>>>),
+    Completed(Result<()>),
 }
 
 struct CancelOnDrop(Arc<crate::CancellationState>);
@@ -54,10 +60,109 @@ impl Drop for CancelOnDrop {
     }
 }
 
+impl Inner {
+    fn send(&self, request: WorkerRequest) -> Result<()> {
+        let state = self
+            .shutdown
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*state, ShutdownState::Running) {
+            return Err(Error::worker_stopped());
+        }
+
+        self.requests
+            .send(request)
+            .map_err(|_| Error::worker_stopped())
+    }
+
+    fn request_shutdown(&self) -> async_channel::Receiver<Result<()>> {
+        self.shutdown.subscribe(&self.requests)
+    }
+}
+
 impl Drop for Inner {
     fn drop(&mut self) {
-        self.stopped.store(true, Ordering::Release);
-        let _ = self.requests.send(WorkerRequest::Shutdown(None));
+        self.shutdown.begin_without_waiter(&self.requests);
+    }
+}
+
+impl ShutdownCoordinator {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ShutdownState::Running),
+        }
+    }
+
+    fn subscribe(
+        &self,
+        requests: &mpsc::Sender<WorkerRequest>,
+    ) -> async_channel::Receiver<Result<()>> {
+        let (completion, completed) = async_channel::bounded(1);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &mut *state {
+            ShutdownState::Running => {
+                *state = ShutdownState::InProgress(vec![completion]);
+                if requests.send(WorkerRequest::Shutdown).is_err() {
+                    let result = Err(Error::worker_stopped());
+                    let waiters = match std::mem::replace(
+                        &mut *state,
+                        ShutdownState::Completed(result.clone()),
+                    ) {
+                        ShutdownState::InProgress(waiters) => waiters,
+                        ShutdownState::Running | ShutdownState::Completed(_) => Vec::new(),
+                    };
+
+                    for waiter in waiters {
+                        let _ = waiter.try_send(result.clone());
+                    }
+                }
+            }
+            ShutdownState::InProgress(waiters) => waiters.push(completion),
+            ShutdownState::Completed(result) => {
+                let _ = completion.try_send(result.clone());
+            }
+        }
+
+        completed
+    }
+
+    fn begin_without_waiter(&self, requests: &mpsc::Sender<WorkerRequest>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*state, ShutdownState::Running) {
+            *state = if requests.send(WorkerRequest::Shutdown).is_ok() {
+                ShutdownState::InProgress(Vec::new())
+            } else {
+                ShutdownState::Completed(Err(Error::worker_stopped()))
+            };
+        }
+    }
+
+    fn complete(&self, result: &Result<()>) {
+        let waiters = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches!(*state, ShutdownState::Completed(_)) {
+                return;
+            }
+
+            match std::mem::replace(&mut *state, ShutdownState::Completed(result.clone())) {
+                ShutdownState::Running | ShutdownState::Completed(_) => Vec::new(),
+                ShutdownState::InProgress(waiters) => waiters,
+            }
+        };
+
+        for waiter in waiters {
+            let _ = waiter.try_send(result.clone());
+        }
     }
 }
 
@@ -68,7 +173,7 @@ enum WorkerRequest {
         cancellation: Arc<crate::CancellationState>,
         response: async_channel::Sender<RawResult>,
     },
-    Shutdown(Option<async_channel::Sender<Result<()>>>),
+    Shutdown,
 }
 
 impl P4Client {
@@ -81,10 +186,12 @@ impl P4Client {
             .to_owned();
         let (requests, incoming) = mpsc::channel();
         let (initialized, initialization) = async_channel::bounded(1);
+        let shutdown = Arc::new(ShutdownCoordinator::new());
+        let worker_shutdown = Arc::clone(&shutdown);
 
         thread::Builder::new()
             .name("yori-p4".to_owned())
-            .spawn(move || worker_main(&cwd, &incoming, initialized))
+            .spawn(move || worker_main(&cwd, &incoming, initialized, &worker_shutdown))
             .map_err(|error| Error::worker_start_failed(&error))?;
 
         initialization
@@ -93,10 +200,7 @@ impl P4Client {
             .map_err(|_| Error::worker_stopped())??;
 
         Ok(Self {
-            inner: Arc::new(Inner {
-                requests,
-                stopped: AtomicBool::new(false),
-            }),
+            inner: Arc::new(Inner { requests, shutdown }),
         })
     }
 
@@ -209,16 +313,8 @@ impl P4Client {
 
     /// Stops the owning worker after all requests already queued ahead of shutdown.
     pub async fn shutdown(&self) -> Result<()> {
-        if self.inner.stopped.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-
-        let (completed, completion) = async_channel::bounded(1);
         self.inner
-            .requests
-            .send(WorkerRequest::Shutdown(Some(completed)))
-            .map_err(|_| Error::worker_stopped())?;
-        completion
+            .request_shutdown()
             .recv()
             .await
             .map_err(|_| Error::worker_stopped())?
@@ -233,24 +329,17 @@ impl P4Client {
         if cancellation.is_cancelled() {
             return Err(Error::cancelled());
         }
-        if self.inner.stopped.load(Ordering::Acquire) {
-            return Err(Error::worker_stopped());
-        }
-
         let request_cancellation = Arc::new(crate::CancellationState::following(Arc::clone(
             &cancellation.state,
         )));
         let _cancel_on_drop = CancelOnDrop(Arc::clone(&request_cancellation));
         let (response, result) = async_channel::bounded(1);
-        self.inner
-            .requests
-            .send(WorkerRequest::Run {
-                command: command.to_owned(),
-                arguments,
-                cancellation: request_cancellation,
-                response,
-            })
-            .map_err(|_| Error::worker_stopped())?;
+        self.inner.send(WorkerRequest::Run {
+            command: command.to_owned(),
+            arguments,
+            cancellation: request_cancellation,
+            response,
+        })?;
         let result = result.recv().await.map_err(|_| Error::worker_stopped())?;
 
         if cancellation.is_cancelled() {
@@ -265,6 +354,7 @@ fn worker_main(
     cwd: &str,
     requests: &mpsc::Receiver<WorkerRequest>,
     initialized: async_channel::Sender<Result<()>>,
+    shutdown: &ShutdownCoordinator,
 ) {
     let mut thread_initialization = RawResult::default();
     let native_thread = ffi::start_thread(&mut thread_initialization);
@@ -282,7 +372,9 @@ fn worker_main(
         });
 
     if let Err(error) = thread_result {
-        let _ = initialized.try_send(Err(error));
+        let result = Err(error);
+        let _ = initialized.try_send(result.clone());
+        shutdown.complete(&result);
         return;
     }
 
@@ -305,7 +397,9 @@ fn worker_main(
             error = error.with_cleanup_failure(&cleanup);
         }
 
-        let _ = initialized.try_send(Err(error));
+        let result = Err(error);
+        let _ = initialized.try_send(result.clone());
+        shutdown.complete(&result);
         return;
     }
 
@@ -314,9 +408,9 @@ fn worker_main(
     let _ = initialized.try_send(Ok(()));
     drop(initialized);
 
-    let completion = loop {
+    loop {
         let Ok(request) = requests.recv() else {
-            break None;
+            break;
         };
 
         match request {
@@ -336,14 +430,12 @@ fn worker_main(
 
                 let _ = response.try_send(result);
             }
-            WorkerRequest::Shutdown(completed) => break completed,
+            WorkerRequest::Shutdown => break,
         }
-    };
+    }
 
     let cleanup_result = shutdown_native(client, native_thread);
-    if let Some(completed) = completion {
-        let _ = completed.try_send(cleanup_result);
-    }
+    shutdown.complete(&cleanup_result);
 }
 
 fn shutdown_native(
@@ -370,6 +462,8 @@ fn shutdown_native(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Barrier;
+
     use super::*;
 
     #[test]
@@ -387,6 +481,101 @@ mod tests {
         let child = crate::CancellationState::following(Arc::clone(&parent));
         parent.cancelled.store(true, Ordering::Release);
         assert!(cancellation_requested(&child));
+    }
+
+    #[test]
+    fn concurrent_and_repeated_shutdowns_share_the_cleanup_failure() {
+        let (client, requests) = shutdown_test_client();
+        let barrier = Arc::new(Barrier::new(3));
+        let waiters = [client.clone(), client.clone()].map(|handle| {
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                handle.inner.request_shutdown()
+            })
+        });
+
+        barrier.wait();
+        let [first, second] = waiters.map(|waiter| waiter.join().unwrap());
+
+        assert!(matches!(requests.recv().unwrap(), WorkerRequest::Shutdown));
+        assert!(matches!(
+            requests.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            first.try_recv(),
+            Err(async_channel::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            second.try_recv(),
+            Err(async_channel::TryRecvError::Empty)
+        ));
+
+        let failure = Error::lifecycle("thread shutdown", &[]);
+        client.inner.shutdown.complete(&Err(failure.clone()));
+
+        assert_eq!(first.recv_blocking().unwrap(), Err(failure.clone()));
+        assert_eq!(second.recv_blocking().unwrap(), Err(failure.clone()));
+
+        let repeated = client.inner.request_shutdown();
+        assert_eq!(repeated.recv_blocking().unwrap(), Err(failure));
+        assert!(matches!(
+            requests.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn shutdown_completion_waits_for_queued_work_and_worker_cleanup() {
+        let (client, requests) = shutdown_test_client();
+        let (response, _result) = async_channel::bounded(1);
+        client
+            .inner
+            .send(WorkerRequest::Run {
+                command: "info".to_owned(),
+                arguments: Vec::new(),
+                cancellation: Arc::new(crate::CancellationState::default()),
+                response,
+            })
+            .unwrap();
+
+        let completion = client.inner.request_shutdown();
+        let (late_response, _late_result) = async_channel::bounded(1);
+        assert_eq!(
+            client.inner.send(WorkerRequest::Run {
+                command: "late-info".to_owned(),
+                arguments: Vec::new(),
+                cancellation: Arc::new(crate::CancellationState::default()),
+                response: late_response,
+            }),
+            Err(Error::worker_stopped())
+        );
+
+        assert!(matches!(
+            completion.try_recv(),
+            Err(async_channel::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            requests.recv().unwrap(),
+            WorkerRequest::Run { .. }
+        ));
+        assert!(matches!(
+            completion.try_recv(),
+            Err(async_channel::TryRecvError::Empty)
+        ));
+        assert!(matches!(requests.recv().unwrap(), WorkerRequest::Shutdown));
+        assert!(matches!(
+            requests.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            completion.try_recv(),
+            Err(async_channel::TryRecvError::Empty)
+        ));
+
+        client.inner.shutdown.complete(&Ok(()));
+        assert_eq!(completion.recv_blocking().unwrap(), Ok(()));
     }
 
     #[test]
@@ -443,6 +632,18 @@ mod tests {
             error.to_string(),
             "invalid byte: �; check the Perforce command details and retry"
         );
+    }
+
+    fn shutdown_test_client() -> (P4Client, mpsc::Receiver<WorkerRequest>) {
+        let (requests, incoming) = mpsc::channel();
+        let client = P4Client {
+            inner: Arc::new(Inner {
+                requests,
+                shutdown: Arc::new(ShutdownCoordinator::new()),
+            }),
+        };
+
+        (client, incoming)
     }
 
     fn start_native_thread() -> cxx::UniquePtr<ffi::NativeThread> {
