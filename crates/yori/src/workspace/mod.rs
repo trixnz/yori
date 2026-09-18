@@ -27,7 +27,10 @@ use yori_document::Document;
 use crate::comparison::{Comparison, MergePaths};
 use crate::editor::{AlignedEditor, DirtyChanged, PaneDocument};
 use crate::invocation::InvocationRequest;
-use crate::review::{ReviewChanged, ReviewSession, ReviewSource};
+use crate::review::{
+    GitRepository, GitSourceChooser, GitSourceChooserEvent, ReviewChanged, ReviewSession,
+    ReviewSource,
+};
 use decision_dialog::{Decision, DecisionDialog, DecisionShortcut};
 use tabs::{TabIdentity, Tabs};
 
@@ -38,6 +41,7 @@ gpui_kit::actions!(
     [
         OpenComparison,
         OpenMerge,
+        OpenGitReview,
         Save,
         CloseComparison,
         Quit,
@@ -112,6 +116,7 @@ pub(super) struct Workspace {
     disk_watch: Option<crate::storage::FileWatch>,
     watch_error: Option<String>,
     monitor: Option<gpui_kit::Task<()>>,
+    git_source_chooser: Option<(Entity<GitSourceChooser>, Subscription)>,
 }
 
 impl Workspace {
@@ -159,6 +164,7 @@ impl Workspace {
             watch_error: disk_watch.is_none().then(|| "Live file watching is unavailable. Disk is still checked on activation and before saving.".into()),
             disk_watch,
             monitor,
+            git_source_chooser: None,
         }
     }
 
@@ -186,6 +192,18 @@ impl Workspace {
     ) -> Result<(), String> {
         self.invocation_directory = Some(invocation.directory.clone());
 
+        if invocation.comparisons.is_empty() {
+            window.activate_window();
+            if let Ok(repository) = GitRepository::discover(&invocation.directory) {
+                self.open_git_source_chooser(repository, window, cx)?;
+            } else {
+                self.focus_active(window, cx);
+            }
+
+            return Ok(());
+        }
+
+        self.git_source_chooser = None;
         self.open_comparisons(&invocation.comparisons, window, cx)
     }
 
@@ -287,13 +305,6 @@ impl Workspace {
         Ok(())
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "review providers will call this seam when their source pickers are added"
-        )
-    )]
     pub(crate) fn open_review_source(
         &mut self,
         source: ReviewSource,
@@ -366,6 +377,84 @@ impl Workspace {
         self.choose_files(true, window, cx);
     }
 
+    fn choose_git_review(
+        &mut self,
+        _: &OpenGitReview,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.picking_files || window.has_active_dialog(cx) {
+            return;
+        }
+
+        let Some(context) = self.review_context() else {
+            window.push_notification(
+                Notification::error(
+                    "Open a local file or invoke yori from a Git repository first.",
+                ),
+                cx,
+            );
+            return;
+        };
+        let repository = match GitRepository::discover(&context) {
+            Ok(repository) => repository,
+            Err(error) => {
+                window.push_notification(Notification::error(error), cx);
+                return;
+            }
+        };
+
+        if let Err(error) = self.open_git_source_chooser(repository, window, cx) {
+            window.push_notification(Notification::error(error), cx);
+        }
+    }
+
+    fn review_context(&self) -> Option<std::path::PathBuf> {
+        self.invocation_directory.clone().or_else(|| {
+            self.tabs
+                .active
+                .and_then(|id| self.tabs.get(id))
+                .and_then(|tab| tab.identity.comparison())
+                .and_then(|comparison| comparison.target().parent())
+                .map(std::path::Path::to_owned)
+        })
+    }
+
+    fn open_git_source_chooser(
+        &mut self,
+        repository: GitRepository,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let commits = repository.recent_commits()?;
+
+        self.deactivate(cx);
+        let chooser = cx.new(|cx| GitSourceChooser::new(repository, commits, window, cx));
+        let subscription = cx.subscribe_in(
+            &chooser,
+            window,
+            |this, _, event: &GitSourceChooserEvent, window, cx| match event {
+                GitSourceChooserEvent::Chosen(source) => {
+                    let source = source.clone();
+                    this.git_source_chooser = None;
+                    this.open_review_source(source, window, cx);
+                }
+                GitSourceChooserEvent::Cancelled => {
+                    this.git_source_chooser = None;
+                    this.focus_active(window, cx);
+                    cx.notify();
+                }
+            },
+        );
+        self.git_source_chooser = Some((chooser.clone(), subscription));
+        window.defer(cx, move |window, cx| {
+            chooser.update(cx, |chooser, cx| chooser.focus(window, cx));
+        });
+        cx.notify();
+
+        Ok(())
+    }
+
     fn deactivate(&self, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) else {
             return;
@@ -380,6 +469,11 @@ impl Workspace {
     }
 
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((chooser, _)) = &self.git_source_chooser {
+            chooser.update(cx, |chooser, cx| chooser.focus(window, cx));
+            return;
+        }
+
         let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) else {
             self.focus.focus(window, cx);
             return;
@@ -415,6 +509,7 @@ impl Workspace {
         }
 
         self.deactivate(cx);
+        self.git_source_chooser = None;
         self.tabs.activate(id);
 
         self.focus_active(window, cx);
@@ -560,6 +655,7 @@ impl Workspace {
         }
 
         self.deactivate(cx);
+        self.git_source_chooser = None;
         self.picking_files = true;
         cx.notify();
 
@@ -591,21 +687,37 @@ impl Workspace {
             .items_center()
             .justify_center()
             .gap(px(12.0))
-            .child("Compare or merge files")
+            .child("Review, compare, or merge files")
             .child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Open a two-way diff or a three-way merge."),
+                    .child("Open Git changes, a two-way diff, or a three-way merge."),
             )
             .child(
-                Button::new("open-first-comparison")
-                    .label("Open comparison")
-                    .icon(IconName::Plus)
-                    .ghost()
-                    .disabled(self.picking_files)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.choose_pair(&OpenComparison, window, cx);
-                    })),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        Button::new("open-first-git-review")
+                            .label("Open Git review")
+                            .icon(gpui_kit::assets::IconName::GitPullRequest)
+                            .ghost()
+                            .disabled(self.picking_files)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_git_review(&OpenGitReview, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("open-first-comparison")
+                            .label("Open comparison")
+                            .icon(IconName::Plus)
+                            .ghost()
+                            .disabled(self.picking_files)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_pair(&OpenComparison, window, cx);
+                            })),
+                    ),
             )
     }
 
@@ -616,6 +728,18 @@ impl Workspace {
             .flex_shrink_0()
             .items_center()
             .gap(px(2.0))
+            .child(
+                Button::new("open-git-review")
+                    .icon(gpui_kit::assets::IconName::GitPullRequest)
+                    .ghost()
+                    .with_size(px(28.0))
+                    .accessibility_label("Open Git review")
+                    .tooltip("Open Git review (Ctrl+Shift+G)")
+                    .disabled(self.picking_files)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.choose_git_review(&OpenGitReview, window, cx);
+                    })),
+            )
             .child(
                 Button::new("open-merge")
                     .icon(gpui_kit::assets::IconName::GitMerge)
@@ -747,7 +871,9 @@ impl Render for Workspace {
             bar = bar.selected_index(index);
         }
 
-        let body = if let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) {
+        let body = if let Some((chooser, _)) = &self.git_source_chooser {
+            div().size_full().child(chooser.clone())
+        } else if let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) {
             match &tab.content {
                 OpenTab::Comparison(tab) => div().size_full().child(tab.editor.clone()),
                 OpenTab::Review { session, .. } => div().size_full().child(session.clone()),
@@ -774,6 +900,7 @@ impl Render for Workspace {
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::choose_pair))
             .on_action(cx.listener(Self::choose_merge))
+            .on_action(cx.listener(Self::choose_git_review))
             .on_action(cx.listener(Self::save_active))
             .on_action(cx.listener(|this, _: &CloseComparison, window, cx| {
                 if let Some(id) = this.tabs.active {
@@ -889,6 +1016,11 @@ pub(super) fn init(cx: &mut App) {
 
     cx.bind_keys([
         KeyBinding::new(&format!("{command}-o"), OpenComparison, Some(KEY_CONTEXT)),
+        KeyBinding::new(
+            &format!("{command}-shift-g"),
+            OpenGitReview,
+            Some(KEY_CONTEXT),
+        ),
         KeyBinding::new(&format!("{command}-s"), Save, Some(KEY_CONTEXT)),
         KeyBinding::new(&format!("{command}-shift-m"), OpenMerge, Some(KEY_CONTEXT)),
         KeyBinding::new(&format!("{command}-w"), CloseComparison, Some(KEY_CONTEXT)),
