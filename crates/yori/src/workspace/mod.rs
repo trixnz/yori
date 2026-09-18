@@ -295,7 +295,28 @@ impl Workspace {
 
         self.deactivate(cx);
         let session = cx.new(|cx| ReviewSession::new(source, window, cx));
-        let subscription = cx.subscribe(&session, |_, _, _: &ReviewChanged, cx| cx.notify());
+        let subscription = cx.subscribe_in(
+            &session,
+            window,
+            |this, changed_session, event: &ReviewChanged, window, cx| {
+                let is_active = this
+                    .tabs
+                    .active
+                    .and_then(|id| this.tabs.get(id))
+                    .is_some_and(|tab| {
+                        matches!(
+                            &tab.content,
+                            OpenTab::Review { session, .. } if session == changed_session
+                        )
+                    });
+                if is_active && matches!(event, ReviewChanged::RefreshCompleted { activate: true })
+                {
+                    changed_session.update(cx, |session, cx| session.focus_active(window, cx));
+                }
+
+                cx.notify();
+            },
+        );
         self.tabs.insert(
             identity,
             OpenTab::Review {
@@ -303,6 +324,7 @@ impl Workspace {
                 _subscription: subscription,
             },
         );
+        self.focus_active(window, cx);
         session.update(cx, |session, cx| session.refresh(window, cx));
 
         cx.notify();

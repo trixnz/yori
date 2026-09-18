@@ -4,4 +4,4 @@ pub(crate) mod model;
 mod session;
 
 pub(crate) use model::{ReviewSource, ReviewSourceIdentity};
-pub(crate) use session::{ReviewChanged, ReviewSession};
+pub(crate) use session::{ReviewChanged, ReviewSession, init};

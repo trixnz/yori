@@ -10,7 +10,7 @@ use std::{
 };
 
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{App, Entity, VisualTestContext, point, px};
+use gpui_kit::{App, Entity, Role, VisualTestContext, point, px};
 
 use super::*;
 use crate::{
@@ -255,6 +255,182 @@ fn refresh_keeps_dirty_removed_files_and_drops_clean_removed_files(cx: &mut Test
         assert_eq!(clean_session.read(cx).selected_identity(), Some(&kept));
         assert_eq!(clean_session.read(cx).editor_count(), 1);
         assert!(clean_session.read(cx).editor(&removed).is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn dirty_text_to_binary_refresh_retains_the_editor_with_a_warning(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let identity = ReviewFileIdentity::new("changed-kind");
+    let initial = ReviewManifest::new(vec![text_file(
+        "changed-kind",
+        "src/data.txt",
+        "before\n",
+        "after\n",
+    )])
+    .unwrap();
+    let refreshed = ReviewManifest::new(vec![ReviewFile::binary(
+        identity.clone(),
+        "src/data.txt".into(),
+        ReviewFileStatus::Modified,
+        "Binary content cannot be displayed.",
+    )])
+    .unwrap();
+    let provider = TestProvider::new([initial, refreshed]);
+    let (_, session) = open_review(&workspace, source(provider, "dirty-kind-change"), cx);
+
+    let editor = cx.update(|window, cx| {
+        edit_active(window, cx, "dirty ");
+        let editor = session.read(cx).editor(&identity).unwrap();
+        window.click("refresh-review", cx);
+        editor
+    });
+    cx.run_until_parked();
+    cx.update(TestWindowExt::render_frame);
+
+    cx.update(|window, cx| {
+        assert_eq!(session.read(cx).editor(&identity), Some(editor.clone()));
+        assert!(editor.read(cx).needs_save());
+        assert_eq!(
+            session.read(cx).warning(&identity),
+            Some("now binary upstream")
+        );
+        assert_eq!(session.read(cx).selected_identity(), Some(&identity));
+        assert!(
+            window
+                .find("review-file-warning")
+                .label()
+                .unwrap()
+                .contains("binary")
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn clean_text_to_submodule_refresh_evicts_the_incompatible_editor(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let identity = ReviewFileIdentity::new("changed-kind");
+    let initial = ReviewManifest::new(vec![text_file(
+        "changed-kind",
+        "vendor/library",
+        "old\n",
+        "new\n",
+    )])
+    .unwrap();
+    let refreshed = ReviewManifest::new(vec![ReviewFile::submodule(
+        identity.clone(),
+        "vendor/library".into(),
+        ReviewFileStatus::Modified,
+        "1111111",
+        "2222222",
+    )])
+    .unwrap();
+    let provider = TestProvider::new([initial, refreshed]);
+    let (_, session) = open_review(&workspace, source(provider, "clean-kind-change"), cx);
+
+    cx.update(|window, cx| window.click("refresh-review", cx));
+    cx.run_until_parked();
+    cx.update(TestWindowExt::render_frame);
+
+    cx.update(|window, cx| {
+        assert_eq!(session.read(cx).selected_identity(), Some(&identity));
+        assert_eq!(session.read(cx).editor_count(), 0);
+        assert!(session.read(cx).editor(&identity).is_none());
+        assert_eq!(session.read(cx).warning(&identity), None);
+        assert_eq!(window.find("review-file-list").role(), Some(Role::ListBox));
+    });
+}
+
+#[gpui_kit::test]
+fn background_review_load_does_not_steal_focus_from_the_active_comparison(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let manifest = ReviewManifest::new(vec![text_file(
+        "file",
+        "src/file.rs",
+        "before\n",
+        "after\n",
+    )])
+    .unwrap();
+    let provider = TestProvider::new([manifest]);
+
+    let (session, comparison) = cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_review_source(source(provider, "background-focus"), window, cx);
+        });
+        let review_id = workspace.read(cx).tabs.active.unwrap();
+        let OpenTab::Review { session, .. } =
+            &workspace.read(cx).tabs.get(review_id).unwrap().content
+        else {
+            panic!("new tab should be a review session");
+        };
+        let session = session.clone();
+        let comparison = workspace
+            .read(cx)
+            .tabs
+            .get(0)
+            .unwrap()
+            .content
+            .comparison()
+            .unwrap()
+            .editor
+            .clone();
+
+        workspace.update(cx, |workspace, cx| workspace.activate(0, window, cx));
+        assert!(comparison.focus_handle(cx).is_focused(window));
+
+        (session, comparison)
+    });
+    cx.run_until_parked();
+    cx.update(TestWindowExt::render_frame);
+
+    cx.update(|window, cx| {
+        assert_eq!(session.read(cx).editor_count(), 1);
+        assert_eq!(workspace.read(cx).tabs.active, Some(0));
+        assert!(comparison.focus_handle(cx).is_focused(window));
+    });
+}
+
+#[gpui_kit::test]
+fn navigator_exposes_list_selection_and_activates_from_the_keyboard(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let binary = ReviewFileIdentity::new("binary");
+    let text = ReviewFileIdentity::new("text");
+    let manifest = ReviewManifest::new(vec![
+        ReviewFile::binary(
+            binary.clone(),
+            "assets/data.bin".into(),
+            ReviewFileStatus::Modified,
+            "Binary content cannot be displayed.",
+        ),
+        text_file("text", "src/file.rs", "before\n", "after\n"),
+    ])
+    .unwrap();
+    let (_, session) = open_review(
+        &workspace,
+        source(TestProvider::new([manifest]), "keyboard-navigation"),
+        cx,
+    );
+
+    cx.update(|window, cx| {
+        session.update(cx, |session, cx| session.focus_navigator(window, cx));
+        window.render_frame(cx);
+
+        assert_eq!(window.find("review-file-list").role(), Some(Role::ListBox));
+        assert_eq!(window.find("review-file-list").focused(), Some(true));
+        assert_eq!(
+            window.find(("review-file", 1usize)).role(),
+            Some(Role::ListBoxOption)
+        );
+        assert_eq!(window.find(("review-file", 1usize)).selected(), Some(true));
+
+        window.press("up", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find(("review-file", 0usize)).selected(), Some(true));
+        assert_eq!(session.read(cx).selected_identity(), Some(&text));
+
+        window.press("enter", cx);
+        assert_eq!(session.read(cx).selected_identity(), Some(&binary));
+        assert_eq!(session.read(cx).editor_count(), 1);
     });
 }
 

@@ -26,6 +26,7 @@ fn harness(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContex
         gpui_kit::init(cx);
         crate::appearance::init(cx);
         crate::editor::init(cx);
+        crate::review::init(cx);
         super::init(cx);
 
         // Dialog entrance animations use wall-clock time, not GPUI's test clock.

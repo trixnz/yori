@@ -111,6 +111,7 @@ fn main() {
             gpui_kit::init(cx);
             appearance::init(cx);
             editor::init(cx);
+            review::init(cx);
             workspace::init(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {

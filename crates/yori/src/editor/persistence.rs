@@ -8,6 +8,15 @@ use yori_document::editing::EditHistory;
 
 use super::{AlignedEditor, DirtyChanged, DirtyState, PaneDocument};
 
+fn normalize_offset(text: &str, offset: usize) -> usize {
+    let mut offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+
+    offset
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SaveCheckpoint {
     pub text: String,
@@ -109,9 +118,9 @@ impl AlignedEditor {
         self.alignment = Alignment::between(&self.left.document, &self.right.document);
         self.navigation = ChangeNavigation::default();
         self.selection = selection.map(|mut selection| {
-            let limit = self.document(selection.side).document.text().len();
-            selection.anchor = selection.anchor.min(limit);
-            selection.head = selection.head.min(limit);
+            let text = self.document(selection.side).document.text();
+            selection.anchor = normalize_offset(text, selection.anchor);
+            selection.head = normalize_offset(text, selection.head);
             selection
         });
         self.preferred_column = None;
@@ -170,13 +179,118 @@ mod tests {
         )
     }
 
-    #[gpui_kit::test]
-    fn review_refresh_preserves_view_options_and_dirty_local_content(cx: &mut TestAppContext) {
+    fn initialize(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::appearance::init(cx);
             crate::editor::init(cx);
         });
+    }
+
+    #[gpui_kit::test]
+    fn clean_review_refresh_normalizes_unicode_caret(cx: &mut TestAppContext) {
+        initialize(cx);
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                AlignedEditor::new(
+                    pane("old.rs", "baseline\n"),
+                    pane("new.rs", "abcd\n"),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let editor = editor.unwrap();
+
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.selection = Some(Selection {
+                    side: Side::Right,
+                    anchor: 1,
+                    head: 1,
+                });
+
+                editor.refresh_review_diff(
+                    pane("old.rs", "refreshed baseline\n"),
+                    pane("new.rs", "éx\n"),
+                    true,
+                    true,
+                    cx,
+                );
+
+                let selection = editor.selection.as_ref().unwrap();
+                assert_eq!(selection.range(), 0..0);
+                assert!(
+                    editor
+                        .right
+                        .document
+                        .text()
+                        .is_char_boundary(selection.head)
+                );
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    fn clean_review_refresh_normalizes_unicode_selection(cx: &mut TestAppContext) {
+        initialize(cx);
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                AlignedEditor::new(
+                    pane("old.rs", "baseline\n"),
+                    pane("new.rs", "abcdef\n"),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let editor = editor.unwrap();
+
+        cx.update(|_, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.selection = Some(Selection {
+                    side: Side::Right,
+                    anchor: 1,
+                    head: 3,
+                });
+
+                editor.refresh_review_diff(
+                    pane("old.rs", "refreshed baseline\n"),
+                    pane("new.rs", "éx\n"),
+                    true,
+                    true,
+                    cx,
+                );
+
+                let selection = editor.selection.as_ref().unwrap();
+                assert_eq!(selection.range(), 0..3);
+                assert!(
+                    editor
+                        .right
+                        .document
+                        .text()
+                        .is_char_boundary(selection.anchor)
+                );
+                assert!(
+                    editor
+                        .right
+                        .document
+                        .text()
+                        .is_char_boundary(selection.head)
+                );
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    fn review_refresh_preserves_view_options_and_dirty_local_content(cx: &mut TestAppContext) {
+        initialize(cx);
         let mut editor = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| {

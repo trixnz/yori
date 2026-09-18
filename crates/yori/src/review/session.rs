@@ -9,29 +9,79 @@ use gpui_kit::component::{
     scroll::ScrollableElement,
 };
 use gpui_kit::{
-    App, AppContext, Context, Entity, EventEmitter, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, TestSupportExt,
-    Window, div, prelude::FluentBuilder, px,
+    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyBinding, ParentElement, Render, Role as AccessibilityRole,
+    StatefulInteractiveElement, Styled, Subscription, TestSupportExt, Window, div,
+    prelude::FluentBuilder, px,
 };
 
 use crate::{
     comparison::Comparison,
     editor::{AlignedEditor, DirtyChanged, PaneDocument},
     storage::SaveError,
-    workspace::files::{Files, Role},
+    workspace::files::{Files, Role as DocumentRole},
 };
 
 use super::model::{
     ReviewFile, ReviewFileIdentity, ReviewFileKind, ReviewManifest, ReviewSource, TextComparison,
 };
 
-pub(crate) struct ReviewChanged;
+const NAVIGATOR_KEY_CONTEXT: &str = "ReviewNavigator";
+
+gpui_kit::actions!(
+    review_navigator,
+    [SelectPreviousFile, SelectNextFile, ActivateSelectedFile]
+);
+
+pub(crate) enum ReviewChanged {
+    State,
+    RefreshCompleted { activate: bool },
+}
 
 impl EventEmitter<ReviewChanged> for ReviewSession {}
 
+enum EntryWarning {
+    RemovedUpstream,
+    KindChanged { incoming: Box<ReviewFile> },
+}
+
+impl EntryWarning {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::RemovedUpstream => "removed upstream",
+            Self::KindChanged { incoming } => match &incoming.kind {
+                ReviewFileKind::Binary { .. } => "now binary upstream",
+                ReviewFileKind::Submodule { .. } => "now a submodule upstream",
+                ReviewFileKind::Text(_) => {
+                    unreachable!("kind-change warnings retain non-text files")
+                }
+            },
+        }
+    }
+
+    fn detail(&self) -> &'static str {
+        match self {
+            Self::RemovedUpstream => {
+                "This file was removed upstream. Unsaved text edits remain available until resolved."
+            }
+            Self::KindChanged { incoming } => match &incoming.kind {
+                ReviewFileKind::Binary { .. } => {
+                    "This file is now binary upstream. Unsaved text edits remain available until resolved."
+                }
+                ReviewFileKind::Submodule { .. } => {
+                    "This file is now a submodule upstream. Unsaved text edits remain available until resolved."
+                }
+                ReviewFileKind::Text(_) => {
+                    unreachable!("kind-change warnings retain non-text files")
+                }
+            },
+        }
+    }
+}
+
 struct SessionEntry {
     file: ReviewFile,
-    removed: bool,
+    warning: Option<EntryWarning>,
 }
 
 struct ReviewEditor {
@@ -57,11 +107,11 @@ impl LoadedText {
         let files = Files::load(&comparison)?;
         let left = PaneDocument::new(
             diff.baseline.logical_path().to_owned(),
-            files.document(Role::Baseline).clone(),
+            files.document(DocumentRole::Baseline).clone(),
         );
         let right = PaneDocument::new(
             diff.local.logical_path().to_owned(),
-            files.document(Role::Local).clone(),
+            files.document(DocumentRole::Local).clone(),
         );
         let capabilities = comparison_capabilities(comparison);
 
@@ -100,6 +150,8 @@ pub(crate) struct ReviewSession {
     editors: HashMap<ReviewFileIdentity, ReviewEditor>,
     query: Entity<InputState>,
     _query_subscription: Subscription,
+    navigator_focus: FocusHandle,
+    navigator_selection: Option<ReviewFileIdentity>,
     refreshing: bool,
     saving: bool,
     message: Option<String>,
@@ -108,8 +160,9 @@ pub(crate) struct ReviewSession {
 impl ReviewSession {
     pub(crate) fn new(source: ReviewSource, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Filter files"));
-        let subscription = cx.subscribe(&query, |_, _, event: &InputEvent, cx| {
+        let subscription = cx.subscribe(&query, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
+                this.navigator_selection = None;
                 cx.notify();
             }
         });
@@ -121,6 +174,8 @@ impl ReviewSession {
             editors: HashMap::new(),
             query,
             _query_subscription: subscription,
+            navigator_focus: cx.focus_handle(),
+            navigator_selection: None,
             refreshing: false,
             saving: false,
             message: None,
@@ -178,12 +233,19 @@ impl ReviewSession {
             let result = load.await;
             let _ = view.update_in(cx, |this, window, cx| {
                 this.refreshing = false;
-                match result.and_then(|manifest| this.apply_manifest(manifest, window, cx)) {
-                    Ok(()) => this.message = None,
-                    Err(error) => this.message = Some(format!("Refresh failed: {error}")),
-                }
+                let event =
+                    match result.and_then(|manifest| this.apply_manifest(manifest, window, cx)) {
+                        Ok(activate) => {
+                            this.message = None;
+                            ReviewChanged::RefreshCompleted { activate }
+                        }
+                        Err(error) => {
+                            this.message = Some(format!("Refresh failed: {error}"));
+                            ReviewChanged::State
+                        }
+                    };
 
-                cx.emit(ReviewChanged);
+                cx.emit(event);
                 cx.notify();
             });
         })
@@ -195,9 +257,11 @@ impl ReviewSession {
         manifest: ReviewManifest,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         ReviewManifest::new(manifest.files.clone())?;
 
+        let old_selected = self.selected.clone();
+        let old_active_editor = self.active_editor();
         let mut prepared = HashMap::new();
         for file in &manifest.files {
             if self.editors.contains_key(&file.identity)
@@ -207,21 +271,22 @@ impl ReviewSession {
             }
         }
 
-        let old_entries = self
+        let mut old_entries = self
             .entries
             .drain(..)
             .map(|entry| (entry.file.identity.clone(), entry))
             .collect::<HashMap<_, _>>();
-        let incoming = manifest
-            .files
-            .iter()
-            .map(|file| file.identity.clone())
-            .collect::<std::collections::HashSet<_>>();
+        let mut entries = Vec::with_capacity(manifest.files.len());
 
-        for file in &manifest.files {
-            if let Some(state) = self.editors.get_mut(&file.identity)
-                && let Some(loaded) = prepared.remove(&file.identity)
-            {
+        for file in manifest.files {
+            let identity = file.identity.clone();
+            let old_entry = old_entries.remove(&identity);
+
+            if let Some(loaded) = prepared.remove(&identity) {
+                let state = self
+                    .editors
+                    .get_mut(&identity)
+                    .expect("prepared text belongs to an existing editor");
                 let dirty = state.editor.read(cx).needs_save();
                 state.editor.update(cx, |editor, cx| {
                     editor.refresh_review_diff(
@@ -235,36 +300,49 @@ impl ReviewSession {
                 if !dirty {
                     state.files = loaded.files;
                 }
-            }
-        }
 
-        self.entries = manifest
-            .files
-            .into_iter()
-            .map(|file| SessionEntry {
-                file,
-                removed: false,
-            })
-            .collect();
-
-        for (identity, entry) in old_entries {
-            if incoming.contains(&identity) {
+                entries.push(SessionEntry {
+                    file,
+                    warning: None,
+                });
                 continue;
             }
 
-            let dirty = self
-                .editors
-                .get(&identity)
-                .is_some_and(|state| state.editor.read(cx).needs_save());
-            if dirty {
-                self.entries.push(SessionEntry {
+            if !file.kind.is_text()
+                && self.editor_is_dirty(&identity, cx)
+                && let Some(mut entry) = old_entry
+                && entry.file.kind.is_text()
+            {
+                entry.file.logical_path.clone_from(&file.logical_path);
+                entry.file.status = file.status.clone();
+                entry.warning = Some(EntryWarning::KindChanged {
+                    incoming: Box::new(file),
+                });
+                entries.push(entry);
+                continue;
+            }
+
+            if !file.kind.is_text() {
+                self.editors.remove(&identity);
+            }
+            entries.push(SessionEntry {
+                file,
+                warning: None,
+            });
+        }
+
+        for (identity, entry) in old_entries {
+            if self.editor_is_dirty(&identity, cx) {
+                entries.push(SessionEntry {
                     file: entry.file,
-                    removed: true,
+                    warning: Some(EntryWarning::RemovedUpstream),
                 });
             } else {
                 self.editors.remove(&identity);
             }
         }
+
+        self.entries = entries;
 
         let selected_exists = self.selected.as_ref().is_some_and(|selected| {
             self.entries
@@ -283,7 +361,47 @@ impl ReviewSession {
             self.ensure_editor(&selected, window, cx)?;
         }
 
-        Ok(())
+        let navigator_exists = self.navigator_selection.as_ref().is_some_and(|selected| {
+            self.entries
+                .iter()
+                .any(|entry| &entry.file.identity == selected)
+        });
+        if !navigator_exists {
+            self.navigator_selection = self.selected.clone();
+        }
+
+        Ok(old_selected != self.selected || old_active_editor != self.active_editor())
+    }
+
+    fn editor_is_dirty(&self, identity: &ReviewFileIdentity, cx: &App) -> bool {
+        self.editors
+            .get(identity)
+            .is_some_and(|state| state.editor.read(cx).needs_save())
+    }
+
+    fn resolve_clean_kind_change(&mut self, identity: &ReviewFileIdentity, cx: &mut Context<Self>) {
+        if self.editor_is_dirty(identity, cx) {
+            return;
+        }
+
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| &entry.file.identity == identity)
+        else {
+            return;
+        };
+        let warning = entry.warning.take();
+        let incoming = match warning {
+            Some(EntryWarning::KindChanged { incoming }) => incoming,
+            warning => {
+                entry.warning = warning;
+                return;
+            }
+        };
+
+        entry.file = *incoming;
+        self.editors.remove(identity);
     }
 
     fn ensure_editor(
@@ -291,23 +409,24 @@ impl ReviewSession {
         identity: &ReviewFileIdentity,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         if self.editors.contains_key(identity) {
-            return Ok(());
+            return Ok(false);
         }
+
         let Some(entry) = self
             .entries
             .iter()
             .find(|entry| &entry.file.identity == identity)
         else {
-            return Ok(());
+            return Ok(false);
         };
         let ReviewFileKind::Text(comparison) = &entry.file.kind else {
-            return Ok(());
+            return Ok(false);
         };
         let loaded = LoadedText::load(comparison)?;
         let editor = cx.new(|cx| {
-            AlignedEditor::new_diff(
+            AlignedEditor::new_review_diff(
                 loaded.left,
                 loaded.right,
                 loaded.editable,
@@ -316,8 +435,10 @@ impl ReviewSession {
                 cx,
             )
         });
-        let subscription = cx.subscribe(&editor, |_, _, _: &DirtyChanged, cx| {
-            cx.emit(ReviewChanged);
+        let subscribed_identity = identity.clone();
+        let subscription = cx.subscribe(&editor, move |this, _, _: &DirtyChanged, cx| {
+            this.resolve_clean_kind_change(&subscribed_identity, cx);
+            cx.emit(ReviewChanged::State);
             cx.notify();
         });
 
@@ -330,7 +451,7 @@ impl ReviewSession {
             },
         );
 
-        Ok(())
+        Ok(true)
     }
 
     fn select(
@@ -347,6 +468,7 @@ impl ReviewSession {
         if let Err(error) = self.ensure_editor(&identity, window, cx) {
             self.message = Some(format!("Cannot open file comparison: {error}"));
         }
+        self.navigator_selection = Some(identity.clone());
         self.selected = Some(identity);
         self.focus_active(window, cx);
         cx.notify();
@@ -397,6 +519,7 @@ impl ReviewSession {
             self.save_next(run, window, cx);
             return;
         };
+
         let checkpoint = match state.editor.update(cx, AlignedEditor::prepare_save) {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
@@ -456,7 +579,7 @@ impl ReviewSession {
                     ),
                 }
 
-                cx.emit(ReviewChanged);
+                cx.emit(ReviewChanged::State);
                 cx.notify();
             });
         })
@@ -493,9 +616,70 @@ impl ReviewSession {
             .find(|entry| &entry.file.identity == selected)
     }
 
+    fn visible_identities(&self, cx: &App) -> Vec<ReviewFileIdentity> {
+        let query = self.query.read(cx).text().to_string();
+        self.entries
+            .iter()
+            .filter(|entry| entry.file.matches_query(&query))
+            .map(|entry| entry.file.identity.clone())
+            .collect()
+    }
+
+    fn move_navigator_selection(&mut self, offset: isize, cx: &mut Context<Self>) {
+        let visible = self.visible_identities(cx);
+        if visible.is_empty() {
+            self.navigator_selection = None;
+            cx.notify();
+            return;
+        }
+
+        let current = self
+            .navigator_selection
+            .as_ref()
+            .or(self.selected.as_ref())
+            .and_then(|selected| visible.iter().position(|identity| identity == selected));
+        let next = current.map_or_else(
+            || {
+                if offset < 0 { visible.len() - 1 } else { 0 }
+            },
+            |current| {
+                current
+                    .saturating_add_signed(offset)
+                    .min(visible.len().saturating_sub(1))
+            },
+        );
+        self.navigator_selection = Some(visible[next].clone());
+        cx.notify();
+    }
+
+    fn select_previous_file(
+        &mut self,
+        _: &SelectPreviousFile,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_navigator_selection(-1, cx);
+    }
+
+    fn select_next_file(&mut self, _: &SelectNextFile, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_navigator_selection(1, cx);
+    }
+
+    fn activate_selected_file(
+        &mut self,
+        _: &ActivateSelectedFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(identity) = self.navigator_selection.clone() {
+            self.select(identity, window, cx);
+        }
+    }
+
     fn render_file_row(
         &self,
         index: usize,
+        set_size: usize,
         entry: &SessionEntry,
         selected: Option<&ReviewFileIdentity>,
         cx: &mut Context<Self>,
@@ -513,12 +697,24 @@ impl ReviewSession {
             }
             _ => None,
         };
-        let removed = entry.removed;
+        let warning = entry.warning.as_ref().map(EntryWarning::label);
         let badge = entry.file.status.badge();
+        let accessible_label = format!(
+            "{}; {}; {}{}",
+            entry.file.status.label(),
+            path,
+            if modified { "modified" } else { "unmodified" },
+            warning.map_or_else(String::new, |warning| format!("; {warning}")),
+        );
 
         div()
             .id(("review-file", index))
             .test_support()
+            .role(AccessibilityRole::ListBoxOption)
+            .aria_label(accessible_label)
+            .aria_position_in_set(index + 1)
+            .aria_size_of_set(set_size)
+            .aria_selected(is_selected)
             .px(px(10.0))
             .py(px(8.0))
             .flex()
@@ -552,10 +748,10 @@ impl ReviewSession {
                             .child(path)
                     })),
             )
-            .children(removed.then(|| {
+            .children(warning.map(|warning| {
                 div()
                     .text_color(crate::appearance::removed().marker)
-                    .child("removed upstream")
+                    .child(warning)
             }))
             .child(div().size(px(6.0)).rounded_full().bg(if modified {
                 cx.theme().foreground
@@ -571,7 +767,12 @@ impl ReviewSession {
             .iter()
             .filter(|entry| entry.file.matches_query(&query))
             .collect::<Vec<_>>();
-        let selected = self.selected.clone();
+        let selected = self
+            .navigator_selection
+            .as_ref()
+            .or(self.selected.as_ref())
+            .cloned();
+        let visible_count = visible.len();
 
         div()
             .w(px(280.0))
@@ -613,11 +814,28 @@ impl ReviewSession {
                             })),
                     ),
             )
-            .child(div().flex_1().min_h_0().overflow_y_scrollbar().children(
-                visible.into_iter().enumerate().map(|(index, entry)| {
-                    self.render_file_row(index, entry, selected.as_ref(), cx)
-                }),
-            ))
+            .child(
+                div()
+                    .id("review-file-list")
+                    .test_support()
+                    .key_context(NAVIGATOR_KEY_CONTEXT)
+                    .track_focus(&self.navigator_focus)
+                    .tab_index(0)
+                    .role(AccessibilityRole::ListBox)
+                    .aria_label("Review files")
+                    .aria_size_of_set(visible_count)
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .on_action(cx.listener(Self::select_previous_file))
+                    .on_action(cx.listener(Self::select_next_file))
+                    .on_action(cx.listener(Self::activate_selected_file))
+                    .child(div().size_full().overflow_y_scrollbar().children(
+                        visible.into_iter().enumerate().map(|(index, entry)| {
+                            self.render_file_row(index, visible_count, entry, selected.as_ref(), cx)
+                        }),
+                    )),
+            )
     }
 
     fn render_placeholder(
@@ -700,6 +918,10 @@ impl Render for ReviewSession {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let message = self.message.clone();
         let refreshing = self.refreshing && !self.entries.is_empty();
+        let warning = self
+            .selected_entry()
+            .and_then(|entry| entry.warning.as_ref())
+            .map(|warning| warning.detail().to_owned());
 
         div()
             .id("review-session")
@@ -714,7 +936,7 @@ impl Render for ReviewSession {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .children((refreshing || message.is_some()).then(|| {
+                    .children(refreshing.then(|| {
                         div()
                             .flex_shrink_0()
                             .px(px(12.0))
@@ -722,11 +944,43 @@ impl Render for ReviewSession {
                             .border_b_1()
                             .border_color(cx.theme().border)
                             .bg(cx.theme().muted)
-                            .child(message.unwrap_or_else(|| "Refreshing review…".into()))
+                            .child("Refreshing review…")
+                    }))
+                    .children(message.map(|message| {
+                        div()
+                            .flex_shrink_0()
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().muted)
+                            .child(message)
+                    }))
+                    .children(warning.map(|warning| {
+                        div()
+                            .id("review-file-warning")
+                            .test_support()
+                            .flex_shrink_0()
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().muted)
+                            .aria_label(warning.clone())
+                            .child(warning)
                     }))
                     .child(div().flex_1().min_h_0().child(self.render_body(cx))),
             )
     }
+}
+
+pub(crate) fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("up", SelectPreviousFile, Some(NAVIGATOR_KEY_CONTEXT)),
+        KeyBinding::new("down", SelectNextFile, Some(NAVIGATOR_KEY_CONTEXT)),
+        KeyBinding::new("enter", ActivateSelectedFile, Some(NAVIGATOR_KEY_CONTEXT)),
+        KeyBinding::new("space", ActivateSelectedFile, Some(NAVIGATOR_KEY_CONTEXT)),
+    ]);
 }
 
 #[cfg(test)]
@@ -743,7 +997,19 @@ impl ReviewSession {
         self.entries
             .iter()
             .find(|entry| &entry.file.identity == identity)
-            .is_some_and(|entry| entry.removed)
+            .is_some_and(|entry| matches!(entry.warning, Some(EntryWarning::RemovedUpstream)))
+    }
+
+    pub(crate) fn warning(&self, identity: &ReviewFileIdentity) -> Option<&'static str> {
+        self.entries
+            .iter()
+            .find(|entry| &entry.file.identity == identity)
+            .and_then(|entry| entry.warning.as_ref())
+            .map(EntryWarning::label)
+    }
+
+    pub(crate) fn focus_navigator(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigator_focus.focus(window, cx);
     }
 
     pub(crate) fn editor(&self, identity: &ReviewFileIdentity) -> Option<Entity<AlignedEditor>> {

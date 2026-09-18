@@ -259,10 +259,33 @@ impl AlignedEditor {
     }
 
     pub(super) fn new_diff(
+        left: PaneDocument,
+        right: PaneDocument,
+        editable: bool,
+        saveable: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_diff_with_activation(left, right, editable, saveable, true, window, cx)
+    }
+
+    pub(super) fn new_review_diff(
+        left: PaneDocument,
+        right: PaneDocument,
+        editable: bool,
+        saveable: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_diff_with_activation(left, right, editable, saveable, false, window, cx)
+    }
+
+    fn new_diff_with_activation(
         mut left: PaneDocument,
         mut right: PaneDocument,
         editable: bool,
         saveable: bool,
+        activate: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -275,7 +298,9 @@ impl AlignedEditor {
         let dirty = DirtyState::new(right.document.text());
 
         let focus = cx.focus_handle();
-        focus.focus(window, cx);
+        if activate {
+            focus.focus(window, cx);
+        }
         cx.on_blur(&focus, window, |this, _, cx| {
             this.cancel_vim();
             cx.notify();
