@@ -385,6 +385,42 @@ fn reload_requires_discard_for_local_edits_and_resets_only_local_history(cx: &mu
 }
 
 #[gpui_kit::test]
+fn preferences_shortcut_is_ignored_during_a_delayed_save_and_close(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let (id, local) = open_diff(&workspace, cx, directory.path());
+    let release = crate::storage::delay_next_save(&local);
+
+    cx.update(|window, cx| {
+        select_pane(window, cx, 0.75);
+        window.input("X", cx);
+        window.press("ctrl-w", cx);
+        window.click("save-and-close", cx);
+
+        assert!(workspace.read(cx).saving);
+        assert!(!window.has_active_dialog(cx));
+    });
+
+    cx.update(|window, cx| {
+        window.press(preferences_shortcut(), cx);
+
+        assert!(workspace.read(cx).saving);
+        assert!(workspace.read(cx).preferences.is_none());
+        assert!(!window.has_active_dialog(cx));
+        assert!(workspace.read(cx).tabs.get(id).is_some());
+    });
+
+    release.try_send(()).unwrap();
+    cx.run_until_parked();
+
+    cx.update(|_, cx| {
+        assert!(!workspace.read(cx).saving);
+        assert!(workspace.read(cx).tabs.get(id).is_none());
+    });
+    assert!(std::fs::read_to_string(local).unwrap().contains('X'));
+}
+
+#[gpui_kit::test]
 fn saving_on_close_succeeds_or_preserves_the_tab_on_failure(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
     let directory = tempfile::tempdir().unwrap();

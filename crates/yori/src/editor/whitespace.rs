@@ -1,6 +1,6 @@
 //! Paint-only whitespace hints over the unchanged shaped source text.
 
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::{ActiveTheme, WindowExt, notification::Notification};
 use gpui_kit::{
     AnyElement, Bounds, Context, Font, Hsla, IntoElement, PathBuilder, Pixels, Point, SharedString,
     Styled, TextAlign, TextRun, Window, canvas, fill, point, px, size,
@@ -20,6 +20,13 @@ impl AlignedEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mut config = crate::config::editor(cx);
+        config.show_whitespace = visible;
+        if let Err(error) = crate::config::update_editor(config, cx) {
+            window.push_notification(Notification::error(error), cx);
+            return;
+        }
+
         self.show_whitespace = visible;
         self.horizontal_scroll = self
             .horizontal_scroll

@@ -225,6 +225,22 @@ impl DirtyState {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VimKeybindings {
+    Disabled,
+    Enabled,
+}
+
+impl From<bool> for VimKeybindings {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
 pub(super) struct AlignedEditor {
     left: PaneDocument,
     right: PaneDocument,
@@ -233,6 +249,7 @@ pub(super) struct AlignedEditor {
     history: EditHistory,
     merge: Option<merge::MergeState>,
     vim: yori::vim::Vim,
+    vim_keybindings: VimKeybindings,
     dirty: DirtyState,
     saving: bool,
     preferred_column: Option<usize>,
@@ -296,6 +313,7 @@ impl AlignedEditor {
 
         let alignment = Alignment::between(&left.document, &right.document);
         let dirty = DirtyState::new(right.document.text());
+        let config = crate::config::editor(cx);
 
         let focus = cx.focus_handle();
         if activate {
@@ -315,8 +333,26 @@ impl AlignedEditor {
             }
         })
         .detach();
-        cx.observe_global::<vim::VimPreferences>(|this, cx| {
-            this.cancel_vim();
+        cx.observe_global::<crate::config::Configuration>(|this, cx| {
+            let config = crate::config::editor(cx);
+            if VimKeybindings::from(config.vim_keybindings) != this.vim_keybindings {
+                this.cancel_vim();
+                this.vim_keybindings = config.vim_keybindings.into();
+                if config.vim_keybindings && this.selection.is_none() {
+                    this.selection = Some(Selection {
+                        side: Side::Right,
+                        anchor: 0,
+                        head: 0,
+                    });
+                }
+            }
+            if this.show_whitespace && !config.show_whitespace {
+                this.horizontal_scroll = 0.0;
+            }
+
+            this.show_whitespace = config.show_whitespace;
+            this.show_connections = config.show_change_connections;
+            this.hovered_connection = None;
             cx.notify();
         })
         .detach();
@@ -329,6 +365,7 @@ impl AlignedEditor {
             history: EditHistory::default(),
             merge: None,
             vim: yori::vim::Vim::default(),
+            vim_keybindings: config.vim_keybindings.into(),
             dirty,
             saving: false,
             preferred_column: None,
@@ -336,8 +373,8 @@ impl AlignedEditor {
             selection: None,
             vertical_scroll: 0.0,
             horizontal_scroll: 0.0,
-            show_whitespace: false,
-            show_connections: false,
+            show_whitespace: config.show_whitespace,
+            show_connections: config.show_change_connections,
             hovered_connection: None,
             scrollbar_grab: None,
             content_bounds: Rc::new(Cell::new(Bounds::new(
@@ -353,6 +390,15 @@ impl AlignedEditor {
 
     pub(super) fn can_save(&self) -> bool {
         self.right.saveable
+    }
+
+    #[cfg(test)]
+    pub(crate) fn applied_preferences(&self) -> crate::config::EditorConfig {
+        crate::config::EditorConfig {
+            vim_keybindings: self.vim_keybindings == VimKeybindings::Enabled,
+            show_whitespace: self.show_whitespace,
+            show_change_connections: self.show_connections,
+        }
     }
 
     pub(super) fn is_dirty(&self) -> bool {
@@ -1263,6 +1309,7 @@ impl AlignedEditor {
 }
 
 pub(super) fn init(cx: &mut App) {
+    crate::config::init_transient(cx);
     vim::init(cx);
     input::bind_keys(cx);
 }

@@ -7,7 +7,7 @@ use crate::comparison::Comparison;
 use crate::editor::{AlignedEditor, DirtyChanged};
 use crate::storage::{FileWatch, SaveError, Snapshot};
 use gpui_kit::component::WindowExt;
-use gpui_kit::{AppContext, Context, Task, Window};
+use gpui_kit::{App, AppContext, Context, Task, Window};
 use std::{
     collections::{HashSet, VecDeque},
     rc::Rc,
@@ -72,19 +72,27 @@ impl Workspace {
                     }
                 }
 
-                if view.update(cx, Self::scan_disk).is_err() {
+                if cx
+                    .update(|window, cx| {
+                        view.update(cx, |this, cx| {
+                            Self::reload_config(window, cx);
+                            this.scan_disk(cx);
+                        })
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
         })
     }
 
-    pub(super) fn watch_paths(&mut self) {
+    pub(super) fn watch_paths(&mut self, cx: &App) {
         if self.monitor.is_none() {
             return;
         }
 
-        let paths: HashSet<_> = self
+        let mut paths: HashSet<_> = self
             .tabs
             .entries
             .iter()
@@ -96,6 +104,9 @@ impl Workspace {
                     .map(|file| file.path.clone())
             })
             .collect();
+        if let Some(path) = crate::config::path(cx) {
+            paths.insert(path);
+        }
         if let Some(watch) = &mut self.disk_watch {
             self.watch_error = watch.set_paths(paths).err().map(|error| {
                 format!("Live file watching is unavailable: {error}. Disk is still checked on activation and save.")

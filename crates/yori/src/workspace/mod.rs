@@ -5,6 +5,7 @@ mod disk_dialog;
 pub(crate) mod files;
 mod perforce_chooser;
 mod persistence;
+mod preferences_dialog;
 mod tabs;
 #[cfg(test)]
 mod tests;
@@ -12,6 +13,7 @@ mod tests;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, WindowExt,
     button::{Button, ButtonVariants},
+    dialog::{Cancel, Confirm, DialogFooter},
     notification::Notification,
     tab::{Tab, TabBar, TabVariant},
     tooltip::Tooltip,
@@ -34,6 +36,7 @@ use crate::review::{
 };
 use decision_dialog::{Decision, DecisionDialog, DecisionShortcut};
 use perforce_chooser::{PerforceSourceChooser, SourceChosen};
+use preferences_dialog::PreferencesDialog;
 use tabs::{TabIdentity, Tabs};
 
 const KEY_CONTEXT: &str = "ComparisonWorkspace";
@@ -48,7 +51,8 @@ gpui_kit::actions!(
         CloseComparison,
         Quit,
         NextTab,
-        PreviousTab
+        PreviousTab,
+        Preferences
     ]
 );
 
@@ -126,6 +130,7 @@ pub(super) struct Workspace {
     watch_error: Option<String>,
     monitor: Option<gpui_kit::Task<()>>,
     git_source_chooser: Option<(Entity<GitSourceChooser>, Subscription)>,
+    preferences: Option<Entity<PreferencesDialog>>,
 }
 
 impl Workspace {
@@ -152,14 +157,15 @@ impl Workspace {
         let (disk_watch, monitor) = Self::start_monitor(window, cx);
         cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
-                this.watch_paths();
+                this.watch_paths(cx);
+                Self::reload_config(window, cx);
                 this.scan_disk(cx);
                 this.refresh_reviews(window, cx);
             }
         })
         .detach();
 
-        Self {
+        let mut workspace = Self {
             tabs: Tabs::default(),
             invocation_directory: None,
             focus,
@@ -175,6 +181,16 @@ impl Workspace {
             disk_watch,
             monitor,
             git_source_chooser: None,
+            preferences: None,
+        };
+        workspace.watch_paths(cx);
+
+        workspace
+    }
+
+    fn reload_config(window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(diagnostic) = crate::config::reload(cx) {
+            window.push_notification(Notification::error(diagnostic), cx);
         }
     }
 
@@ -309,7 +325,7 @@ impl Workspace {
         );
 
         self.disk_epoch += 1;
-        self.watch_paths();
+        self.watch_paths(cx);
         self.scan_disk(cx);
         cx.notify();
         Ok(())
@@ -560,6 +576,69 @@ impl Workspace {
         Ok(())
     }
 
+    fn open_preferences(&mut self, _: &Preferences, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saving || self.picking_files {
+            return;
+        }
+        if let Some(preferences) = &self.preferences {
+            preferences.read(cx).focus_handle().focus(window, cx);
+            return;
+        }
+        if window.has_active_dialog(cx) {
+            return;
+        }
+
+        let preferences = cx.new(PreferencesDialog::new);
+        let content = preferences.clone();
+        let applying = preferences.clone();
+        let workspace = cx.weak_entity();
+        let focus = preferences.read(cx).focus_handle();
+        self.preferences = Some(preferences);
+
+        window.open_dialog(cx, move |dialog, _, _| {
+            let workspace = workspace.clone();
+            let applying = applying.clone();
+            let footer = DialogFooter::new()
+                .child(Button::new("preferences-cancel").label("Cancel").on_click(
+                    |_, window, cx| {
+                        window.dispatch_action(Box::new(Cancel), cx);
+                    },
+                ))
+                .child(
+                    Button::new("preferences-apply")
+                        .label("Apply")
+                        .primary()
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(Confirm { secondary: false }), cx);
+                        }),
+                );
+
+            dialog
+                .title("Preferences")
+                .width(px(480.0))
+                .max_w(px(480.0))
+                .close_button(false)
+                .overlay_closable(false)
+                .footer(footer)
+                .on_ok(move |_, _, cx| applying.update(cx, PreferencesDialog::apply))
+                .on_cancel(|_, _, _| true)
+                .on_close(move |_, _, cx| {
+                    let _ = workspace.update(cx, |workspace, cx| {
+                        workspace.preferences = None;
+                        cx.notify();
+                    });
+                })
+                .child(content.clone())
+        });
+
+        let modal_focus = window.focused(cx);
+        window.defer(cx, move |window, cx| {
+            if modal_focus.is_some_and(|modal| modal.is_focused(window)) {
+                focus.focus(window, cx);
+            }
+        });
+    }
+
     fn deactivate(&self, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) else {
             return;
@@ -656,7 +735,7 @@ impl Workspace {
         }
         self.tabs.remove(id);
         self.disk_epoch += 1;
-        self.watch_paths();
+        self.watch_paths(cx);
 
         self.focus_active(window, cx);
         cx.notify();
@@ -1039,6 +1118,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::choose_pair))
             .on_action(cx.listener(Self::choose_merge))
             .on_action(cx.listener(Self::choose_git_review))
+            .on_action(cx.listener(Self::open_preferences))
             .on_action(cx.listener(Self::save_active))
             .on_action(cx.listener(|this, _: &CloseComparison, window, cx| {
                 if let Some(id) = this.tabs.active {
@@ -1165,6 +1245,7 @@ pub(super) fn init(cx: &mut App) {
         KeyBinding::new(&format!("{command}-shift-m"), OpenMerge, Some(KEY_CONTEXT)),
         KeyBinding::new(&format!("{command}-w"), CloseComparison, Some(KEY_CONTEXT)),
         KeyBinding::new(&format!("{command}-q"), Quit, Some(KEY_CONTEXT)),
+        KeyBinding::new(&format!("{command}-,"), Preferences, None),
         KeyBinding::new("ctrl-tab", NextTab, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(KEY_CONTEXT)),
     ]);

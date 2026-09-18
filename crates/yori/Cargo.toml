@@ -26,6 +26,8 @@ atomicwrites = "=0.4.4"
 async-channel = "=2.5.0"
 notify = "=8.2.0"
 gix = { version = "=0.87.1", default-features = false, features = ["revision", "sha1", "status"] }
+dirs = "=6.0.0"
+toml_edit = "=0.22.27"
 
 [dev-dependencies]
 gpui-kit = { version = "=0.6.1", features = ["test-support"] }
