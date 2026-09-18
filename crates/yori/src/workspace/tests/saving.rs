@@ -62,6 +62,8 @@ fn editor(workspace: &Entity<Workspace>, id: usize, cx: &App) -> Entity<AlignedE
         .get(id)
         .unwrap()
         .content
+        .comparison()
+        .unwrap()
         .editor
         .clone()
 }
@@ -142,6 +144,8 @@ fn disk_dialog_acknowledges_the_latest_displayed_version(cx: &mut TestAppContext
                 .get(id)
                 .unwrap()
                 .content
+                .comparison()
+                .unwrap()
                 .files
                 .notice()
                 .is_none()
@@ -177,6 +181,8 @@ fn watcher_bursts_do_not_publish_a_temporary_missing_file(cx: &mut TestAppContex
                 .get(id)
                 .unwrap()
                 .content
+                .comparison()
+                .unwrap()
                 .files
                 .notice()
                 .is_none()
@@ -322,6 +328,8 @@ fn keep_current_never_approves_overwrite_and_approval_is_for_one_disk_version(
                 .get(id)
                 .unwrap()
                 .content
+                .comparison()
+                .unwrap()
                 .files
                 .notice()
                 .unwrap()
@@ -486,7 +494,15 @@ fn a_save_in_another_tab_is_an_external_change_not_implicit_overwrite_approval(
     scan(&workspace, cx);
 
     cx.update(|_, cx| {
-        let files = &workspace.read(cx).tabs.get(second).unwrap().content.files;
+        let files = &workspace
+            .read(cx)
+            .tabs
+            .get(second)
+            .unwrap()
+            .content
+            .comparison()
+            .unwrap()
+            .files;
         assert_eq!(files.notice().unwrap().role, Role::Local);
         assert_eq!(workspace.read(cx).tabs.active, Some(second));
     });
@@ -606,6 +622,8 @@ fn changed_merge_inputs_restart_explicitly_but_disappearing_inputs_keep_the_sess
                 .get(id)
                 .unwrap()
                 .content
+                .comparison()
+                .unwrap()
                 .files
                 .notice()
                 .is_none()

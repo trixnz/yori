@@ -2,7 +2,7 @@
 
 mod decision_dialog;
 mod disk_dialog;
-mod files;
+pub(crate) mod files;
 mod persistence;
 mod tabs;
 #[cfg(test)]
@@ -26,8 +26,9 @@ use yori_document::Document;
 
 use crate::comparison::{Comparison, MergePaths};
 use crate::editor::{AlignedEditor, DirtyChanged, PaneDocument};
+use crate::review::{ReviewChanged, ReviewSession, ReviewSource};
 use decision_dialog::{Decision, DecisionDialog, DecisionShortcut};
-use tabs::Tabs;
+use tabs::{TabIdentity, Tabs};
 
 const KEY_CONTEXT: &str = "ComparisonWorkspace";
 
@@ -44,11 +45,56 @@ gpui_kit::actions!(
     ]
 );
 
-struct OpenTab {
+struct ComparisonTab {
     editor: Entity<AlignedEditor>,
     _subscription: Subscription,
     files: files::Files,
     message: Option<String>,
+}
+
+enum OpenTab {
+    Comparison(ComparisonTab),
+    Review {
+        session: Entity<ReviewSession>,
+        _subscription: Subscription,
+    },
+}
+
+impl OpenTab {
+    fn comparison(&self) -> Option<&ComparisonTab> {
+        match self {
+            Self::Comparison(tab) => Some(tab),
+            Self::Review { .. } => None,
+        }
+    }
+
+    fn comparison_mut(&mut self) -> Option<&mut ComparisonTab> {
+        match self {
+            Self::Comparison(tab) => Some(tab),
+            Self::Review { .. } => None,
+        }
+    }
+
+    fn needs_save(&self, cx: &App) -> bool {
+        match self {
+            Self::Comparison(tab) => tab.editor.read(cx).needs_save(),
+            Self::Review { session, .. } => session.read(cx).needs_save(cx),
+        }
+    }
+
+    fn can_save(&self, cx: &App) -> bool {
+        match self {
+            Self::Comparison(tab) => tab.editor.read(cx).can_save(),
+            Self::Review { session, .. } => session.read(cx).can_save_all(cx),
+        }
+    }
+
+    fn unresolved_count(&self, cx: &App) -> usize {
+        match self {
+            Self::Comparison(tab) => tab.editor.read(cx).unresolved_count(),
+            Self::Review { .. } => 0,
+        }
+    }
 }
 
 pub(super) struct Workspace {
@@ -92,6 +138,7 @@ impl Workspace {
             if window.is_window_active() {
                 this.watch_paths();
                 this.scan_disk(cx);
+                this.refresh_reviews(window, cx);
             }
         })
         .detach();
@@ -168,7 +215,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let paths = paths.resolve()?;
-        if let Some(id) = self.tabs.find(&paths) {
+        let identity = TabIdentity::Comparison(paths.clone());
+        if let Some(id) = self.tabs.find(&identity) {
             self.activate(id, window, cx);
             return Ok(());
         }
@@ -207,13 +255,13 @@ impl Workspace {
         };
         let subscription = cx.subscribe(&editor, |_, _, _: &DirtyChanged, cx| cx.notify());
         self.tabs.insert(
-            paths,
-            OpenTab {
+            identity,
+            OpenTab::Comparison(ComparisonTab {
                 editor,
                 _subscription: subscription,
                 files,
                 message: None,
-            },
+            }),
         );
 
         self.disk_epoch += 1;
@@ -223,21 +271,87 @@ impl Workspace {
         Ok(())
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "review providers will call this seam when their source pickers are added"
+        )
+    )]
+    pub(crate) fn open_review_source(
+        &mut self,
+        source: ReviewSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let identity = TabIdentity::Review {
+            identity: source.identity.clone(),
+            label: source.label.clone(),
+        };
+        if let Some(id) = self.tabs.find(&identity) {
+            self.activate(id, window, cx);
+            return;
+        }
+
+        self.deactivate(cx);
+        let session = cx.new(|cx| ReviewSession::new(source, window, cx));
+        let subscription = cx.subscribe(&session, |_, _, _: &ReviewChanged, cx| cx.notify());
+        self.tabs.insert(
+            identity,
+            OpenTab::Review {
+                session: session.clone(),
+                _subscription: subscription,
+            },
+        );
+        session.update(cx, |session, cx| session.refresh(window, cx));
+
+        cx.notify();
+    }
+
     fn choose_merge(&mut self, _: &OpenMerge, window: &mut Window, cx: &mut Context<Self>) {
         self.choose_files(true, window, cx);
     }
 
     fn deactivate(&self, cx: &mut Context<Self>) {
-        if let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) {
-            tab.content.editor.update(cx, AlignedEditor::deactivate);
+        let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) else {
+            return;
+        };
+
+        match &tab.content {
+            OpenTab::Comparison(tab) => tab.editor.update(cx, AlignedEditor::deactivate),
+            OpenTab::Review { session, .. } => {
+                session.update(cx, |session, cx| session.deactivate(cx));
+            }
         }
     }
 
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) {
-            tab.content.editor.focus_handle(cx).focus(window, cx);
-        } else {
+        let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) else {
             self.focus.focus(window, cx);
+            return;
+        };
+
+        match &tab.content {
+            OpenTab::Comparison(tab) => tab.editor.focus_handle(cx).focus(window, cx),
+            OpenTab::Review { session, .. } => {
+                session.update(cx, |session, cx| session.focus_active(window, cx));
+            }
+        }
+    }
+
+    fn refresh_reviews(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sessions = self
+            .tabs
+            .entries
+            .iter()
+            .filter_map(|tab| match &tab.content {
+                OpenTab::Review { session, .. } => Some(session.clone()),
+                OpenTab::Comparison(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        for session in sessions {
+            session.update(cx, |session, cx| session.refresh(window, cx));
         }
     }
 
@@ -274,7 +388,7 @@ impl Workspace {
 
     fn has_modified_tabs(&self, cx: &App) -> bool {
         self.tabs
-            .requires_discard_confirmation(None, |tab| tab.editor.read(cx).needs_save())
+            .requires_discard_confirmation(None, |tab| tab.needs_save(cx))
     }
 
     fn close(&mut self, target: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
@@ -306,7 +420,7 @@ impl Workspace {
 
         let modified = self
             .tabs
-            .requires_discard_confirmation(target, |tab| tab.editor.read(cx).needs_save());
+            .requires_discard_confirmation(target, |tab| tab.needs_save(cx));
         if !modified {
             self.close(target, window, cx);
             return;
@@ -317,8 +431,8 @@ impl Workspace {
 
         let saveable = self.tabs.entries.iter().all(|tab| {
             target.is_some_and(|id| tab.id != id)
-                || !tab.content.editor.read(cx).needs_save()
-                || tab.content.editor.read(cx).can_save()
+                || !tab.content.needs_save(cx)
+                || tab.content.can_save(cx)
         });
         let title = if saveable {
             target.map_or_else(
@@ -332,13 +446,19 @@ impl Workspace {
             )
         };
         let unresolved = self.tabs.entries.iter().any(|tab| {
-            target.is_none_or(|id| tab.id == id)
-                && tab.content.editor.read(cx).unresolved_count() != 0
+            target.is_none_or(|id| tab.id == id) && tab.content.unresolved_count(cx) != 0
+        });
+        let aggregate = target.is_none_or(|id| {
+            self.tabs
+                .get(id)
+                .is_some_and(|tab| matches!(&tab.content, OpenTab::Review { .. }))
         });
         let detail = if !saveable {
             "At least one changed document has no save destination. Discard the changes or keep the workspace open."
         } else if unresolved {
             "There are unresolved conflicts. Resolve them before saving, or discard this session."
+        } else if aggregate {
+            "Your changes have not been saved. Save all, discard all, or keep the workspace open."
         } else {
             "Your changes have not been saved. Save them, discard them, or keep the workspace open."
         };
@@ -346,17 +466,20 @@ impl Workspace {
         let discard_view = view.clone();
         let save_view = view.clone();
         let cancel = Decision::new("cancel", "Cancel", DecisionShortcut::Escape);
-        let discard = Decision::new("ok", "Discard", DecisionShortcut::Mnemonic('d')).on_activate(
-            move |window, cx| {
-                // Restore modal focus before disposing the editor it belonged to.
-                let _ = discard_view.update(cx, |this, cx| this.close(target, window, cx));
-            },
-        );
+        let discard = Decision::new(
+            "ok",
+            if aggregate { "Discard all" } else { "Discard" },
+            DecisionShortcut::Mnemonic('d'),
+        )
+        .on_activate(move |window, cx| {
+            // Restore modal focus before disposing the editor it belonged to.
+            let _ = discard_view.update(cx, |this, cx| this.close(target, window, cx));
+        });
         let dialog = DecisionDialog::new(title, detail, cancel);
         if saveable {
             let save = Decision::new(
                 "save-and-close",
-                if target.is_some() { "Save" } else { "Save all" },
+                if aggregate { "Save all" } else { "Save" },
                 DecisionShortcut::Enter,
             )
             .primary()
@@ -476,8 +599,8 @@ impl Workspace {
     fn render_tab(&self, tab: &tabs::Tab<OpenTab>, cx: &mut Context<Self>) -> Tab {
         let id = tab.id;
         let label = self.tabs.label(id);
-        let description = tab.paths.description();
-        let modified = tab.content.editor.read(cx).needs_save();
+        let description = tab.identity.description();
+        let modified = tab.content.needs_save(cx);
         let accessible = format!(
             "{label}{}; {description}",
             if modified { "; modified" } else { "" }
@@ -491,7 +614,15 @@ impl Workspace {
                     .id(("comparison-paths", id))
                     .pl(px(10.0))
                     .tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
-                    .child(Icon::new(IconName::FileText).with_size(px(14.0))),
+                    .child(
+                        Icon::new(match &tab.identity {
+                            TabIdentity::Comparison(_) => gpui_kit::assets::IconName::FileText,
+                            TabIdentity::Review { .. } => {
+                                gpui_kit::assets::IconName::GitPullRequest
+                            }
+                        })
+                        .with_size(px(14.0)),
+                    ),
             )
             .suffix(
                 div()
@@ -563,7 +694,10 @@ impl Render for Workspace {
         }
 
         let body = if let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) {
-            div().size_full().child(tab.content.editor.clone())
+            match &tab.content {
+                OpenTab::Comparison(tab) => div().size_full().child(tab.editor.clone()),
+                OpenTab::Review { session, .. } => div().size_full().child(session.clone()),
+            }
         } else {
             div().size_full().child(self.render_empty(cx))
         };

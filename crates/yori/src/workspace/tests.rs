@@ -1,6 +1,7 @@
 //! Input-level regressions on GPUI's headless test platform; no pixel captures.
 
 mod merging;
+mod review;
 mod saving;
 
 use super::*;
@@ -121,6 +122,8 @@ fn read_only_in_memory_comparison_uses_logical_paths_and_rejects_edits(cx: &mut 
             .get(id)
             .unwrap()
             .content
+            .comparison()
+            .unwrap()
             .editor
             .clone();
 
@@ -182,6 +185,8 @@ fn editable_in_memory_document_without_destination_edits_but_exposes_no_save_act
             .get(id)
             .unwrap()
             .content
+            .comparison()
+            .unwrap()
             .editor
             .clone();
 
@@ -356,6 +361,8 @@ fn reopening_a_merge_preserves_its_tab_and_independent_history(cx: &mut TestAppC
             .get(id)
             .unwrap()
             .content
+            .comparison()
+            .unwrap()
             .editor
             .clone();
         assert!(editor.read(cx).is_dirty());
@@ -407,6 +414,8 @@ fn input_pane_undo_is_scoped_to_the_active_tab(cx: &mut TestAppContext) {
             .get(0)
             .unwrap()
             .content
+            .comparison()
+            .unwrap()
             .editor
             .clone();
         assert!(diff.read(cx).is_dirty());
@@ -423,6 +432,8 @@ fn input_pane_undo_is_scoped_to_the_active_tab(cx: &mut TestAppContext) {
             .get(id)
             .unwrap()
             .content
+            .comparison()
+            .unwrap()
             .editor
             .clone();
         window.click(("merge-incoming-button", 0usize), cx);

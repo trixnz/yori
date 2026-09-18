@@ -140,8 +140,15 @@ fn merge_picker_opens_real_paths_and_cancellation_at_every_stage_preserves_the_w
         assert_eq!(workspace.read(cx).tabs.entries.len(), 2);
         let id = workspace.read(cx).tabs.active.unwrap();
         assert_eq!(
-            workspace.read(cx).tabs.get(id).unwrap().paths,
-            Comparison::Merge(paths.clone()).resolve().unwrap()
+            workspace
+                .read(cx)
+                .tabs
+                .get(id)
+                .unwrap()
+                .identity
+                .comparison()
+                .unwrap(),
+            &Comparison::Merge(paths.clone()).resolve().unwrap()
         );
     });
     assert!(!paths.result.exists());

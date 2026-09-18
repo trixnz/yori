@@ -90,9 +90,9 @@ impl Workspace {
             .iter()
             .flat_map(|tab| {
                 tab.content
-                    .files
-                    .entries
-                    .iter()
+                    .comparison()
+                    .into_iter()
+                    .flat_map(|comparison| comparison.files.entries.iter())
                     .map(|file| file.path.clone())
             })
             .collect();
@@ -116,16 +116,17 @@ impl Workspace {
             .tabs
             .entries
             .iter()
-            .map(|tab| {
-                (
+            .filter_map(|tab| {
+                let comparison = tab.content.comparison()?;
+                Some((
                     tab.id,
-                    tab.content
+                    comparison
                         .files
                         .entries
                         .iter()
                         .map(|file| file.path.clone())
                         .collect::<Vec<_>>(),
-                )
+                ))
             })
             .collect();
         let scan = cx.background_executor().spawn(async move {
@@ -152,9 +153,10 @@ impl Workspace {
                 }
 
                 for (id, snapshots) in results {
-                    if let Some(tab) = this.tabs.entries.iter_mut().find(|tab| tab.id == id) {
-                        for (file, snapshot) in tab.content.files.entries.iter_mut().zip(snapshots)
-                        {
+                    if let Some(tab) = this.tabs.entries.iter_mut().find(|tab| tab.id == id)
+                        && let Some(comparison) = tab.content.comparison_mut()
+                    {
+                        for (file, snapshot) in comparison.files.entries.iter_mut().zip(snapshots) {
                             file.current = snapshot;
                         }
                     }
@@ -178,7 +180,7 @@ impl Workspace {
         if !self
             .tabs
             .get(id)
-            .is_some_and(|tab| tab.content.editor.read(cx).can_save())
+            .is_some_and(|tab| tab.content.can_save(cx))
         {
             return;
         }
@@ -206,14 +208,76 @@ impl Workspace {
             .iter()
             .filter(|tab| {
                 target.is_none_or(|id| tab.id == id)
-                    && tab.content.editor.read(cx).needs_save()
-                    && tab.content.editor.read(cx).can_save()
+                    && tab.content.needs_save(cx)
+                    && tab.content.can_save(cx)
             })
             .map(|tab| tab.id)
             .collect();
         let close = Some(target.map_or(CloseAfter::Window, CloseAfter::Tab));
 
         self.save_next(SaveBatch { pending, close }, None, window, cx);
+    }
+
+    fn finish_save_batch(
+        &mut self,
+        close: Option<CloseAfter>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(close) = close else {
+            return;
+        };
+        let target = match close {
+            CloseAfter::Tab(id) => Some(id),
+            CloseAfter::Window => None,
+        };
+
+        // Editing may continue while filesystem work is in flight. Never close
+        // over edits made after the snapshot that was just written.
+        if self
+            .tabs
+            .requires_discard_confirmation(target, |tab| tab.needs_save(cx))
+        {
+            self.request_close(target, window, cx);
+        } else {
+            self.close(target, window, cx);
+        }
+    }
+
+    fn start_review_save(
+        &mut self,
+        id: usize,
+        batch: SaveBatch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(super::OpenTab::Review { session, .. }) =
+            self.tabs.get(id).map(|tab| &tab.content)
+        else {
+            return false;
+        };
+        let session = session.clone();
+        let view = cx.weak_entity();
+        self.saving = true;
+        session.update(cx, |session, cx| {
+            session.save_all(
+                Rc::new(move |success, window, cx| {
+                    let next = batch.clone();
+                    let _ = view.update(cx, |this, cx| {
+                        this.saving = false;
+                        if success {
+                            this.save_next(next, None, window, cx);
+                        } else {
+                            this.activate(id, window, cx);
+                        }
+                    });
+                }),
+                window,
+                cx,
+            );
+        });
+
+        true
     }
 
     fn save_next(
@@ -224,29 +288,21 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(id) = batch.pending.pop_front() else {
-            if let Some(close) = batch.close {
-                let target = match close {
-                    CloseAfter::Tab(id) => Some(id),
-                    CloseAfter::Window => None,
-                };
-                // Editing may continue while the filesystem work is in flight.
-                // Never close over edits made after the snapshot we just wrote.
-                if self
-                    .tabs
-                    .requires_discard_confirmation(target, |tab| tab.editor.read(cx).needs_save())
-                {
-                    self.request_close(target, window, cx);
-                } else {
-                    self.close(target, window, cx);
-                }
-            }
+            self.finish_save_batch(batch.close, window, cx);
             return;
         };
+        if self.start_review_save(id, batch.clone(), window, cx) {
+            return;
+        }
         let Some(tab) = self.tabs.get(id) else {
             self.save_next(batch, None, window, cx);
             return;
         };
-        let editor = tab.content.editor.clone();
+        let comparison = tab
+            .content
+            .comparison()
+            .expect("non-review tabs are comparisons");
+        let editor = comparison.editor.clone();
         let checkpoint = match editor.update(cx, AlignedEditor::prepare_save) {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
@@ -254,7 +310,7 @@ impl Workspace {
                 return;
             }
         };
-        let Some(target) = tab.content.files.destination() else {
+        let Some(target) = comparison.files.destination() else {
             self.set_message(id, "This document has no save destination.".into(), cx);
             return;
         };
@@ -277,9 +333,11 @@ impl Workspace {
 
                 match result {
                     Ok(snapshot) => {
-                        if let Some(tab) = this.tabs.entries.iter_mut().find(|tab| tab.id == id) {
-                            tab.content.files.saved(&snapshot);
-                            tab.content.message = None;
+                        if let Some(tab) = this.tabs.entries.iter_mut().find(|tab| tab.id == id)
+                            && let Some(comparison) = tab.content.comparison_mut()
+                        {
+                            comparison.files.saved(&snapshot);
+                            comparison.message = None;
                         }
                         editor.update(cx, |editor, cx| editor.mark_saved(checkpoint, cx));
                         this.save_next(batch, None, window, cx);
@@ -295,7 +353,12 @@ impl Workspace {
                             batch.pending.push_front(id);
                             let detail = format!(
                                 "{} changed outside this tab. Replace that version with this tab's contents?",
-                                this.tabs.get(id).expect("saving tab remains open").paths.target().display(),
+                                this.tabs
+                                    .get(id)
+                                    .and_then(|tab| tab.identity.comparison())
+                                    .expect("saving comparison tab remains open")
+                                    .target()
+                                    .display(),
                             );
 
                             Self::confirm(
@@ -325,8 +388,10 @@ impl Workspace {
     }
 
     fn set_message(&mut self, id: usize, message: String, cx: &mut Context<Self>) {
-        if let Some(tab) = self.tabs.entries.iter_mut().find(|tab| tab.id == id) {
-            tab.content.message = Some(message);
+        if let Some(tab) = self.tabs.entries.iter_mut().find(|tab| tab.id == id)
+            && let Some(comparison) = tab.content.comparison_mut()
+        {
+            comparison.message = Some(message);
         }
         cx.notify();
     }
@@ -367,12 +432,19 @@ impl Workspace {
         let Some(tab) = self.tabs.get(id) else {
             return;
         };
-        let merging = matches!(tab.paths, Comparison::Merge(_));
+        let Some(paths) = tab.identity.comparison() else {
+            return;
+        };
+        let comparison = tab
+            .content
+            .comparison()
+            .expect("comparison identity has comparison content");
+        let merging = matches!(paths, Comparison::Merge(_));
         if merging && role == Role::Result {
             return;
         }
 
-        let discards = (merging || role == Role::Local) && tab.content.editor.read(cx).needs_save();
+        let discards = (merging || role == Role::Local) && comparison.editor.read(cx).needs_save();
         if discards {
             let title = if merging {
                 "Restart merge from disk?"
@@ -398,10 +470,16 @@ impl Workspace {
         let Some(tab) = self.tabs.get(id) else {
             return;
         };
-        let paths = tab.paths.clone();
-        let path = tab.content.files.file(role).path.clone();
+        let Some(paths) = tab.identity.comparison().cloned() else {
+            return;
+        };
+        let comparison = tab
+            .content
+            .comparison()
+            .expect("comparison identity has comparison content");
+        let path = comparison.files.file(role).path.clone();
         let merging = matches!(paths, Comparison::Merge(_));
-        let editor = tab.content.editor.clone();
+        let editor = comparison.editor.clone();
         editor.update(cx, AlignedEditor::deactivate);
         let checkpoint = editor.read(cx).current_checkpoint();
         self.saving = true;
@@ -440,9 +518,11 @@ impl Workspace {
                         editor.update(cx, |editor, cx| {
                             editor.reload_diff(role == Role::Baseline, document, cx);
                         });
-                        if let Some(tab) = this.tabs.entries.iter_mut().find(|tab| tab.id == id) {
-                            tab.content.files.accept(role, snapshot);
-                            tab.content.message = None;
+                        if let Some(tab) = this.tabs.entries.iter_mut().find(|tab| tab.id == id)
+                            && let Some(comparison) = tab.content.comparison_mut()
+                        {
+                            comparison.files.accept(role, snapshot);
+                            comparison.message = None;
                         }
                     }
                     Ok(Reloaded::Merge(files)) => {
@@ -469,7 +549,7 @@ impl Workspace {
         let Some(tab) = self.tabs.get(id) else {
             return Ok(());
         };
-        let Comparison::Merge(paths) = &tab.paths else {
+        let Some(Comparison::Merge(paths)) = tab.identity.comparison() else {
             return Ok(());
         };
         let session = yori_diff::merge::MergeSession::new(
@@ -481,12 +561,12 @@ impl Workspace {
         let editor = cx.new(|cx| AlignedEditor::new_merge(paths, session, window, cx));
         let subscription = cx.subscribe(&editor, |_, _, _: &DirtyChanged, cx| cx.notify());
         if let Some(tab) = self.tabs.entries.iter_mut().find(|tab| tab.id == id) {
-            tab.content = OpenTab {
+            tab.content = OpenTab::Comparison(super::ComparisonTab {
                 editor,
                 _subscription: subscription,
                 files,
                 message: None,
-            };
+            });
         }
 
         Ok(())

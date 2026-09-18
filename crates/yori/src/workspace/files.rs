@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use yori_document::Document;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Role {
+pub(crate) enum Role {
     Baseline,
     Local,
     Base,
@@ -28,7 +28,7 @@ impl Role {
     }
 }
 
-pub(super) struct TrackedFile {
+pub(crate) struct TrackedFile {
     pub role: Role,
     pub path: PathBuf,
     pub accepted: Snapshot,
@@ -44,13 +44,13 @@ impl TrackedFile {
     }
 }
 
-pub(super) struct Files {
+pub(crate) struct Files {
     pub entries: Vec<TrackedFile>,
     documents: Vec<(Role, Document)>,
 }
 
 impl Files {
-    pub fn load(comparison: &Comparison) -> Result<Self, String> {
+    pub(crate) fn load(comparison: &Comparison) -> Result<Self, String> {
         let mut files = Self {
             entries: Vec::new(),
             documents: Vec::new(),
@@ -151,7 +151,7 @@ impl Files {
         Ok(())
     }
 
-    pub fn document(&self, role: Role) -> &Document {
+    pub(crate) fn document(&self, role: Role) -> &Document {
         &self
             .documents
             .iter()
@@ -185,7 +185,7 @@ impl Files {
         })
     }
 
-    pub fn destination(&self) -> Option<&TrackedFile> {
+    pub(crate) fn destination(&self) -> Option<&TrackedFile> {
         self.entries.iter().find(|file| file.destination)
     }
 
@@ -212,7 +212,7 @@ impl Files {
         }
     }
 
-    pub fn saved(&mut self, snapshot: &Snapshot) {
+    pub(crate) fn saved(&mut self, snapshot: &Snapshot) {
         let Some(path) = self.destination().map(|file| file.path.clone()) else {
             return;
         };

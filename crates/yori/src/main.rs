@@ -4,6 +4,7 @@ mod appearance;
 mod comparison;
 mod editor;
 mod instance;
+mod review;
 mod storage;
 mod workspace;
 use comparison::Comparison;
@@ -12,7 +13,10 @@ use gpui_kit::{AppContext, AssetSource, SharedString, WindowOptions};
 use std::{borrow::Cow, env, path::PathBuf, process};
 use workspace::Workspace;
 
-gpui_kit::assets::icon_assets!(MergeIconAssets, [GitMerge]);
+gpui_kit::assets::icon_assets!(
+    WorkspaceIconAssets,
+    [GitMerge, GitPullRequest, RefreshCw, Search]
+);
 
 struct AppAssets {
     components: gpui_kit::assets::Assets,
@@ -28,7 +32,7 @@ impl Default for AppAssets {
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
-        if let Some(bytes) = MergeIconAssets.load(path)? {
+        if let Some(bytes) = WorkspaceIconAssets.load(path)? {
             return Ok(Some(bytes));
         }
 
@@ -37,7 +41,7 @@ impl AssetSource for AppAssets {
 
     fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
         let mut paths = self.components.list(path)?;
-        paths.extend(MergeIconAssets.list(path)?);
+        paths.extend(WorkspaceIconAssets.list(path)?);
         paths.sort();
         paths.dedup();
         Ok(paths)
