@@ -26,6 +26,7 @@ use yori_document::Document;
 
 use crate::comparison::{Comparison, MergePaths};
 use crate::editor::{AlignedEditor, DirtyChanged, PaneDocument};
+use crate::invocation::InvocationRequest;
 use crate::review::{ReviewChanged, ReviewSession, ReviewSource};
 use decision_dialog::{Decision, DecisionDialog, DecisionShortcut};
 use tabs::{TabIdentity, Tabs};
@@ -99,6 +100,7 @@ impl OpenTab {
 
 pub(super) struct Workspace {
     tabs: Tabs<OpenTab>,
+    invocation_directory: Option<std::path::PathBuf>,
     focus: FocusHandle,
     tab_scroll: ScrollHandle,
     picking_files: bool,
@@ -145,6 +147,7 @@ impl Workspace {
 
         Self {
             tabs: Tabs::default(),
+            invocation_directory: None,
             focus,
             tab_scroll: ScrollHandle::new(),
             picking_files: false,
@@ -173,9 +176,22 @@ impl Workspace {
         }
     }
 
-    /// Process one CLI handoff on the UI thread. Completion means every comparison was
-    /// loaded or rejected, not just queued; temporary files can then be released.
-    pub(super) fn open_comparisons(
+    /// Process one invocation on the UI thread, whether it started this process or was
+    /// forwarded later.
+    pub(super) fn handle_invocation(
+        &mut self,
+        invocation: &InvocationRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.invocation_directory = Some(invocation.directory.clone());
+
+        self.open_comparisons(&invocation.comparisons, window, cx)
+    }
+
+    /// Completion means every comparison was loaded or rejected, not just queued;
+    /// temporary files can then be released.
+    fn open_comparisons(
         &mut self,
         comparisons: &[Comparison],
         window: &mut Window,

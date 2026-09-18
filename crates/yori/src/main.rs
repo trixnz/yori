@@ -4,12 +4,14 @@ mod appearance;
 mod comparison;
 mod editor;
 mod instance;
+mod invocation;
 mod review;
 mod storage;
 mod workspace;
 use comparison::Comparison;
 use gpui_kit::component::Root;
 use gpui_kit::{AppContext, AssetSource, SharedString, WindowOptions};
+use invocation::InvocationRequest;
 use std::{borrow::Cow, env, path::PathBuf, process};
 use workspace::Workspace;
 
@@ -52,7 +54,9 @@ fn usage(program: &str) -> String {
     format!("usage: {program} [<baseline> <local> | <base> <local> <incoming> <result>]")
 }
 
-fn load_arguments() -> Result<Vec<Comparison>, String> {
+fn load_invocation() -> Result<InvocationRequest, String> {
+    let directory =
+        env::current_dir().map_err(|error| format!("cannot read invocation directory: {error}"))?;
     let mut args = env::args_os();
     let program = args
         .next()
@@ -66,18 +70,18 @@ fn load_arguments() -> Result<Vec<Comparison>, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     if paths.is_empty() {
-        return Ok(Vec::new());
+        return Ok(InvocationRequest::new(directory, Vec::new()));
     }
 
     Comparison::from_paths(&paths)
-        .map(|comparison| vec![comparison])
+        .map(|comparison| InvocationRequest::new(directory, vec![comparison]))
         .map_err(|_| usage(&program))
 }
 
-fn dispatch_open<C: AppContext>(
+fn dispatch_invocation<C: AppContext>(
     window: gpui_kit::WindowHandle<Root>,
     workspace: &gpui_kit::Entity<Workspace>,
-    comparisons: &[Comparison],
+    invocation: &InvocationRequest,
     cx: &mut C,
 ) -> Result<(), String> {
     // The typed handle also mutably borrows Root. Workspace opening must be
@@ -86,19 +90,19 @@ fn dispatch_open<C: AppContext>(
     window
         .update(cx, |_, window, cx| {
             workspace.update(cx, |workspace, cx| {
-                workspace.open_comparisons(comparisons, window, cx)
+                workspace.handle_invocation(invocation, window, cx)
             })
         })
         .unwrap_or_else(|error| Err(format!("yori's window closed: {error}")))
 }
 
 fn main() {
-    let comparisons = load_arguments().unwrap_or_else(|error| {
+    let invocation = load_invocation().unwrap_or_else(|error| {
         eprintln!("yori: {error}");
         process::exit(2);
     });
 
-    let Some(instance) = instance::Instance::start(&comparisons).unwrap_or_else(|error| {
+    let Some(instance) = instance::Instance::start(&invocation).unwrap_or_else(|error| {
         eprintln!("yori: {error}");
         process::exit(1);
     }) else {
@@ -132,8 +136,8 @@ fn main() {
                 let workspace = workspace.expect("workspace initialized with its window");
 
                 // Root is installed now, so error notifications and editor focus
-                // are available before handling either initial or forwarded files.
-                let initial = dispatch_open(window, &workspace, &comparisons, cx);
+                // are available before handling either initial or forwarded requests.
+                let initial = dispatch_invocation(window, &workspace, &invocation, cx);
                 if let Err(error) = initial {
                     eprintln!("yori: {error}");
                 }
@@ -142,7 +146,7 @@ fn main() {
                     let result = if request.expired() {
                         Err("request expired before yori could open it; retry".into())
                     } else {
-                        dispatch_open(window, &workspace, &request.comparisons, cx)
+                        dispatch_invocation(window, &workspace, &request.invocation, cx)
                     };
 
                     request.complete(result);
