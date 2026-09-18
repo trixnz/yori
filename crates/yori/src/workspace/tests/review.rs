@@ -259,7 +259,9 @@ fn refresh_keeps_dirty_removed_files_and_drops_clean_removed_files(cx: &mut Test
 }
 
 #[gpui_kit::test]
-fn dirty_text_to_binary_refresh_retains_the_editor_with_a_warning(cx: &mut TestAppContext) {
+fn dirty_text_to_binary_refresh_retains_then_resolves_with_navigator_focus(
+    cx: &mut TestAppContext,
+) {
     let (workspace, cx) = harness(cx);
     let identity = ReviewFileIdentity::new("changed-kind");
     let initial = ReviewManifest::new(vec![text_file(
@@ -303,6 +305,75 @@ fn dirty_text_to_binary_refresh_retains_the_editor_with_a_warning(cx: &mut TestA
                 .unwrap()
                 .contains("binary")
         );
+        assert!(editor.focus_handle(cx).contains_focused(window, cx));
+
+        let checkpoint = editor.read(cx).current_checkpoint();
+        editor.update(cx, |editor, cx| editor.mark_saved(checkpoint, cx));
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(session.read(cx).editor(&identity).is_none());
+        assert_eq!(session.read(cx).warning(&identity), None);
+        assert_eq!(window.find("review-file-list").focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn hidden_kind_change_resolution_does_not_steal_comparison_focus(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let identity = ReviewFileIdentity::new("changed-kind");
+    let initial = ReviewManifest::new(vec![text_file(
+        "changed-kind",
+        "vendor/library",
+        "old\n",
+        "new\n",
+    )])
+    .unwrap();
+    let refreshed = ReviewManifest::new(vec![ReviewFile::submodule(
+        identity.clone(),
+        "vendor/library".into(),
+        ReviewFileStatus::Modified,
+        "1111111",
+        "2222222",
+    )])
+    .unwrap();
+    let provider = TestProvider::new([initial, refreshed]);
+    let (_, session) = open_review(&workspace, source(provider, "hidden-kind-resolution"), cx);
+
+    let (editor, comparison) = cx.update(|window, cx| {
+        edit_active(window, cx, "dirty ");
+        let editor = session.read(cx).editor(&identity).unwrap();
+        window.click("refresh-review", cx);
+
+        let comparison = workspace
+            .read(cx)
+            .tabs
+            .get(0)
+            .unwrap()
+            .content
+            .comparison()
+            .unwrap()
+            .editor
+            .clone();
+        (editor, comparison)
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| workspace.activate(0, window, cx));
+        assert!(comparison.focus_handle(cx).contains_focused(window, cx));
+
+        let checkpoint = editor.read(cx).current_checkpoint();
+        editor.update(cx, |editor, cx| editor.mark_saved(checkpoint, cx));
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(session.read(cx).editor(&identity).is_none());
+        assert!(comparison.focus_handle(cx).contains_focused(window, cx));
     });
 }
 
@@ -428,9 +499,89 @@ fn navigator_exposes_list_selection_and_activates_from_the_keyboard(cx: &mut Tes
         assert_eq!(window.find(("review-file", 0usize)).selected(), Some(true));
         assert_eq!(session.read(cx).selected_identity(), Some(&text));
 
+        window.press("j", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find(("review-file", 1usize)).selected(), Some(true));
+        window.press("k", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find(("review-file", 0usize)).selected(), Some(true));
+
         window.press("enter", cx);
+        window.render_frame(cx);
         assert_eq!(session.read(cx).selected_identity(), Some(&binary));
-        assert_eq!(session.read(cx).editor_count(), 1);
+        assert_eq!(window.find("review-file-body").focused(), Some(true));
+
+        window.press("h", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("review-file-list").focused(), Some(true));
+        window.press("l", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("review-file-body").focused(), Some(true));
+        window.press("left", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("review-file-list").focused(), Some(true));
+        window.press("right", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("review-file-body").focused(), Some(true));
+
+        session.update(cx, |session, cx| session.focus_navigator(window, cx));
+        window.press("down", cx);
+        window.press("space", cx);
+        window.render_frame(cx);
+        assert_eq!(session.read(cx).selected_identity(), Some(&text));
+        let editor = session.read(cx).editor(&text).unwrap();
+        assert!(editor.focus_handle(cx).contains_focused(window, cx));
+
+        window.press("h", cx);
+        assert!(editor.focus_handle(cx).contains_focused(window, cx));
+        assert_eq!(window.find("review-file-list").focused(), Some(false));
+    });
+}
+
+#[gpui_kit::test]
+fn navigator_keyboard_selection_scrolls_beyond_one_viewport(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let files = (0..40)
+        .map(|index| {
+            ReviewFile::binary(
+                ReviewFileIdentity::new(format!("binary-{index}")),
+                format!("assets/file-{index:02}.bin").into(),
+                ReviewFileStatus::Modified,
+                "Binary content cannot be displayed.",
+            )
+        })
+        .collect();
+    let manifest = ReviewManifest::new(files).unwrap();
+    let (_, session) = open_review(
+        &workspace,
+        source(TestProvider::new([manifest]), "scroll-navigation"),
+        cx,
+    );
+
+    cx.update(|window, cx| {
+        session.update(cx, |session, cx| session.focus_navigator(window, cx));
+        for _ in 0..30 {
+            window.press("j", cx);
+        }
+        window.render_frame(cx);
+        window.render_frame(cx);
+
+        let list = window.find("review-file-list").bounds();
+        let selected = window.find(("review-file", 29usize));
+        assert_eq!(selected.selected(), Some(true));
+        assert!(selected.bounds().bottom() > list.top());
+        assert!(
+            selected.bounds().top() < list.bottom(),
+            "selected {:?} must intersect list {:?}; scrolled={}",
+            selected.bounds(),
+            list,
+            session.read(cx).navigator_is_scrolled(),
+        );
+        assert!(session.read(cx).navigator_is_scrolled());
+
+        window.press("k", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find(("review-file", 28usize)).selected(), Some(true));
     });
 }
 

@@ -309,9 +309,25 @@ impl Workspace {
                             OpenTab::Review { session, .. } if session == changed_session
                         )
                     });
-                if is_active && matches!(event, ReviewChanged::RefreshCompleted { activate: true })
-                {
-                    changed_session.update(cx, |session, cx| session.focus_active(window, cx));
+                if is_active {
+                    match event {
+                        ReviewChanged::RefreshCompleted { activate: true } => {
+                            changed_session
+                                .update(cx, |session, cx| session.focus_active(window, cx));
+                        }
+                        ReviewChanged::ActiveEditorChanged {
+                            transfer_focus: true,
+                        } => {
+                            changed_session.update(cx, |session, cx| {
+                                session.focus_navigator_or_filter(window, cx);
+                            });
+                        }
+                        ReviewChanged::State
+                        | ReviewChanged::RefreshCompleted { activate: false }
+                        | ReviewChanged::ActiveEditorChanged {
+                            transfer_focus: false,
+                        } => {}
+                    }
                 }
 
                 cx.notify();
