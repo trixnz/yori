@@ -242,10 +242,10 @@ impl Workspace {
             .active
             .and_then(|id| self.tabs.get(id))
             .map(|tab| {
-                tab.paths
-                    .target()
-                    .file_name()
-                    .map_or_else(|| tab.paths.target().display().to_string(), |name| name.to_string_lossy().into_owned())
+                tab.paths.target().file_name().map_or_else(
+                    || tab.paths.target().display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
             })
             .unwrap_or_else(|| "".to_owned());
 
@@ -253,7 +253,7 @@ impl Workspace {
             window.set_window_title("yori");
             return;
         }
-        
+
         let title = format!("yori - {title}");
 
         window.set_window_title(&title);
