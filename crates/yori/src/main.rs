@@ -121,6 +121,8 @@ fn main() {
                     .open_window(WindowOptions::default(), |window, cx| {
                         let view = cx.new(|cx| Workspace::new(window, cx));
                         workspace = Some(view.clone());
+                        window.set_window_title("yori");
+
                         cx.new(|cx| Root::new(view, window, cx))
                     })
                     .expect("failed to open yori window");

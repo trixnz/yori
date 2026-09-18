@@ -231,8 +231,32 @@ impl Workspace {
         self.disk_epoch += 1;
         self.watch_paths();
         self.scan_disk(cx);
+        self.update_window_title(window);
         cx.notify();
         Ok(())
+    }
+
+    fn update_window_title(&self, window: &mut Window) {
+        let title = self
+            .tabs
+            .active
+            .and_then(|id| self.tabs.get(id))
+            .map(|tab| {
+                tab.paths
+                    .target()
+                    .file_name()
+                    .map_or_else(|| tab.paths.target().display().to_string(), |name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "".to_owned());
+
+        if title.is_empty() {
+            window.set_window_title("yori");
+            return;
+        }
+        
+        let title = format!("yori - {title}");
+
+        window.set_window_title(&title);
     }
 
     fn choose_merge(&mut self, _: &OpenMerge, window: &mut Window, cx: &mut Context<Self>) {
@@ -260,6 +284,7 @@ impl Workspace {
 
         self.deactivate(cx);
         self.tabs.activate(id);
+        self.update_window_title(window);
 
         self.focus_active(window, cx);
         cx.notify();
