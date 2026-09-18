@@ -1,5 +1,9 @@
 # yori
 
+<p align="center">
+  <img src="assets/app-icon.png" width="128" alt="yori application icon">
+</p>
+
 yori is a native desktop application for comparing and merging source files.
 
 It combines side-by-side review with direct editing, supporting two-way comparisons,

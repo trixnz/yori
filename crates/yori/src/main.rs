@@ -18,6 +18,15 @@ use workspace::Workspace;
 
 gpui_kit::assets::icon_assets!(WorkspaceIconAssets, [GitMerge, GitPullRequest, RefreshCw]);
 
+#[cfg(target_os = "linux")]
+const APP_ID: &str = "io.github.trixnz.yori";
+
+#[cfg(target_os = "linux")]
+const APP_ICON: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/platform/linux/hicolor/256x256/apps/io.github.trixnz.yori.png"
+));
+
 struct AppAssets {
     components: gpui_kit::assets::Assets,
 }
@@ -101,6 +110,24 @@ fn dispatch_invocation<C: AppContext>(
         .unwrap_or_else(|error| Err(format!("yori's window closed: {error}")))
 }
 
+#[cfg(target_os = "linux")]
+fn main_window_options() -> WindowOptions {
+    let icon = image::load_from_memory(APP_ICON)
+        .expect("embedded yori application icon must be a valid PNG")
+        .into_rgba8();
+
+    WindowOptions {
+        app_id: Some(APP_ID.to_owned()),
+        icon: Some(std::sync::Arc::new(icon)),
+        ..WindowOptions::default()
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main_window_options() -> WindowOptions {
+    WindowOptions::default()
+}
+
 fn main() {
     let invocation = load_invocation().unwrap_or_else(|error| {
         eprintln!("yori: {error}");
@@ -133,7 +160,7 @@ fn main() {
             cx.spawn(async move |cx| {
                 let mut workspace = None;
                 let window = cx
-                    .open_window(WindowOptions::default(), |window, cx| {
+                    .open_window(main_window_options(), |window, cx| {
                         let view = cx.new(|cx| Workspace::new(window, cx));
                         workspace = Some(view.clone());
                         window.set_window_title("yori");

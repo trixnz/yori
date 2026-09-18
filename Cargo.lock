@@ -9801,6 +9801,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "winresource"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0986a8b1d586b7d3e4fe3d9ea39fb451ae22869dcea4aa109d287a374d866087"
+dependencies = [
+ "version_check",
+]
+
+[[package]]
 name = "wio"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9994,6 +10003,7 @@ dependencies = [
  "dirs 6.0.0",
  "gix",
  "gpui-kit",
+ "image",
  "interprocess",
  "notify 8.2.0",
  "ropey",
@@ -10001,6 +10011,7 @@ dependencies = [
  "toml_edit 0.22.27",
  "tree-sitter",
  "unicode-width",
+ "winresource",
  "yori-diff",
  "yori-document",
  "yori-p4",

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=yori
+Comment=Compare and merge source files
+Exec=yori
+Icon=io.github.trixnz.yori
+Terminal=false
+Categories=Development;RevisionControl;
+StartupWMClass=io.github.trixnz.yori

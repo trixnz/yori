@@ -57,6 +57,7 @@
               ./Cargo.toml
               ./LICENSE
               ./THIRD_PARTY_NOTICES.md
+              ./assets
               ./crates
             ];
           };
@@ -82,6 +83,16 @@
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath runtimeLibraries}"
             install -Dm644 LICENSE "$out/share/doc/yori/LICENSE"
             install -Dm644 THIRD_PARTY_NOTICES.md "$out/share/doc/yori/THIRD_PARTY_NOTICES.md"
+            install -Dm644 assets/platform/linux/io.github.trixnz.yori.desktop \
+              "$out/share/applications/io.github.trixnz.yori.desktop"
+            install -Dm644 assets/app-icon.png \
+              "$out/share/icons/hicolor/1024x1024/apps/io.github.trixnz.yori.png"
+
+            for icon in assets/platform/linux/hicolor/*/apps/*.png; do
+              size="$(basename "$(dirname "$(dirname "$icon")")")"
+              install -Dm644 "$icon" \
+                "$out/share/icons/hicolor/$size/apps/$(basename "$icon")"
+            done
           '';
 
           meta = {
@@ -128,6 +139,7 @@
             nativeBuildInputs = with pkgs; [
               perl
               pkg-config
+              (python3.withPackages (pythonPackages: [ pythonPackages.pillow ]))
             ];
             buildInputs = runtimeLibraries;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibraries;
