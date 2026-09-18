@@ -47,13 +47,6 @@ impl ComparisonDocument {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "editable in-memory documents remain available to non-file review providers"
-        )
-    )]
     pub fn editable_memory(
         logical_path: PathBuf,
         content: Vec<u8>,

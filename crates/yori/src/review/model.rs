@@ -155,10 +155,6 @@ impl TextComparison {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "provider integrations are deferred")
-)]
 pub(crate) enum ReviewFileKind {
     Text(TextComparison),
     Binary {
@@ -215,10 +211,6 @@ impl ReviewFile {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "provider integrations are deferred")
-    )]
     pub(crate) fn submodule(
         identity: ReviewFileIdentity,
         logical_path: PathBuf,
