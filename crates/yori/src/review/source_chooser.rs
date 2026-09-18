@@ -81,8 +81,8 @@ impl GitSourceChooser {
             .saturating_add_signed(offset)
             .min(self.option_count() - 1);
 
-        if self.selected > 0 && self.selected <= self.commits.len() {
-            self.scroll.scroll_to_item(self.selected - 1);
+        if self.selected <= self.commits.len() {
+            self.scroll.scroll_to_item(self.selected);
         }
 
         self.message = None;
@@ -231,20 +231,20 @@ impl GitSourceChooser {
             .overflow_hidden()
             .bg(cx.theme().background)
             .child(self.render_header(cx))
-            .child(self.render_row(
-                "git-source-working".into(),
-                0,
-                "Working changes".into(),
-                "HEAD compared with staged, unstaged, and untracked files".into(),
-                cx,
-            ))
             .child(
                 div()
-                    .id("git-commit-list")
+                    .id("git-source-list")
                     .flex_1()
                     .min_h_0()
                     .track_scroll(&self.scroll)
                     .overflow_y_scroll()
+                    .child(self.render_row(
+                        "git-source-working".into(),
+                        0,
+                        "Working changes".into(),
+                        "HEAD compared with staged, unstaged, and untracked files".into(),
+                        cx,
+                    ))
                     .children(self.commits.iter().enumerate().map(|(offset, commit)| {
                         let detail = if commit.is_merge {
                             format!(
