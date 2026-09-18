@@ -94,6 +94,14 @@ fn preferences_shortcut() -> &'static str {
     }
 }
 
+fn home_shortcut() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "cmd-shift-h"
+    } else {
+        "ctrl-shift-h"
+    }
+}
+
 fn show_preferences(cx: &mut VisualTestContext) {
     cx.simulate_keystrokes(preferences_shortcut());
     cx.update(TestWindowExt::render_frame);
@@ -112,6 +120,336 @@ fn active_editor(workspace: &Entity<Workspace>, cx: &App) -> Entity<AlignedEdito
         .expect("active test tab is a comparison")
         .editor
         .clone()
+}
+
+#[gpui_kit::test]
+fn home_is_fixed_outside_work_tabs_and_preserves_the_last_session(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let temporary = tempfile::tempdir().unwrap();
+    let left = temporary.path().join("left.txt");
+    let right = temporary.path().join("right.txt");
+    std::fs::write(&left, "baseline\n").unwrap();
+    std::fs::write(&right, "local\n").unwrap();
+
+    let (active, editor) = cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_paths(&left, &right, window, cx);
+        });
+        window.render_frame(cx);
+
+        let width = window.find("rows-viewport").bounds().size.width;
+        window.click_at("rows-viewport", point(width * 0.75, px(11.0)), cx);
+        window.input("changed ", cx);
+
+        let active = workspace.read(cx).tabs.active.unwrap();
+        (active, active_editor(&workspace, cx))
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.click("home-control", cx);
+        window.render_frame(cx);
+
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.selection, WorkspaceSelection::Home);
+        assert_eq!(workspace.tabs.entries.len(), 2);
+        assert_eq!(workspace.tabs.active, Some(active));
+        assert!(editor.read(cx).needs_save());
+        assert_eq!(
+            window.within("home-control").find(0usize).selected(),
+            Some(true)
+        );
+        assert_eq!(window.find("home").focused(), Some(true));
+    });
+
+    cx.simulate_keystrokes("ctrl-w");
+    cx.update(|_, cx| assert_eq!(workspace.read(cx).tabs.entries.len(), 2));
+
+    cx.simulate_keystrokes("ctrl-tab");
+    cx.update(|window, cx| {
+        assert_eq!(workspace.read(cx).selection, WorkspaceSelection::Work);
+        assert_eq!(workspace.read(cx).tabs.active, Some(active));
+        assert!(editor.focus_handle(cx).is_focused(window));
+        assert!(editor.read(cx).needs_save());
+    });
+
+    cx.simulate_keystrokes(home_shortcut());
+    cx.update(|window, cx| {
+        assert_eq!(workspace.read(cx).selection, WorkspaceSelection::Home);
+        assert_eq!(window.find("home").focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn cycling_still_moves_only_between_work_tabs(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let temporary = tempfile::tempdir().unwrap();
+    let left = temporary.path().join("left.txt");
+    let right = temporary.path().join("right.txt");
+    std::fs::write(&left, "baseline\n").unwrap();
+    std::fs::write(&right, "local\n").unwrap();
+
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_paths(&left, &right, window, cx);
+            workspace.activate(0, window, cx);
+        });
+    });
+
+    cx.simulate_keystrokes("ctrl-tab");
+    cx.update(|_, cx| {
+        assert_eq!(workspace.read(cx).selection, WorkspaceSelection::Work);
+        assert_eq!(workspace.read(cx).tabs.active, Some(1));
+    });
+
+    cx.simulate_keystrokes("ctrl-shift-tab");
+    cx.update(|_, cx| {
+        assert_eq!(workspace.read(cx).selection, WorkspaceSelection::Work);
+        assert_eq!(workspace.read(cx).tabs.active, Some(0));
+    });
+}
+
+#[gpui_kit::test]
+fn closing_the_final_work_tab_reveals_and_focuses_home(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+
+    cx.update(|window, cx| window.click(("tab-close-target", 0usize), cx));
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+
+        let workspace = workspace.read(cx);
+        assert!(workspace.tabs.entries.is_empty());
+        assert_eq!(workspace.tabs.active, None);
+        assert_eq!(workspace.selection, WorkspaceSelection::Home);
+        assert_eq!(
+            window.within("home-control").find(0usize).selected(),
+            Some(true)
+        );
+        assert_eq!(window.find("home").focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn home_exposes_exactly_the_initial_actions_and_keyboard_activation(cx: &mut TestAppContext) {
+    let (workspace, cx) = empty_harness(cx);
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("home").focused(), Some(true));
+
+        assert_eq!(
+            Home::action_labels(),
+            [
+                "Review Git change",
+                "Review Perforce changelist",
+                "Compare files",
+                "Open three-way merge",
+                "Preferences",
+            ]
+        );
+        for index in 0usize..5 {
+            let _ = window.find(("home-action", index));
+        }
+        assert!(window.try_find(("home-action", 5usize)).is_none());
+
+        window.press("down", cx);
+        assert_eq!(
+            workspace.read(cx).home.read(cx).selected_action(),
+            HomeAction::ReviewPerforceChangelist
+        );
+        window.press("j", cx);
+        assert_eq!(
+            workspace.read(cx).home.read(cx).selected_action(),
+            HomeAction::CompareFiles
+        );
+        window.press("up", cx);
+        window.press("k", cx);
+        assert_eq!(
+            workspace.read(cx).home.read(cx).selected_action(),
+            HomeAction::ReviewGitChange
+        );
+
+        for _ in 0..4 {
+            window.press("down", cx);
+        }
+        window.press("space", cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        assert!(window.has_active_dialog(cx));
+        window.press("escape", cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("home").focused(), Some(true));
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        assert!(window.has_active_dialog(cx));
+        window.press("escape", cx);
+    });
+}
+
+#[gpui_kit::test]
+fn home_keys_are_scoped_away_from_the_editor(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let editor = cx.update(|_, cx| active_editor(&workspace, cx));
+
+    cx.update(|window, cx| {
+        assert!(editor.focus_handle(cx).is_focused(window));
+        window.press("j", cx);
+
+        assert_eq!(
+            workspace.read(cx).home.read(cx).selected_action(),
+            HomeAction::ReviewGitChange
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn home_git_action_opens_the_existing_source_chooser_and_restores_focus(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let repository = tempfile::tempdir().unwrap();
+    gix::init(repository.path()).unwrap();
+    std::fs::write(repository.path().join("change.txt"), "changed\n").unwrap();
+
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, _| {
+            workspace.invocation_directory = Some(repository.path().to_owned());
+        });
+        window.render_frame(cx);
+        window.click("home-control", cx);
+        window.render_frame(cx);
+        window.click(("home-action", 0usize), cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(workspace.read(cx).git_source_chooser.is_some());
+        assert_eq!(workspace.read(cx).tabs.entries.len(), 1);
+        assert_eq!(window.find("git-source-chooser").focused(), Some(true));
+        window.press("escape", cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(workspace.read(cx).git_source_chooser.is_none());
+        assert_eq!(window.find("home").focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn home_perforce_action_opens_the_existing_changelist_chooser(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, _| {
+            workspace.test_perforce_context = Some(review::perforce_context());
+        });
+        window.render_frame(cx);
+        window.click("home-control", cx);
+        window.render_frame(cx);
+        window.click(("home-action", 1usize), cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(window.has_active_dialog(cx));
+        assert_eq!(window.find("perforce-source-list").focused(), Some(true));
+        assert_eq!(workspace.read(cx).tabs.entries.len(), 1);
+    });
+}
+
+#[gpui_kit::test]
+fn home_compare_action_uses_the_existing_file_flow_and_restores_focus(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.click("home-control", cx);
+        window.render_frame(cx);
+        window.click(("home-action", 2usize), cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.cx.did_prompt_for_paths());
+    cx.cx.simulate_path_prompt_response(|options| {
+        assert_eq!(options.prompt.as_deref(), Some("Select baseline file"));
+        None
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(!workspace.read(cx).picking_files);
+        assert_eq!(workspace.read(cx).tabs.entries.len(), 1);
+        assert_eq!(window.find("home").focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn home_merge_action_uses_the_existing_three_way_flow(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.click("home-control", cx);
+        window.render_frame(cx);
+        window.click(("home-action", 3usize), cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.cx.did_prompt_for_paths());
+    cx.cx.simulate_path_prompt_response(|options| {
+        assert_eq!(
+            options.prompt.as_deref(),
+            Some("Select common ancestor (BASE)")
+        );
+        None
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(!workspace.read(cx).picking_files);
+        assert_eq!(workspace.read(cx).tabs.entries.len(), 1);
+        assert_eq!(window.find("home").focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn home_preferences_action_uses_the_existing_dialog_and_restores_focus(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.click("home-control", cx);
+        window.render_frame(cx);
+        window.click(("home-action", 4usize), cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        assert!(window.has_active_dialog(cx));
+        assert!(workspace.read(cx).preferences.is_some());
+        assert_eq!(workspace.read(cx).tabs.entries.len(), 1);
+        window.press("escape", cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(workspace.read(cx).preferences.is_none());
+        assert_eq!(window.find("home").focused(), Some(true));
+    });
 }
 
 #[gpui_kit::test]

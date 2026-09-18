@@ -462,6 +462,50 @@ fn background_review_load_does_not_steal_focus_from_the_active_comparison(cx: &m
 }
 
 #[gpui_kit::test]
+fn active_review_refresh_does_not_steal_focus_from_home(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let manifest = ReviewManifest::new(vec![text_file(
+        "file",
+        "src/file.rs",
+        "before\n",
+        "after\n",
+    )])
+    .unwrap();
+    let provider = TestProvider::new([manifest]);
+
+    let session = cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_review_source(source(provider, "home-focus"), window, cx);
+        });
+        let review_id = workspace.read(cx).tabs.active.unwrap();
+        let OpenTab::Review { session, .. } =
+            &workspace.read(cx).tabs.get(review_id).unwrap().content
+        else {
+            panic!("new tab should be a review session");
+        };
+        let session = session.clone();
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.show_home(&ShowHome, window, cx);
+        });
+        window.render_frame(cx);
+
+        assert_eq!(workspace.read(cx).selection, WorkspaceSelection::Home);
+        assert_eq!(window.find("home").focused(), Some(true));
+
+        session
+    });
+    cx.run_until_parked();
+    cx.update(TestWindowExt::render_frame);
+
+    cx.update(|window, cx| {
+        assert_eq!(session.read(cx).editor_count(), 1);
+        assert_eq!(workspace.read(cx).selection, WorkspaceSelection::Home);
+        assert_eq!(window.find("home").focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
 fn navigator_exposes_list_selection_and_activates_from_the_keyboard(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
     let binary = ReviewFileIdentity::new("binary");
@@ -659,7 +703,7 @@ fn empty_binary_submodule_and_rename_states_remain_navigable(cx: &mut TestAppCon
     });
 }
 
-fn perforce_context() -> Arc<PerforceContext> {
+pub(super) fn perforce_context() -> Arc<PerforceContext> {
     let root = PathBuf::from("/work/robin-yori");
     let info = yori_p4::ClientInfo {
         server_address: "ssl:perforce.example:1666".into(),

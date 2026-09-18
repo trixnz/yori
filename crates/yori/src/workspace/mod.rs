@@ -3,6 +3,7 @@
 mod decision_dialog;
 mod disk_dialog;
 pub(crate) mod files;
+mod home;
 mod perforce_chooser;
 mod persistence;
 mod preferences_dialog;
@@ -35,6 +36,7 @@ use crate::review::{
     ReviewSession, ReviewSource,
 };
 use decision_dialog::{Decision, DecisionDialog, DecisionShortcut};
+use home::{ActionChosen, Home, HomeAction, HomeControl};
 use perforce_chooser::{PerforceSourceChooser, SourceChosen};
 use preferences_dialog::PreferencesDialog;
 use tabs::{TabIdentity, Tabs};
@@ -52,9 +54,16 @@ gpui_kit::actions!(
         Quit,
         NextTab,
         PreviousTab,
+        ShowHome,
         Preferences
     ]
 );
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkspaceSelection {
+    Home,
+    Work,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PerforceDiscovery {
@@ -116,11 +125,16 @@ impl OpenTab {
 
 pub(super) struct Workspace {
     tabs: Tabs<OpenTab>,
+    selection: WorkspaceSelection,
+    home: Entity<Home>,
+    _home_subscription: Subscription,
     invocation_directory: Option<std::path::PathBuf>,
     focus: FocusHandle,
     tab_scroll: ScrollHandle,
     picking_files: bool,
     perforce_discovery: PerforceDiscovery,
+    #[cfg(test)]
+    test_perforce_context: Option<std::sync::Arc<PerforceContext>>,
     saving: bool,
     notice_scheduled: bool,
     disk_notice: std::rc::Weak<std::cell::RefCell<disk_dialog::DiskNotice>>,
@@ -152,7 +166,14 @@ impl Workspace {
         });
 
         let focus = cx.focus_handle();
-        focus.focus(window, cx);
+        let home = cx.new(Home::new);
+        let home_subscription = cx.subscribe_in(
+            &home,
+            window,
+            |this, _, event: &ActionChosen, window, cx| {
+                this.start_home_action(event.0, window, cx);
+            },
+        );
 
         let (disk_watch, monitor) = Self::start_monitor(window, cx);
         cx.observe_window_activation(window, |this, window, cx| {
@@ -167,11 +188,16 @@ impl Workspace {
 
         let mut workspace = Self {
             tabs: Tabs::default(),
+            selection: WorkspaceSelection::Home,
+            home: home.clone(),
+            _home_subscription: home_subscription,
             invocation_directory: None,
             focus,
             tab_scroll: ScrollHandle::new(),
             picking_files: false,
             perforce_discovery: PerforceDiscovery::Idle,
+            #[cfg(test)]
+            test_perforce_context: None,
             saving: false,
             notice_scheduled: false,
             disk_notice: std::rc::Weak::new(),
@@ -184,6 +210,7 @@ impl Workspace {
             preferences: None,
         };
         workspace.watch_paths(cx);
+        home.update(cx, |home, cx| home.focus(window, cx));
 
         workspace
     }
@@ -323,6 +350,7 @@ impl Workspace {
                 message: None,
             }),
         );
+        self.selection = WorkspaceSelection::Work;
 
         self.disk_epoch += 1;
         self.watch_paths(cx);
@@ -352,16 +380,18 @@ impl Workspace {
             &session,
             window,
             |this, changed_session, event: &ReviewChanged, window, cx| {
-                let is_active = this
-                    .tabs
-                    .active
-                    .and_then(|id| this.tabs.get(id))
-                    .is_some_and(|tab| {
-                        matches!(
-                            &tab.content,
-                            OpenTab::Review { session, .. } if session == changed_session
-                        )
-                    });
+                let is_active = this.selection == WorkspaceSelection::Work
+                    && this.git_source_chooser.is_none()
+                    && this
+                        .tabs
+                        .active
+                        .and_then(|id| this.tabs.get(id))
+                        .is_some_and(|tab| {
+                            matches!(
+                                &tab.content,
+                                OpenTab::Review { session, .. } if session == changed_session
+                            )
+                        });
                 if is_active {
                     match event {
                         ReviewChanged::RefreshCompleted { activate: true } => {
@@ -393,6 +423,7 @@ impl Workspace {
                 _subscription: subscription,
             },
         );
+        self.selection = WorkspaceSelection::Work;
         self.focus_active(window, cx);
         session.update(cx, |session, cx| session.refresh(window, cx));
 
@@ -403,11 +434,42 @@ impl Workspace {
         self.choose_files(true, window, cx);
     }
 
+    fn start_home_action(
+        &mut self,
+        action: HomeAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            HomeAction::ReviewGitChange => {
+                self.choose_git_review(&OpenGitReview, window, cx);
+            }
+            HomeAction::ReviewPerforceChangelist => {
+                self.choose_perforce_review(window, cx);
+            }
+            HomeAction::CompareFiles => {
+                self.choose_pair(&OpenComparison, window, cx);
+            }
+            HomeAction::OpenThreeWayMerge => {
+                self.choose_merge(&OpenMerge, window, cx);
+            }
+            HomeAction::Preferences => {
+                self.open_preferences(&Preferences, window, cx);
+            }
+        }
+    }
+
     fn choose_perforce_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.perforce_discovery == PerforceDiscovery::Loading
             || self.picking_files
             || window.has_active_dialog(cx)
         {
+            return;
+        }
+
+        #[cfg(test)]
+        if let Some(context) = self.test_perforce_context.clone() {
+            Self::open_perforce_chooser(context, window, cx);
             return;
         }
 
@@ -640,6 +702,10 @@ impl Workspace {
     }
 
     fn deactivate(&self, cx: &mut Context<Self>) {
+        if self.selection != WorkspaceSelection::Work {
+            return;
+        }
+
         let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) else {
             return;
         };
@@ -658,6 +724,11 @@ impl Workspace {
             return;
         }
 
+        if self.selection == WorkspaceSelection::Home {
+            self.home.update(cx, |home, cx| home.focus(window, cx));
+            return;
+        }
+
         let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) else {
             self.focus.focus(window, cx);
             return;
@@ -669,6 +740,19 @@ impl Workspace {
                 session.update(cx, |session, cx| session.focus_active(window, cx));
             }
         }
+    }
+
+    fn show_home(&mut self, _: &ShowHome, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picking_files || window.has_active_dialog(cx) {
+            return;
+        }
+
+        self.deactivate(cx);
+        self.git_source_chooser = None;
+        self.selection = WorkspaceSelection::Home;
+
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     fn refresh_reviews(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -695,12 +779,20 @@ impl Workspace {
         self.deactivate(cx);
         self.git_source_chooser = None;
         self.tabs.activate(id);
+        self.selection = WorkspaceSelection::Work;
 
         self.focus_active(window, cx);
         cx.notify();
     }
 
     fn cycle(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selection == WorkspaceSelection::Home {
+            if let Some(id) = self.tabs.active {
+                self.activate(id, window, cx);
+            }
+            return;
+        }
+
         let Some(index) = self
             .tabs
             .entries
@@ -730,10 +822,13 @@ impl Workspace {
             return;
         };
 
-        if self.tabs.active == Some(id) {
+        if self.selection == WorkspaceSelection::Work && self.tabs.active == Some(id) {
             self.deactivate(cx);
         }
         self.tabs.remove(id);
+        if self.tabs.entries.is_empty() {
+            self.selection = WorkspaceSelection::Home;
+        }
         self.disk_epoch += 1;
         self.watch_paths(cx);
 
@@ -866,64 +961,6 @@ impl Workspace {
         .detach();
     }
 
-    fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let opening = self.picking_files || self.perforce_discovery == PerforceDiscovery::Loading;
-
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(12.0))
-            .child("Review, compare, or merge files")
-            .child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Open Git changes, a Perforce changelist, or files directly."),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(
-                        Button::new("open-first-git-review")
-                            .label("Open Git review")
-                            .icon(gpui_kit::assets::IconName::GitPullRequest)
-                            .ghost()
-                            .disabled(opening)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.choose_git_review(&OpenGitReview, window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("open-first-perforce-review")
-                            .label(if self.perforce_discovery == PerforceDiscovery::Loading {
-                                "Discovering Perforce…"
-                            } else {
-                                "Open Perforce review"
-                            })
-                            .icon(gpui_kit::assets::IconName::GitPullRequest)
-                            .ghost()
-                            .disabled(opening)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.choose_perforce_review(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("open-first-comparison")
-                            .label("Open comparison")
-                            .icon(IconName::Plus)
-                            .ghost()
-                            .disabled(opening)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.choose_pair(&OpenComparison, window, cx);
-                            })),
-                    ),
-            )
-    }
-
     fn render_open_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let opening = self.picking_files || self.perforce_discovery == PerforceDiscovery::Loading;
 
@@ -1049,17 +1086,16 @@ impl Workspace {
                     ),
             )
     }
-}
 
-impl Render for Workspace {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.schedule_disk_notices(window, cx);
-
-        let selected = self
-            .tabs
-            .entries
-            .iter()
-            .position(|tab| Some(tab.id) == self.tabs.active);
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> TabBar {
+        let selected = (self.selection == WorkspaceSelection::Work)
+            .then(|| {
+                self.tabs
+                    .entries
+                    .iter()
+                    .position(|tab| Some(tab.id) == self.tabs.active)
+            })
+            .flatten();
         let tabs = self
             .tabs
             .entries
@@ -1077,6 +1113,13 @@ impl Render for Workspace {
             .with_size(px(38.0))
             .track_scroll(&self.tab_scroll)
             .max_width(px(260.0))
+            .prefix(
+                HomeControl::new(self.selection == WorkspaceSelection::Home).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.show_home(&ShowHome, window, cx);
+                    },
+                )),
+            )
             .suffix(self.render_open_controls(cx))
             .children(tabs)
             .on_click(cx.listener(move |this, index: &usize, window, cx| {
@@ -1084,21 +1127,36 @@ impl Render for Workspace {
                     this.activate(*id, window, cx);
                 }
             }));
+
         if let Some(index) = selected {
             bar = bar.selected_index(index);
         }
 
-        let body = if let Some((chooser, _)) = &self.git_source_chooser {
+        bar
+    }
+
+    fn render_body(&self) -> impl IntoElement {
+        if let Some((chooser, _)) = &self.git_source_chooser {
             div().size_full().child(chooser.clone())
+        } else if self.selection == WorkspaceSelection::Home {
+            div().size_full().child(self.home.clone())
         } else if let Some(tab) = self.tabs.active.and_then(|id| self.tabs.get(id)) {
             match &tab.content {
                 OpenTab::Comparison(tab) => div().size_full().child(tab.editor.clone()),
                 OpenTab::Review { session, .. } => div().size_full().child(session.clone()),
             }
         } else {
-            div().size_full().child(self.render_empty(cx))
-        };
+            div().size_full().child(self.home.clone())
+        }
+    }
+}
 
+impl Render for Workspace {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.schedule_disk_notices(window, cx);
+
+        let bar = self.render_tab_bar(cx);
+        let body = self.render_body();
         let dialogs = Root::render_dialog_layer(window, cx);
         let notifications = Root::render_notification_layer(window, cx);
 
@@ -1119,8 +1177,13 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::choose_merge))
             .on_action(cx.listener(Self::choose_git_review))
             .on_action(cx.listener(Self::open_preferences))
+            .on_action(cx.listener(Self::show_home))
             .on_action(cx.listener(Self::save_active))
             .on_action(cx.listener(|this, _: &CloseComparison, window, cx| {
+                if this.selection != WorkspaceSelection::Work {
+                    return;
+                }
+
                 if let Some(id) = this.tabs.active {
                     this.request_close(Some(id), window, cx);
                 }
@@ -1226,6 +1289,7 @@ async fn choose_paths(
 }
 
 pub(super) fn init(cx: &mut App) {
+    home::init(cx);
     perforce_chooser::init(cx);
 
     let command = if cfg!(target_os = "macos") {
@@ -1248,5 +1312,6 @@ pub(super) fn init(cx: &mut App) {
         KeyBinding::new(&format!("{command}-,"), Preferences, None),
         KeyBinding::new("ctrl-tab", NextTab, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(KEY_CONTEXT)),
+        KeyBinding::new(&format!("{command}-shift-h"), ShowHome, Some(KEY_CONTEXT)),
     ]);
 }

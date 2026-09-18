@@ -132,6 +132,7 @@ experimental.
 | Open a merge | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> |
 | Save | <kbd>Ctrl</kbd>+<kbd>S</kbd> |
 | Close the active tab | <kbd>Ctrl</kbd>+<kbd>W</kbd> |
+| Open Home | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> |
 | Switch tabs | <kbd>Ctrl</kbd>+<kbd>Tab</kbd> |
 | Visit the previous or next change | <kbd>Alt</kbd>+<kbd>Up</kbd> / <kbd>Alt</kbd>+<kbd>Down</kbd> |
 | Apply the selected-line action | <kbd>Alt</kbd>+<kbd>Enter</kbd> |

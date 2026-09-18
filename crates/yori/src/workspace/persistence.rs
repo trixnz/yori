@@ -182,7 +182,11 @@ impl Workspace {
     }
 
     pub(super) fn save_active(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
-        if self.saving || self.picking_files || window.has_active_dialog(cx) {
+        if self.selection != super::WorkspaceSelection::Work
+            || self.saving
+            || self.picking_files
+            || window.has_active_dialog(cx)
+        {
             return;
         }
         let Some(id) = self.tabs.active else {
