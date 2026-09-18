@@ -74,8 +74,14 @@ extra-trusted-public-keys = trixnz-yori.cachix.org-1:v0OV3ETheOdXTYZRhtaDUeO5dEt
 ## Building from source
 
 ```sh
+export P4API_ROOT="$(./scripts/fetch-p4api)"
 cargo build --release -p yori
 ```
+
+The fetch script downloads the pinned P4API for the host target and verifies its
+SHA-256 before extraction. P4API and the pinned OpenSSL 3.5 source are statically
+linked; building requires Perl and the platform C/C++ toolchain, but no system
+OpenSSL development package. Nix provisions the required build tools.
 
 ### Nix
 
@@ -135,6 +141,7 @@ experimental.
 
 - `crates/yori-document` owns source text, line endings, edits, and history.
 - `crates/yori-diff` owns comparison, alignment, restoration, and merge behavior.
+- `crates/yori-p4` owns asynchronous access to the native Perforce P4API.
 - `crates/yori` owns the application and native interface.
 
 The document and diff crates remain independent of the UI framework and can be
@@ -153,4 +160,6 @@ This checks formatting, Clippy, tests, and the native build.
 
 ## License
 
-yori is available under the [MIT License](LICENSE).
+yori is available under the [MIT License](LICENSE). Binary distributions also
+include the applicable [third-party notices](THIRD_PARTY_NOTICES.md) for P4API,
+OpenSSL, and bundled components.

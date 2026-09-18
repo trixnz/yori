@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly release="r25.1"
+readonly version="2025.1.3042095"
+readonly target="${1:-$(rustc -vV | awk '/^host:/ { print $2 }')}"
+readonly destination_input="${2:-.cache/p4api/$target}"
+mkdir -p "$(dirname "$destination_input")"
+destination="$(cd "$(dirname "$destination_input")" && pwd)/$(basename "$destination_input")"
+readonly destination
+
+case "$target" in
+  x86_64-unknown-linux-gnu)
+    archive="p4api-glibc2.3-openssl3.5.tgz"
+    format="tar"
+    sha256="466352f49f585f514bfee13efcb927e93ea567bcc2dde200ef2c750d8555a0dc"
+    url="https://ftp.perforce.com/perforce/$release/bin.linux26x86_64/$archive"
+    ;;
+  aarch64-unknown-linux-gnu)
+    archive="p4api-openssl3.5.tgz"
+    format="tar"
+    sha256="3bba25b44917341ddbc2416bdc68ab84118d2dc37ca90edc5ec829064ade2b63"
+    url="https://ftp.perforce.com/perforce/$release/bin.linux26aarch64/$archive"
+    ;;
+  x86_64-pc-windows-msvc)
+    archive="p4api_vs2022_dyn_openssl3.5.zip"
+    format="zip"
+    sha256="b05db557dc5dd8d3b3e316632afb457bb1c4bdf4b696ffc14e5df78acc743a57"
+    url="https://ftp.perforce.com/perforce/$release/bin.ntx64/$archive"
+    ;;
+  *)
+    echo "unsupported P4API target: $target" >&2
+    exit 1
+    ;;
+esac
+
+if [[ -f "$destination/include/p4/clientapi.h" ]] \
+  && [[ "$(cat "$destination/.artifact-sha256" 2>/dev/null || true)" == "$sha256" ]]; then
+  printf '%s\n' "$destination"
+  exit 0
+fi
+
+cache="${destination}.download"
+mkdir -p "$(dirname "$destination")" "$cache"
+curl --fail --location --retry 3 --silent --show-error --output "$cache/$archive" "$url"
+printf '%s  %s\n' "$sha256" "$cache/$archive" | sha256sum --check >/dev/null
+
+rm -rf "$destination"
+mkdir -p "$destination"
+
+if [[ "$format" == "tar" ]]; then
+  tar --extract --file "$cache/$archive" --directory "$destination" --strip-components=1
+else
+  extracted="$cache/extracted"
+  mkdir -p "$extracted"
+
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q "$cache/$archive" -d "$extracted"
+  elif command -v 7z >/dev/null 2>&1; then
+    7z x -y -o"$extracted" "$cache/$archive" >/dev/null
+  else
+    echo "extracting the Windows P4API requires unzip or 7z" >&2
+    exit 1
+  fi
+
+  artifact_root="$(find "$extracted" -mindepth 1 -maxdepth 1 -type d | head -1)"
+  cp -a "$artifact_root/." "$destination/"
+fi
+
+rm -rf "$cache"
+
+if [[ ! -f "$destination/include/p4/clientapi.h" ]]; then
+  echo "P4API $version archive did not contain the expected headers" >&2
+  exit 1
+fi
+
+printf '%s\n' "$sha256" > "$destination/.artifact-sha256"
+printf '%s\n' "$destination"
