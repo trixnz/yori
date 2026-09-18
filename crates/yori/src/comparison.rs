@@ -8,13 +8,6 @@ use std::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DocumentContent {
     File(PathBuf),
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "in-memory content is the provider seam for upcoming review sources"
-        )
-    )]
     Memory(Arc<[u8]>),
 }
 
@@ -45,13 +38,6 @@ impl ComparisonDocument {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "in-memory documents are constructed by upcoming review providers"
-        )
-    )]
     pub fn read_only_memory(logical_path: PathBuf, content: Vec<u8>) -> Self {
         Self {
             logical_path,
@@ -65,7 +51,7 @@ impl ComparisonDocument {
         not(test),
         expect(
             dead_code,
-            reason = "in-memory documents are constructed by upcoming review providers"
+            reason = "editable in-memory documents remain available to non-file review providers"
         )
     )]
     pub fn editable_memory(

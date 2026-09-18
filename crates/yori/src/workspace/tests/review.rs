@@ -659,6 +659,154 @@ fn empty_binary_submodule_and_rename_states_remain_navigable(cx: &mut TestAppCon
     });
 }
 
+fn perforce_context() -> Arc<PerforceContext> {
+    let root = PathBuf::from("/work/robin-yori");
+    let info = yori_p4::ClientInfo {
+        server_address: "ssl:perforce.example:1666".into(),
+        server_version: "P4D/test".into(),
+        user_name: "robin".into(),
+        client_name: "robin-yori".into(),
+        client_root: Some(root.clone()),
+        current_directory: root,
+        case_handling: Some("sensitive".into()),
+        unicode_enabled: true,
+    };
+    let default = yori_p4::ChangelistSummary {
+        id: yori_p4::ChangelistId::Default,
+        status: yori_p4::ChangelistStatus::Pending,
+        description: "Default changelist".into(),
+        user: "robin".into(),
+        client: "robin-yori".into(),
+        modified_unix_seconds: None,
+    };
+    let pending_number = std::num::NonZeroU32::new(42).unwrap();
+    let pending = yori_p4::ChangelistSummary {
+        id: yori_p4::ChangelistId::Number(pending_number),
+        status: yori_p4::ChangelistStatus::Pending,
+        description: "Pending work".into(),
+        user: "robin".into(),
+        client: "robin-yori".into(),
+        modified_unix_seconds: None,
+    };
+    let mut numbered = vec![pending];
+    numbered.extend((1..=40).map(|number| yori_p4::ChangelistSummary {
+        id: yori_p4::ChangelistId::Number(std::num::NonZeroU32::new(number).unwrap()),
+        status: yori_p4::ChangelistStatus::Pending,
+        description: format!("Pending work {number}"),
+        user: "robin".into(),
+        client: "robin-yori".into(),
+        modified_unix_seconds: None,
+    }));
+    let submitted_number = std::num::NonZeroU32::new(41).unwrap();
+    let submitted = yori_p4::ChangelistSummary {
+        id: yori_p4::ChangelistId::Number(submitted_number),
+        status: yori_p4::ChangelistStatus::Submitted,
+        description: "Submitted work".into(),
+        user: "robin".into(),
+        client: "robin-yori".into(),
+        modified_unix_seconds: None,
+    };
+    let descriptions = std::collections::HashMap::from([(
+        submitted_number,
+        yori_p4::ChangelistDescription {
+            summary: submitted.clone(),
+            files: Vec::new(),
+        },
+    )]);
+
+    Arc::new(PerforceContext::for_test(
+        info,
+        yori_p4::PendingChangelists { default, numbered },
+        vec![submitted],
+        descriptions,
+    ))
+}
+
+#[gpui_kit::test]
+fn perforce_source_chooser_is_keyboard_first_without_stealing_input_keys(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let chooser = cx.update(|window, cx| {
+        let chooser = workspace.update(cx, |_, cx| {
+            Workspace::open_perforce_chooser(perforce_context(), window, cx)
+        });
+        window.render_frame(cx);
+        chooser
+    });
+    cx.run_until_parked();
+    cx.update(TestWindowExt::render_frame);
+
+    cx.update(|window, cx| {
+        assert_eq!(window.find("perforce-source-list").focused(), Some(true));
+        assert_eq!(
+            window.find(("perforce-source", 0usize)).selected(),
+            Some(true)
+        );
+
+        window.press("down", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("perforce-source", 1usize)).selected(),
+            Some(true)
+        );
+        window.press("k", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("perforce-source", 0usize)).selected(),
+            Some(true)
+        );
+
+        for _ in 0..30 {
+            window.press("j", cx);
+        }
+        window.render_frame(cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("perforce-source", 30usize)).selected(),
+            Some(true)
+        );
+        assert!(chooser.read(cx).list_is_scrolled());
+
+        window.click("perforce-recent", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("perforce-source", 0usize)).selected(),
+            Some(true)
+        );
+
+        window.click("perforce-number", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("perforce-changelist-number").focused(),
+            Some(true)
+        );
+        window.press("j", cx);
+        assert_eq!(chooser.read(cx).number_text(cx), "j");
+
+        window.press(
+            if cfg!(target_os = "macos") {
+                "cmd-a"
+            } else {
+                "ctrl-a"
+            },
+            cx,
+        );
+        window.press("backspace", cx);
+        window.input("41", cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+    cx.update(TestWindowExt::render_frame);
+
+    cx.update(|window, cx| {
+        assert!(!window.has_active_dialog(cx));
+        let active = workspace.read(cx).tabs.active.unwrap();
+        assert!(matches!(
+            workspace.read(cx).tabs.get(active).unwrap().content,
+            OpenTab::Review { .. }
+        ));
+    });
+}
+
 #[gpui_kit::test]
 fn aggregate_close_cancel_discard_and_failed_save_preserve_the_session(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);

@@ -3,6 +3,7 @@
 mod decision_dialog;
 mod disk_dialog;
 pub(crate) mod files;
+mod perforce_chooser;
 mod persistence;
 mod tabs;
 #[cfg(test)]
@@ -27,8 +28,9 @@ use yori_document::Document;
 use crate::comparison::{Comparison, MergePaths};
 use crate::editor::{AlignedEditor, DirtyChanged, PaneDocument};
 use crate::invocation::InvocationRequest;
-use crate::review::{ReviewChanged, ReviewSession, ReviewSource};
+use crate::review::{PerforceContext, ReviewChanged, ReviewSession, ReviewSource};
 use decision_dialog::{Decision, DecisionDialog, DecisionShortcut};
+use perforce_chooser::{PerforceSourceChooser, SourceChosen};
 use tabs::{TabIdentity, Tabs};
 
 const KEY_CONTEXT: &str = "ComparisonWorkspace";
@@ -45,6 +47,12 @@ gpui_kit::actions!(
         PreviousTab
     ]
 );
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PerforceDiscovery {
+    Idle,
+    Loading,
+}
 
 struct ComparisonTab {
     editor: Entity<AlignedEditor>,
@@ -104,6 +112,7 @@ pub(super) struct Workspace {
     focus: FocusHandle,
     tab_scroll: ScrollHandle,
     picking_files: bool,
+    perforce_discovery: PerforceDiscovery,
     saving: bool,
     notice_scheduled: bool,
     disk_notice: std::rc::Weak<std::cell::RefCell<disk_dialog::DiskNotice>>,
@@ -151,6 +160,7 @@ impl Workspace {
             focus,
             tab_scroll: ScrollHandle::new(),
             picking_files: false,
+            perforce_discovery: PerforceDiscovery::Idle,
             saving: false,
             notice_scheduled: false,
             disk_notice: std::rc::Weak::new(),
@@ -287,13 +297,6 @@ impl Workspace {
         Ok(())
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "review providers will call this seam when their source pickers are added"
-        )
-    )]
     pub(crate) fn open_review_source(
         &mut self,
         source: ReviewSource,
@@ -364,6 +367,91 @@ impl Workspace {
 
     fn choose_merge(&mut self, _: &OpenMerge, window: &mut Window, cx: &mut Context<Self>) {
         self.choose_files(true, window, cx);
+    }
+
+    fn choose_perforce_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.perforce_discovery == PerforceDiscovery::Loading
+            || self.picking_files
+            || window.has_active_dialog(cx)
+        {
+            return;
+        }
+        let Some(directory) = self.perforce_discovery_directory() else {
+            window.push_notification(
+                Notification::error("Yori has no invocation directory for Perforce discovery."),
+                cx,
+            );
+            return;
+        };
+
+        self.deactivate(cx);
+        self.perforce_discovery = PerforceDiscovery::Loading;
+        cx.notify();
+
+        let discovery = cx
+            .background_executor()
+            .spawn(async move { PerforceContext::discover(&directory) });
+        cx.spawn_in(window, async move |view, cx| {
+            let result = discovery.await;
+            let _ = view.update_in(cx, |this, window, cx| {
+                this.perforce_discovery = PerforceDiscovery::Idle;
+
+                match result {
+                    Ok(context) if !window.has_active_dialog(cx) => {
+                        Self::open_perforce_chooser(std::sync::Arc::new(context), window, cx);
+                    }
+                    Ok(_) => window.push_notification(
+                        Notification::error(
+                            "Another dialog opened while Perforce context was loading; close it and retry.",
+                        ),
+                        cx,
+                    ),
+                    Err(error) => window.push_notification(
+                        Notification::error(format!(
+                            "Cannot discover Perforce context: {error}"
+                        )),
+                        cx,
+                    ),
+                }
+
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn perforce_discovery_directory(&self) -> Option<std::path::PathBuf> {
+        self.invocation_directory.clone()
+    }
+
+    fn open_perforce_chooser(
+        context: std::sync::Arc<PerforceContext>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<PerforceSourceChooser> {
+        let chooser = cx.new(|cx| PerforceSourceChooser::new(context, window, cx));
+        cx.subscribe_in(
+            &chooser,
+            window,
+            |this, _, source: &SourceChosen, window, cx| {
+                this.open_review_source(source.0.clone(), window, cx);
+            },
+        )
+        .detach();
+
+        let rendered = chooser.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title("Open Perforce review")
+                .overlay_closable(false)
+                .child(rendered.clone())
+        });
+        let focused = chooser.clone();
+        window.defer(cx, move |window, cx| {
+            focused.update(cx, |chooser, cx| chooser.focus(window, cx));
+        });
+
+        chooser
     }
 
     fn deactivate(&self, cx: &mut Context<Self>) {
@@ -555,7 +643,10 @@ impl Workspace {
     }
 
     fn choose_files(&mut self, merging: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.picking_files || window.has_active_dialog(cx) {
+        if self.picking_files
+            || self.perforce_discovery == PerforceDiscovery::Loading
+            || window.has_active_dialog(cx)
+        {
             return;
         }
 
@@ -584,6 +675,8 @@ impl Workspace {
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let opening = self.picking_files || self.perforce_discovery == PerforceDiscovery::Loading;
+
         div()
             .size_full()
             .flex()
@@ -591,25 +684,47 @@ impl Workspace {
             .items_center()
             .justify_center()
             .gap(px(12.0))
-            .child("Compare or merge files")
+            .child("Compare, merge, or review files")
             .child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Open a two-way diff or a three-way merge."),
+                    .child("Open files directly or review a Perforce changelist."),
             )
             .child(
-                Button::new("open-first-comparison")
-                    .label("Open comparison")
-                    .icon(IconName::Plus)
-                    .ghost()
-                    .disabled(self.picking_files)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.choose_pair(&OpenComparison, window, cx);
-                    })),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        Button::new("open-first-comparison")
+                            .label("Open comparison")
+                            .icon(IconName::Plus)
+                            .ghost()
+                            .disabled(opening)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_pair(&OpenComparison, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("open-first-perforce-review")
+                            .label(if self.perforce_discovery == PerforceDiscovery::Loading {
+                                "Discovering Perforce…"
+                            } else {
+                                "Open Perforce review"
+                            })
+                            .icon(gpui_kit::assets::IconName::GitPullRequest)
+                            .ghost()
+                            .disabled(opening)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_perforce_review(window, cx);
+                            })),
+                    ),
             )
     }
 
     fn render_open_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let opening = self.picking_files || self.perforce_discovery == PerforceDiscovery::Loading;
+
         div()
             .px(px(5.0))
             .flex()
@@ -624,9 +739,21 @@ impl Workspace {
                     .size(px(28.0))
                     .accessibility_label("Open merge")
                     .tooltip("Open three-way merge (Ctrl+Shift+M)")
-                    .disabled(self.picking_files)
+                    .disabled(opening)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.choose_merge(&OpenMerge, window, cx);
+                    })),
+            )
+            .child(
+                Button::new("open-perforce-review")
+                    .icon(gpui_kit::assets::IconName::GitPullRequest)
+                    .ghost()
+                    .with_size(px(28.0))
+                    .accessibility_label("Open Perforce review")
+                    .tooltip("Open Perforce review")
+                    .disabled(opening)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.choose_perforce_review(window, cx);
                     })),
             )
             .child(
@@ -643,7 +770,7 @@ impl Workspace {
                     .with_size(px(28.0))
                     .accessibility_label("Open comparison")
                     .tooltip("Open comparison (Ctrl+O)")
-                    .disabled(self.picking_files)
+                    .disabled(opening)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.choose_pair(&OpenComparison, window, cx);
                     })),
@@ -881,6 +1008,8 @@ async fn choose_paths(
 }
 
 pub(super) fn init(cx: &mut App) {
+    perforce_chooser::init(cx);
+
     let command = if cfg!(target_os = "macos") {
         "cmd"
     } else {

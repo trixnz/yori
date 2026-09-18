@@ -92,6 +92,11 @@ fn initial_and_forwarded_invocations_share_handling_and_update_the_directory(
     cx.update(|_, cx| {
         let workspace = workspace.read(cx);
         assert_eq!(workspace.invocation_directory.as_ref(), Some(&repository_b));
+        assert_eq!(
+            workspace.perforce_discovery_directory().as_ref(),
+            Some(&repository_b),
+            "Perforce discovery must route through the latest invocation directory"
+        );
         assert_eq!(workspace.tabs.entries.len(), 2);
     });
 

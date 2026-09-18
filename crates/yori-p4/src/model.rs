@@ -83,6 +83,7 @@ pub struct OpenedFile {
     pub depot_path: String,
     pub client_path: Option<String>,
     pub local_path: Option<PathBuf>,
+    pub moved_file: Option<String>,
     pub revision: Option<u32>,
     pub have_revision: Option<u32>,
     pub action: FileAction,
@@ -99,6 +100,7 @@ pub struct ChangelistDescription {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChangedFile {
     pub depot_path: String,
+    pub moved_file: Option<String>,
     pub revision: u32,
     pub action: FileAction,
     pub file_type: Option<String>,

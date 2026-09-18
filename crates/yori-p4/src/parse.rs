@@ -174,6 +174,7 @@ pub(crate) fn opened_files(result: &RawResult) -> Result<Vec<OpenedFile>> {
                 depot_path: record.required_text("depotFile")?,
                 client_path: record.text("clientFile"),
                 local_path: record.text("path").map(PathBuf::from),
+                moved_file: record.text("movedFile"),
                 revision: record.number("rev")?,
                 have_revision: record.number("haveRev")?,
                 action: FileAction::from(record.required_text("action")?.as_str()),
@@ -218,6 +219,7 @@ pub(crate) fn changelist_description(result: &RawResult) -> Result<ChangelistDes
 
         files.push(ChangedFile {
             depot_path,
+            moved_file: record.indexed_text("movedFile", index),
             revision,
             action: FileAction::from(action.as_str()),
             file_type: record.indexed_text("type", index),
@@ -376,6 +378,7 @@ mod tests {
             ("depotFile", "//depot/src/lib.rs"),
             ("clientFile", "//robin-yori/src/lib.rs"),
             ("path", "/work/src/lib.rs"),
+            ("movedFile", "//depot/src/old-lib.rs"),
             ("rev", "8"),
             ("haveRev", "7"),
             ("action", "custom-action"),
@@ -386,6 +389,7 @@ mod tests {
         let file = opened_files(&result).unwrap().remove(0);
 
         assert_eq!(file.changelist, ChangelistId::Default);
+        assert_eq!(file.moved_file.as_deref(), Some("//depot/src/old-lib.rs"));
         assert_eq!(file.have_revision, Some(7));
         assert_eq!(file.action, FileAction::Unknown("custom-action".to_owned()));
     }
@@ -406,6 +410,7 @@ mod tests {
             ("fileSize0", "12"),
             ("digest0", "ABCDEF"),
             ("depotFile1", "//depot/b.bin"),
+            ("movedFile1", "//depot/old-b.bin"),
             ("rev1", "1"),
             ("action1", "add"),
             ("type1", "binary"),
@@ -417,6 +422,10 @@ mod tests {
         assert_eq!(description.files[0].revision, 3);
         assert_eq!(description.files[0].file_size, Some(12));
         assert_eq!(description.files[1].action, FileAction::Add);
+        assert_eq!(
+            description.files[1].moved_file.as_deref(),
+            Some("//depot/old-b.bin")
+        );
     }
 
     #[test]

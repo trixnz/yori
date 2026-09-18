@@ -15,10 +15,6 @@ pub(crate) struct ReviewSourceIdentity {
 }
 
 impl ReviewSourceIdentity {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "provider integrations are deferred")
-    )]
     pub(crate) fn new(provider: impl Into<Arc<str>>, key: impl Into<Arc<str>>) -> Self {
         Self {
             provider: provider.into(),
@@ -39,10 +35,6 @@ pub(crate) struct ReviewSource {
 }
 
 impl ReviewSource {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "provider integrations are deferred")
-    )]
     pub(crate) fn new(
         identity: ReviewSourceIdentity,
         label: impl Into<Arc<str>>,
@@ -64,10 +56,6 @@ pub(crate) trait ReviewProvider: Send + Sync + 'static {
 pub(crate) struct ReviewFileIdentity(Arc<str>);
 
 impl ReviewFileIdentity {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "provider integrations are deferred")
-    )]
     pub(crate) fn new(value: impl Into<Arc<str>>) -> Self {
         Self(value.into())
     }
@@ -80,10 +68,6 @@ impl fmt::Display for ReviewFileIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "provider integrations are deferred")
-)]
 pub(crate) enum ReviewFileStatus {
     Added,
     Modified,
@@ -124,10 +108,6 @@ pub(crate) struct TextComparison {
 }
 
 impl TextComparison {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "provider integrations are deferred")
-    )]
     pub(crate) fn new(
         baseline: ComparisonDocument,
         local: ComparisonDocument,
@@ -147,10 +127,6 @@ impl TextComparison {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "provider integrations are deferred")
-    )]
     pub(crate) fn added(path: PathBuf, local: ComparisonDocument) -> Result<Self, String> {
         Self::new(
             ComparisonDocument::read_only_memory(path, Vec::new()),
@@ -158,10 +134,6 @@ impl TextComparison {
         )
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "provider integrations are deferred")
-    )]
     pub(crate) fn deleted(path: PathBuf, baseline: ComparisonDocument) -> Result<Self, String> {
         Self::new(
             baseline,
@@ -213,10 +185,6 @@ pub(crate) struct ReviewFile {
 }
 
 impl ReviewFile {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "provider integrations are deferred")
-    )]
     pub(crate) fn text(
         identity: ReviewFileIdentity,
         logical_path: PathBuf,
@@ -231,10 +199,6 @@ impl ReviewFile {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "provider integrations are deferred")
-    )]
     pub(crate) fn binary(
         identity: ReviewFileIdentity,
         logical_path: PathBuf,
