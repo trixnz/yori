@@ -3,11 +3,12 @@
 use super::completion::Placement;
 use super::{
     ActiveTheme, AlignedEditor, App, Backspace, Bounds, Context, CopySelected, CutSelected, Delete,
-    DisplayLine, EntityInputHandler, Font, GUTTER_WIDTH, HEADER_HEIGHT, InsertTab, KEY_CONTEXT,
-    KeyBinding, LINE_HEIGHT, Motion, MoveDown, MoveEnd, MoveFinish, MoveHome, MoveLeft, MoveRight,
-    MoveStart, MoveUp, Newline, NextChange, Paste, Pixels, PreviousChange, Range, Redo,
-    RestoreSelectedLines, SelectAll, SelectDown, SelectEnd, SelectHome, SelectLeft, SelectRight,
-    SelectUp, Selection, Side, TAB_WIDTH, TextRun, UTF16Selection, Undo, Window, point, px,
+    DisplayLine, EntityInputHandler, FocusNextPane, FocusPreviousPane, Font, GUTTER_WIDTH,
+    HEADER_HEIGHT, InsertTab, KEY_CONTEXT, KeyBinding, LINE_HEIGHT, Motion, MoveDown, MoveEnd,
+    MoveFinish, MoveHome, MoveLeft, MoveRight, MoveStart, MoveUp, Newline, NextChange, Paste,
+    Pixels, PreviousChange, Range, Redo, RestoreSelectedLines, SelectAll, SelectDown, SelectEnd,
+    SelectHome, SelectLeft, SelectRight, SelectUp, Selection, Side, TAB_WIDTH, TextRun,
+    UTF16Selection, Undo, Window, point, px,
 };
 use yori::geometry::display_units;
 use yori::vim::EditTarget;
@@ -15,6 +16,8 @@ use yori_document::editing::{self, EditUpdate, TextSelection};
 
 #[cfg(test)]
 mod history_tests;
+#[cfg(test)]
+mod navigation_tests;
 
 impl AlignedEditor {
     pub(super) fn right_selection(&self) -> Option<TextSelection> {
@@ -200,7 +203,7 @@ impl AlignedEditor {
         self.source_position(side, offset, window, cx)
     }
 
-    fn source_position(
+    pub(super) fn source_position(
         &self,
         side: Side,
         offset: usize,
@@ -621,6 +624,8 @@ pub(super) fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-up", PreviousChange, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-down", NextChange, Some(KEY_CONTEXT)),
         KeyBinding::new("alt-enter", RestoreSelectedLines, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-h", FocusPreviousPane, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-l", FocusNextPane, Some(KEY_CONTEXT)),
         KeyBinding::new(&format!("{command}-c"), CopySelected, Some(KEY_CONTEXT)),
         KeyBinding::new(&format!("{command}-v"), Paste, Some(KEY_CONTEXT)),
         KeyBinding::new(&format!("{command}-x"), CutSelected, Some(KEY_CONTEXT)),

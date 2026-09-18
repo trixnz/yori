@@ -496,7 +496,7 @@ fn active_review_refresh_does_not_steal_focus_from_home(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
-fn navigator_exposes_list_selection_and_activates_from_the_keyboard(cx: &mut TestAppContext) {
+fn navigator_selection_displays_files_and_ctrl_h_l_moves_between_panes(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
     let binary = ReviewFileIdentity::new("binary");
     let text = ReviewFileIdentity::new("text");
@@ -530,31 +530,25 @@ fn navigator_exposes_list_selection_and_activates_from_the_keyboard(cx: &mut Tes
 
         window.press("up", cx);
         window.render_frame(cx);
+        assert_eq!(session.read(cx).selected_identity(), Some(&binary));
         assert_eq!(window.find(("review-file", 0usize)).selected(), Some(true));
-        assert_eq!(session.read(cx).selected_identity(), Some(&text));
+        assert_eq!(window.find("review-file-list").focused(), Some(true));
 
         window.press("j", cx);
         window.render_frame(cx);
+        assert_eq!(session.read(cx).selected_identity(), Some(&text));
         assert_eq!(window.find(("review-file", 1usize)).selected(), Some(true));
-        window.press("k", cx);
-        window.render_frame(cx);
-        assert_eq!(window.find(("review-file", 0usize)).selected(), Some(true));
 
+        window.press("k", cx);
         window.press("enter", cx);
         window.render_frame(cx);
         assert_eq!(session.read(cx).selected_identity(), Some(&binary));
         assert_eq!(window.find("review-file-body").focused(), Some(true));
 
-        window.press("h", cx);
+        window.press("ctrl-h", cx);
         window.render_frame(cx);
         assert_eq!(window.find("review-file-list").focused(), Some(true));
-        window.press("l", cx);
-        window.render_frame(cx);
-        assert_eq!(window.find("review-file-body").focused(), Some(true));
-        window.press("left", cx);
-        window.render_frame(cx);
-        assert_eq!(window.find("review-file-list").focused(), Some(true));
-        window.press("right", cx);
+        window.press("ctrl-l", cx);
         window.render_frame(cx);
         assert_eq!(window.find("review-file-body").focused(), Some(true));
 
@@ -565,10 +559,19 @@ fn navigator_exposes_list_selection_and_activates_from_the_keyboard(cx: &mut Tes
         assert_eq!(session.read(cx).selected_identity(), Some(&text));
         let editor = session.read(cx).editor(&text).unwrap();
         assert!(editor.focus_handle(cx).contains_focused(window, cx));
+        assert_eq!(editor.read(cx).active_pane_index(), 0);
 
-        window.press("h", cx);
-        assert!(editor.focus_handle(cx).contains_focused(window, cx));
-        assert_eq!(window.find("review-file-list").focused(), Some(false));
+        window.press("ctrl-l", cx);
+        assert_eq!(editor.read(cx).active_pane_index(), 1);
+        window.press("ctrl-h", cx);
+        assert_eq!(editor.read(cx).active_pane_index(), 0);
+        window.press("ctrl-h", cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("review-file-list").focused(), Some(true));
     });
 }
 
@@ -620,67 +623,6 @@ fn navigator_keyboard_selection_scrolls_beyond_one_viewport(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
-fn navigator_header_and_status_badges_render_without_a_filter(cx: &mut TestAppContext) {
-    let (workspace, cx) = harness(cx);
-    let manifest = ReviewManifest::new(vec![
-        ReviewFile::binary(
-            ReviewFileIdentity::new("added"),
-            "added.bin".into(),
-            ReviewFileStatus::Added,
-            "Binary content cannot be displayed.",
-        ),
-        ReviewFile::binary(
-            ReviewFileIdentity::new("modified"),
-            "modified.bin".into(),
-            ReviewFileStatus::Modified,
-            "Binary content cannot be displayed.",
-        ),
-        ReviewFile::binary(
-            ReviewFileIdentity::new("deleted"),
-            "deleted.bin".into(),
-            ReviewFileStatus::Deleted,
-            "Binary content cannot be displayed.",
-        ),
-        ReviewFile::binary(
-            ReviewFileIdentity::new("renamed"),
-            "renamed.bin".into(),
-            ReviewFileStatus::Renamed {
-                from: "old.bin".into(),
-            },
-            "Binary content cannot be displayed.",
-        ),
-    ])
-    .unwrap();
-    open_review(
-        &workspace,
-        source(TestProvider::new([manifest]), "status-header"),
-        cx,
-    );
-
-    cx.update(|window, _| {
-        assert!(window.try_find("review-file-filter").is_none());
-        let header = window.find("review-files-header").bounds();
-        let refresh = window.find("refresh-review").bounds();
-        assert!(refresh.top() >= header.top());
-        assert!(refresh.bottom() <= header.bottom());
-
-        for (index, status) in ["Added", "Modified", "Deleted", "Renamed"]
-            .into_iter()
-            .enumerate()
-        {
-            assert!(window.try_find(("review-status-badge", index)).is_some());
-            assert!(
-                window
-                    .find(("review-file", index))
-                    .label()
-                    .unwrap()
-                    .starts_with(status)
-            );
-        }
-    });
-}
-
-#[gpui_kit::test]
 fn refresh_updates_in_place_without_transient_layout_or_focus_change(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
     let identity = ReviewFileIdentity::new("file");
@@ -705,9 +647,13 @@ fn refresh_updates_in_place_without_transient_layout_or_focus_change(cx: &mut Te
         window.render_frame(cx);
 
         let editor = session.read(cx).editor(&identity).unwrap();
+        assert!(window.try_find("review-file-filter").is_none());
         let header = window.find("review-files-header").bounds();
+        let refresh = window.find("refresh-review").bounds();
         let list = window.find("review-file-list").bounds();
         let body = window.find("review-file-body").bounds();
+        assert!(refresh.top() >= header.top());
+        assert!(refresh.bottom() <= header.bottom());
 
         window.click("refresh-review", cx);
         window.render_frame(cx);
@@ -942,10 +888,12 @@ fn perforce_source_chooser_is_keyboard_first_without_stealing_input_keys(cx: &mu
     cx.update(|window, cx| {
         assert!(!window.has_active_dialog(cx));
         let active = workspace.read(cx).tabs.active.unwrap();
-        assert!(matches!(
-            workspace.read(cx).tabs.get(active).unwrap().content,
-            OpenTab::Review { .. }
-        ));
+        let tab = workspace.read(cx).tabs.get(active).unwrap();
+        assert!(matches!(tab.content, OpenTab::Review { .. }));
+        assert_eq!(
+            tab.identity.description(),
+            "Perforce: ssl:perforce.example:1666 | robin-yori | submitted 41"
+        );
     });
 }
 

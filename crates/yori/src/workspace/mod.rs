@@ -1074,6 +1074,13 @@ impl Workspace {
                         .with_size(px(14.0)),
                     ),
             )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.request_close(Some(id), window, cx);
+                }),
+            )
             .suffix(
                 div()
                     .flex()

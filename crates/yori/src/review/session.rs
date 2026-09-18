@@ -16,7 +16,7 @@ use gpui_kit::{
 
 use crate::{
     comparison::Comparison,
-    editor::{AlignedEditor, DirtyChanged, PaneDocument},
+    editor::{AlignedEditor, DirtyChanged, PaneDocument, PaneFocusBoundary},
     storage::SaveError,
     workspace::files::{Files, Role as DocumentRole},
 };
@@ -92,8 +92,15 @@ struct SessionEntry {
 
 struct ReviewEditor {
     editor: Entity<AlignedEditor>,
-    _subscription: Subscription,
+    _dirty_subscription: Subscription,
+    _pane_subscription: Subscription,
     files: Files,
+}
+
+#[derive(Clone, Copy)]
+enum FileSelectionFocus {
+    Content,
+    Navigator,
 }
 
 struct LoadedText {
@@ -156,7 +163,6 @@ pub(crate) struct ReviewSession {
     editors: HashMap<ReviewFileIdentity, ReviewEditor>,
     navigator_focus: FocusHandle,
     navigator_scroll: ScrollHandle,
-    navigator_selection: Option<ReviewFileIdentity>,
     non_text_body_focus: FocusHandle,
     refreshing: bool,
     saving: bool,
@@ -172,7 +178,6 @@ impl ReviewSession {
             editors: HashMap::new(),
             navigator_focus: cx.focus_handle(),
             navigator_scroll: ScrollHandle::new(),
-            navigator_selection: None,
             non_text_body_focus: cx.focus_handle(),
             refreshing: false,
             saving: false,
@@ -370,7 +375,7 @@ impl ReviewSession {
             self.ensure_editor(&selected, window, cx)?;
         }
 
-        self.reconcile_navigator_selection();
+        self.reveal_selected();
 
         Ok(old_selected != self.selected || old_active_editor != self.active_editor())
     }
@@ -447,7 +452,7 @@ impl ReviewSession {
             )
         });
         let subscribed_identity = identity.clone();
-        let subscription = cx.subscribe_in(
+        let dirty_subscription = cx.subscribe_in(
             &editor,
             window,
             move |this, editor, _: &DirtyChanged, window, cx| {
@@ -464,12 +469,23 @@ impl ReviewSession {
                 cx.notify();
             },
         );
+        let pane_subscription = cx.subscribe_in(
+            &editor,
+            window,
+            |this, _, boundary: &PaneFocusBoundary, window, cx| {
+                if *boundary == PaneFocusBoundary::Previous {
+                    this.navigator_focus.focus(window, cx);
+                    cx.notify();
+                }
+            },
+        );
 
         self.editors.insert(
             identity.clone(),
             ReviewEditor {
                 editor,
-                _subscription: subscription,
+                _dirty_subscription: dirty_subscription,
+                _pane_subscription: pane_subscription,
                 files: loaded.files,
             },
         );
@@ -480,6 +496,7 @@ impl ReviewSession {
     fn select(
         &mut self,
         identity: ReviewFileIdentity,
+        focus: FileSelectionFocus,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -491,9 +508,14 @@ impl ReviewSession {
         if let Err(error) = self.ensure_editor(&identity, window, cx) {
             self.message = Some(format!("Cannot open file comparison: {error}"));
         }
-        self.navigator_selection = Some(identity.clone());
         self.selected = Some(identity);
-        self.focus_active(window, cx);
+        self.reveal_selected();
+
+        match focus {
+            FileSelectionFocus::Content => self.focus_active(window, cx),
+            FileSelectionFocus::Navigator => self.navigator_focus.focus(window, cx),
+        }
+
         cx.notify();
     }
 
@@ -646,21 +668,8 @@ impl ReviewSession {
             .collect()
     }
 
-    fn reconcile_navigator_selection(&mut self) {
-        let navigator_exists = self.navigator_selection.as_ref().is_some_and(|selected| {
-            self.entries
-                .iter()
-                .any(|entry| &entry.file.identity == selected)
-        });
-        if !navigator_exists {
-            self.navigator_selection = self.selected.clone();
-        }
-
-        self.reveal_navigator_selection();
-    }
-
-    fn reveal_navigator_selection(&self) {
-        let Some(selected) = self.navigator_selection.as_ref() else {
+    fn reveal_selected(&self) {
+        let Some(selected) = self.selected.as_ref() else {
             return;
         };
         let Some(index) = self
@@ -674,18 +683,15 @@ impl ReviewSession {
         self.navigator_scroll.scroll_to_item(index);
     }
 
-    fn move_navigator_selection(&mut self, offset: isize, cx: &mut Context<Self>) {
+    fn move_file_selection(&mut self, offset: isize, window: &mut Window, cx: &mut Context<Self>) {
         let visible = self.visible_identities();
         if visible.is_empty() {
-            self.navigator_selection = None;
-            cx.notify();
             return;
         }
 
         let current = self
-            .navigator_selection
+            .selected
             .as_ref()
-            .or(self.selected.as_ref())
             .and_then(|selected| visible.iter().position(|identity| identity == selected));
         let next = current.map_or_else(
             || {
@@ -697,22 +703,31 @@ impl ReviewSession {
                     .min(visible.len().saturating_sub(1))
             },
         );
-        self.navigator_selection = Some(visible[next].clone());
-        self.navigator_scroll.scroll_to_item(next);
-        cx.notify();
+
+        self.select(
+            visible[next].clone(),
+            FileSelectionFocus::Navigator,
+            window,
+            cx,
+        );
     }
 
     fn select_previous_file(
         &mut self,
         _: &SelectPreviousFile,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.move_navigator_selection(-1, cx);
+        self.move_file_selection(-1, window, cx);
     }
 
-    fn select_next_file(&mut self, _: &SelectNextFile, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_navigator_selection(1, cx);
+    fn select_next_file(
+        &mut self,
+        _: &SelectNextFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_file_selection(1, window, cx);
     }
 
     fn activate_selected_file(
@@ -721,8 +736,10 @@ impl ReviewSession {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(identity) = self.navigator_selection.clone() {
-            self.select(identity, window, cx);
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| editor.focus_leftmost_pane(window, cx));
+        } else if self.selected_is_non_text() {
+            self.non_text_body_focus.focus(window, cx);
         }
     }
 
@@ -741,6 +758,7 @@ impl ReviewSession {
         set_size: usize,
         entry: &SessionEntry,
         selected: Option<&ReviewFileIdentity>,
+        navigator_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let identity = entry.file.identity.clone();
@@ -780,6 +798,7 @@ impl ReviewSession {
             .aria_position_in_set(index + 1)
             .aria_size_of_set(set_size)
             .aria_selected(is_selected)
+            .relative()
             .px(px(10.0))
             .py(px(8.0))
             .flex()
@@ -790,7 +809,16 @@ impl ReviewSession {
             .when(is_selected, |row| row.bg(cx.theme().accent))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.select(identity.clone(), window, cx);
+                this.select(identity.clone(), FileSelectionFocus::Content, window, cx);
+            }))
+            .children((is_selected && navigator_focused).then(|| {
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(2.0))
+                    .bg(cx.theme().foreground.opacity(0.75))
             }))
             .child(
                 div()
@@ -827,14 +855,11 @@ impl ReviewSession {
             }))
     }
 
-    fn render_navigator(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_navigator(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let visible = self.entries.iter().collect::<Vec<_>>();
-        let selected = self
-            .navigator_selection
-            .as_ref()
-            .or(self.selected.as_ref())
-            .cloned();
+        let selected = self.selected.clone();
         let visible_count = visible.len();
+        let navigator_focused = self.navigator_focus.is_focused(window);
 
         div()
             .w(px(280.0))
@@ -856,6 +881,9 @@ impl ReviewSession {
                     .gap(px(6.0))
                     .border_b_1()
                     .border_color(cx.theme().border)
+                    .when(navigator_focused, |header| {
+                        header.bg(cx.theme().accent.opacity(0.65))
+                    })
                     .child(div().flex_1().min_w_0().child("Files"))
                     .child(
                         Button::new("refresh-review")
@@ -898,6 +926,7 @@ impl ReviewSession {
                                     visible_count,
                                     entry,
                                     selected.as_ref(),
+                                    navigator_focused,
                                     cx,
                                 )
                             }))
@@ -983,7 +1012,7 @@ impl ReviewSession {
 }
 
 impl Render for ReviewSession {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let message = self.message.clone();
         let warning = self
             .selected_entry()
@@ -997,7 +1026,7 @@ impl Render for ReviewSession {
             .size_full()
             .flex()
             .overflow_hidden()
-            .child(self.render_navigator(cx))
+            .child(self.render_navigator(window, cx))
             .child(
                 div()
                     .flex_1()
@@ -1054,10 +1083,8 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("j", SelectNextFile, Some(NAVIGATOR_KEY_CONTEXT)),
         KeyBinding::new("enter", ActivateSelectedFile, Some(NAVIGATOR_KEY_CONTEXT)),
         KeyBinding::new("space", ActivateSelectedFile, Some(NAVIGATOR_KEY_CONTEXT)),
-        KeyBinding::new("right", ActivateSelectedFile, Some(NAVIGATOR_KEY_CONTEXT)),
-        KeyBinding::new("l", ActivateSelectedFile, Some(NAVIGATOR_KEY_CONTEXT)),
-        KeyBinding::new("left", FocusNavigator, Some(NON_TEXT_BODY_KEY_CONTEXT)),
-        KeyBinding::new("h", FocusNavigator, Some(NON_TEXT_BODY_KEY_CONTEXT)),
+        KeyBinding::new("ctrl-l", ActivateSelectedFile, Some(NAVIGATOR_KEY_CONTEXT)),
+        KeyBinding::new("ctrl-h", FocusNavigator, Some(NON_TEXT_BODY_KEY_CONTEXT)),
     ]);
 }
 

@@ -83,6 +83,8 @@ gpui_kit::actions!(
         MoveFinish,
         PreviousChange,
         NextChange,
+        FocusPreviousPane,
+        FocusNextPane,
     ]
 );
 
@@ -91,6 +93,12 @@ enum Side {
     Left,
     Right,
     Incoming,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PaneFocusBoundary {
+    Previous,
+    Next,
 }
 
 #[derive(Clone, Debug)]
@@ -432,6 +440,68 @@ impl AlignedEditor {
         cx.notify();
     }
 
+    pub(crate) fn focus_leftmost_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_pane(Side::Left, window, cx);
+    }
+
+    fn active_side(&self) -> Side {
+        self.selection
+            .as_ref()
+            .map_or(Side::Right, |selection| selection.side)
+    }
+
+    fn focus_previous_pane(
+        &mut self,
+        _: &FocusPreviousPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match self.active_side() {
+            Side::Left => {
+                cx.emit(PaneFocusBoundary::Previous);
+                return;
+            }
+            Side::Right => Side::Left,
+            Side::Incoming => Side::Right,
+        };
+
+        self.focus_pane(target, window, cx);
+    }
+
+    fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
+        let target = match self.active_side() {
+            Side::Left => Side::Right,
+            Side::Right if self.merge.is_some() => Side::Incoming,
+            Side::Right | Side::Incoming => {
+                cx.emit(PaneFocusBoundary::Next);
+                return;
+            }
+        };
+
+        self.focus_pane(target, window, cx);
+    }
+
+    fn focus_pane(&mut self, target: Side, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.active_side();
+        let (row, x) = self.selection.as_ref().map_or((0, 0.0), |selection| {
+            self.source_position(current, selection.head, window, cx)
+        });
+        let offset = self.source_offset_for_x(target, row, x, window, cx);
+
+        self.cancel_vim();
+        self.finish_composition();
+        self.preferred_column = None;
+        self.selection = Some(Selection {
+            side: target,
+            anchor: offset,
+            head: offset,
+        });
+        self.sync_vim_selection(cx);
+        self.reveal_cursor(window, cx);
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
     fn document(&self, side: Side) -> &PaneDocument {
         match side {
             Side::Left => &self.left,
@@ -528,6 +598,47 @@ impl AlignedEditor {
             .map_or(document.text().len(), |line| {
                 document.lines()[line].content.start
             })
+    }
+
+    fn source_offset_for_x(
+        &self,
+        side: Side,
+        row: usize,
+        x: f32,
+        window: &mut Window,
+        cx: &App,
+    ) -> usize {
+        let Some(line) = self.line_for_row(side, row) else {
+            return self.source_offset_for(side, row, 0);
+        };
+        let document = &self.document(side).document;
+        let source_line = &document.lines()[line];
+        let display =
+            DisplayLine::from_source(document.content(line), source_line.content.start, TAB_WIDTH);
+        if x <= 0.0 || display.text.is_empty() {
+            return self.source_offset_for(side, row, 0);
+        }
+
+        let run = TextRun {
+            len: display.text.len(),
+            font: Font {
+                family: cx.theme().mono_font_family.clone(),
+                ..Font::default()
+            },
+            color: cx.theme().foreground,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let shaped = window.text_system().shape_line(
+            display.text.into(),
+            cx.theme().mono_font_size,
+            &[run],
+            None,
+        );
+        let display_offset = shaped.closest_index_for_x(px(x));
+
+        self.source_offset_for(side, row, display_offset)
     }
 
     fn geometry(&self) -> EditorGeometry {
@@ -960,6 +1071,18 @@ impl AlignedEditor {
 }
 
 impl gpui_kit::EventEmitter<DirtyChanged> for AlignedEditor {}
+impl gpui_kit::EventEmitter<PaneFocusBoundary> for AlignedEditor {}
+
+#[cfg(test)]
+impl AlignedEditor {
+    pub(crate) fn active_pane_index(&self) -> usize {
+        match self.active_side() {
+            Side::Left => 0,
+            Side::Right => 1,
+            Side::Incoming => 2,
+        }
+    }
+}
 
 impl Focusable for AlignedEditor {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -1199,6 +1322,8 @@ impl AlignedEditor {
             .capture_key_down(cx.listener(Self::vim_key))
             .on_action(cx.listener(Self::previous_change))
             .on_action(cx.listener(Self::next_change))
+            .on_action(cx.listener(Self::focus_previous_pane))
+            .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::restore_selected_lines))
             .on_action(cx.listener(Self::copy_selected))
             .on_action(cx.listener(Self::paste))

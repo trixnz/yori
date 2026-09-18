@@ -63,6 +63,17 @@ fn merge_handoff_loads_all_inputs_and_never_reads_or_writes_the_destination(
         }
 
         window.click_at("rows-viewport", point(width * 0.5, px(11.0)), cx);
+        let editor = active_editor(&workspace, cx);
+        assert_eq!(editor.read(cx).active_pane_index(), 1);
+        window.press("ctrl-h", cx);
+        assert_eq!(editor.read(cx).active_pane_index(), 0);
+        window.press("ctrl-l", cx);
+        assert_eq!(editor.read(cx).active_pane_index(), 1);
+        window.press("ctrl-l", cx);
+        assert_eq!(editor.read(cx).active_pane_index(), 2);
+        window.press("ctrl-h", cx);
+        assert_eq!(editor.read(cx).active_pane_index(), 1);
+
         window.input("edited", cx);
         window.press("ctrl-z", cx);
         assert_eq!(workspace.read(cx).tabs.entries.len(), 2);

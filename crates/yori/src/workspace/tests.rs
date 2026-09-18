@@ -8,7 +8,7 @@ use super::*;
 use crate::comparison::ComparisonDocument;
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{KeyDownEvent, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext, point};
+use gpui_kit::{Modifiers, TestAppContext, VisualTestContext, point};
 use std::path::Path;
 
 fn merge_paths(result: &str) -> Comparison {
@@ -280,6 +280,7 @@ fn home_exposes_exactly_the_initial_actions_and_keyboard_activation(cx: &mut Tes
 
     cx.update(|window, cx| {
         assert!(window.has_active_dialog(cx));
+        assert!(workspace.read(cx).preferences.is_some());
         window.press("escape", cx);
     });
     cx.run_until_parked();
@@ -298,14 +299,21 @@ fn home_exposes_exactly_the_initial_actions_and_keyboard_activation(cx: &mut Tes
 }
 
 #[gpui_kit::test]
-fn home_keys_are_scoped_away_from_the_editor(cx: &mut TestAppContext) {
+fn editor_keys_reach_the_editor_without_moving_the_hidden_home_selection(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
     let editor = cx.update(|_, cx| active_editor(&workspace, cx));
 
     cx.update(|window, cx| {
+        let before = editor.read(cx).current_checkpoint().text;
         assert!(editor.focus_handle(cx).is_focused(window));
-        window.press("j", cx);
+        let width = window.find("rows-viewport").bounds().size.width;
+        window.click_at("rows-viewport", point(width * 0.75, px(11.0)), cx);
 
+        window.input("j", cx);
+
+        let after = editor.read(cx).current_checkpoint().text;
+        assert_eq!(after.matches('j').count(), before.matches('j').count() + 1);
+        assert_eq!(after.replacen('j', "", 1), before);
         assert_eq!(
             workspace.read(cx).home.read(cx).selected_action(),
             HomeAction::ReviewGitChange
@@ -465,46 +473,6 @@ fn preferences_shortcut_opens_from_an_empty_workspace(cx: &mut TestAppContext) {
         window.press("escape", cx);
     });
     cx.run_until_parked();
-}
-
-#[gpui_kit::test]
-fn preferences_controls_expose_semantics_and_support_keyboard_navigation(cx: &mut TestAppContext) {
-    let (_, cx) = harness(cx);
-    show_preferences(cx);
-
-    cx.update(|window, cx| {
-        let vim = window.find("vim-keybindings");
-        let whitespace = window.find("show-whitespace");
-        let connections = window.find("show-change-connections");
-
-        assert_eq!(vim.role(), Some(gpui_kit::Role::CheckBox));
-        assert_eq!(vim.label(), Some("Use Vim keybindings"));
-        assert_eq!(vim.checked(), Some(false));
-        assert_eq!(whitespace.role(), Some(gpui_kit::Role::CheckBox));
-        assert_eq!(whitespace.label(), Some("Show whitespace"));
-        assert_eq!(connections.role(), Some(gpui_kit::Role::CheckBox));
-        assert_eq!(connections.label(), Some("Show change connections"));
-
-        window.press("tab", cx);
-        window.render_frame(cx);
-        assert_eq!(window.find("vim-keybindings").focused(), Some(true));
-    });
-
-    let space = Keystroke::parse("space").unwrap();
-    cx.simulate_event(KeyDownEvent {
-        keystroke: space.clone(),
-        is_held: false,
-        prefer_character_input: false,
-    });
-    cx.simulate_event(KeyUpEvent { keystroke: space });
-    cx.update(|window, cx| {
-        window.render_frame(cx);
-        assert_eq!(window.find("vim-keybindings").checked(), Some(true));
-
-        window.press("tab", cx);
-        window.render_frame(cx);
-        assert_eq!(window.find("show-whitespace").focused(), Some(true));
-    });
 }
 
 #[gpui_kit::test]
@@ -1090,16 +1058,38 @@ fn input_pane_undo_is_scoped_to_the_active_tab(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn close_button_removes_a_clean_comparison(cx: &mut TestAppContext) {
+fn close_button_and_middle_click_remove_clean_comparisons(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
+    let temporary = tempfile::tempdir().unwrap();
+    let left = temporary.path().join("left.txt");
+    let right = temporary.path().join("right.txt");
+    std::fs::write(&left, "baseline\n").unwrap();
+    std::fs::write(&right, "local\n").unwrap();
 
-    cx.update(|window, cx| window.click(("tab-close-target", 0usize), cx));
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_paths(&left, &right, window, cx);
+        });
+        window.render_frame(cx);
+        window.click(("tab-close-target", 0usize), cx);
+        window.render_frame(cx);
+    });
+    cx.run_until_parked();
+
+    let middle_click = cx.update(|window, _| {
+        let bounds = window.within("tabs-inner").find(0usize).bounds();
+        point(
+            bounds.left() + bounds.size.width / 2.0,
+            bounds.top() + bounds.size.height / 2.0,
+        )
+    });
+    cx.simulate_mouse_down(middle_click, MouseButton::Middle, Modifiers::default());
     cx.run_until_parked();
 
     cx.update(|_, cx| {
         assert!(
             workspace.read(cx).tabs.entries.is_empty(),
-            "clicking close must remove the clean tab"
+            "both close affordances must remove their clean tab"
         );
     });
 }

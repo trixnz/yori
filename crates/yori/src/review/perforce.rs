@@ -1030,27 +1030,82 @@ mod tests {
         }
     }
 
-    fn text_contents(file: &ReviewFile) -> (&[u8], &[u8], bool, bool) {
+    struct TextDetails {
+        baseline: Vec<u8>,
+        local: Vec<u8>,
+        baseline_path: PathBuf,
+        local_path: PathBuf,
+        editable: bool,
+        save_destination: Option<PathBuf>,
+    }
+
+    fn text_details(file: &ReviewFile) -> TextDetails {
         let super::super::model::ReviewFileKind::Text(comparison) = &file.kind else {
             panic!("expected text comparison");
         };
         let Comparison::Diff(comparison) = comparison.comparison() else {
             panic!("expected two-way comparison");
         };
-        let DocumentContent::Memory(baseline) = comparison.baseline.content() else {
-            panic!("expected in-memory baseline");
-        };
-        let local = match comparison.local.content() {
-            DocumentContent::Memory(local) => local.as_ref(),
-            DocumentContent::File(_) => &[],
+        let read = |document: &ComparisonDocument| match document.content() {
+            DocumentContent::Memory(content) => content.to_vec(),
+            DocumentContent::File(path) => std::fs::read(path).unwrap(),
         };
 
-        (
-            baseline.as_ref(),
-            local,
-            comparison.local.editable(),
-            comparison.local.save_destination().is_some(),
-        )
+        TextDetails {
+            baseline: read(&comparison.baseline),
+            local: read(&comparison.local),
+            baseline_path: comparison.baseline.logical_path().to_owned(),
+            local_path: comparison.local.logical_path().to_owned(),
+            editable: comparison.local.editable(),
+            save_destination: comparison.local.save_destination().map(Path::to_owned),
+        }
+    }
+
+    fn assert_pending_action_manifest(manifest: &ReviewManifest, paths: &[PathBuf; 5]) {
+        assert_eq!(manifest.files.len(), 4);
+
+        let added = &manifest.files[0];
+        let added_text = text_details(added);
+        assert_eq!(added.identity.to_string(), "//depot/added.txt");
+        assert_eq!(added.logical_path, PathBuf::from("added.txt"));
+        assert_eq!(added.status, ReviewFileStatus::Added);
+        assert!(added_text.baseline.is_empty());
+        assert_eq!(added_text.local, b"added\n");
+        assert_eq!(added_text.save_destination, Some(paths[0].clone()));
+
+        let deleted = &manifest.files[1];
+        let deleted_text = text_details(deleted);
+        assert_eq!(deleted.identity.to_string(), "//depot/deleted.txt");
+        assert_eq!(deleted.logical_path, PathBuf::from("deleted.txt"));
+        assert_eq!(deleted.status, ReviewFileStatus::Deleted);
+        assert_eq!(deleted_text.baseline, b"deleted\n");
+        assert!(deleted_text.local.is_empty());
+        assert_eq!(deleted_text.save_destination, None);
+
+        let renamed = &manifest.files[2];
+        let renamed_text = text_details(renamed);
+        assert_eq!(renamed.identity.to_string(), "//depot/new.txt");
+        assert_eq!(renamed.logical_path, PathBuf::from("new.txt"));
+        assert_eq!(
+            renamed.status,
+            ReviewFileStatus::Renamed {
+                from: PathBuf::from("old.txt")
+            }
+        );
+        assert_eq!(renamed_text.baseline, b"before move\n");
+        assert_eq!(renamed_text.local, b"moved\n");
+        assert_eq!(renamed_text.baseline_path, PathBuf::from("old.txt"));
+        assert_eq!(renamed_text.local_path, paths[3]);
+        assert_eq!(renamed_text.save_destination, Some(paths[3].clone()));
+
+        let binary = &manifest.files[3];
+        assert_eq!(binary.identity.to_string(), "//depot/image.bin");
+        assert_eq!(binary.logical_path, PathBuf::from("image.bin"));
+        assert_eq!(binary.status, ReviewFileStatus::Modified);
+        assert!(matches!(
+            binary.kind,
+            super::super::model::ReviewFileKind::Binary { .. }
+        ));
     }
 
     #[test]
@@ -1143,17 +1198,44 @@ mod tests {
         let fake = Arc::new(fake);
         let context = PerforceContext::discover_with(fake).unwrap();
 
-        for summary in context.pending() {
-            let source = context.pending_source(summary);
-            let manifest = source.provider.load_manifest(&source.identity).unwrap();
-            assert_eq!(manifest.files.len(), 1);
-            let file = &manifest.files[0];
-            let (baseline, _, editable, saveable) = text_contents(file);
+        let default_source = context.pending_source(&context.pending.default);
+        let default_manifest = default_source
+            .provider
+            .load_manifest(&default_source.identity)
+            .unwrap();
+        assert_eq!(default_manifest.files.len(), 1);
+        let default_file = &default_manifest.files[0];
+        let default = text_details(default_file);
+        assert_eq!(default_file.identity.to_string(), "//depot/src/default.rs");
+        assert_eq!(default_file.logical_path, PathBuf::from("src/default.rs"));
+        assert_eq!(default_file.status, ReviewFileStatus::Modified);
+        assert_eq!(default.baseline, b"default have\n");
+        assert_eq!(default.local, b"default local\n");
+        assert_eq!(default.baseline_path, PathBuf::from("src/default.rs"));
+        assert_eq!(default.local_path, default_path);
+        assert!(default.editable);
+        assert_eq!(default.save_destination, Some(default_path.clone()));
 
-            assert!(baseline.ends_with(b"have\n"));
-            assert!(editable);
-            assert!(saveable);
-        }
+        let numbered_source = context.pending_source(&context.pending.numbered[0]);
+        let numbered_manifest = numbered_source
+            .provider
+            .load_manifest(&numbered_source.identity)
+            .unwrap();
+        assert_eq!(numbered_manifest.files.len(), 1);
+        let numbered_file = &numbered_manifest.files[0];
+        let numbered = text_details(numbered_file);
+        assert_eq!(
+            numbered_file.identity.to_string(),
+            "//depot/src/numbered.rs"
+        );
+        assert_eq!(numbered_file.logical_path, PathBuf::from("src/numbered.rs"));
+        assert_eq!(numbered_file.status, ReviewFileStatus::Modified);
+        assert_eq!(numbered.baseline, b"numbered have\n");
+        assert_eq!(numbered.local, b"numbered local\n");
+        assert_eq!(numbered.baseline_path, PathBuf::from("src/numbered.rs"));
+        assert_eq!(numbered.local_path, numbered_path);
+        assert!(numbered.editable);
+        assert_eq!(numbered.save_destination, Some(numbered_path.clone()));
     }
 
     #[test]
@@ -1245,20 +1327,7 @@ mod tests {
 
         let manifest = source.provider.load_manifest(&source.identity).unwrap();
 
-        assert_eq!(manifest.files.len(), 4);
-        assert!(matches!(manifest.files[0].status, ReviewFileStatus::Added));
-        assert!(matches!(
-            manifest.files[1].status,
-            ReviewFileStatus::Deleted
-        ));
-        assert!(matches!(
-            manifest.files[2].status,
-            ReviewFileStatus::Renamed { .. }
-        ));
-        assert!(matches!(
-            manifest.files[3].kind,
-            super::super::model::ReviewFileKind::Binary { .. }
-        ));
+        assert_pending_action_manifest(&manifest, &paths);
     }
 
     #[test]
@@ -1301,11 +1370,11 @@ mod tests {
         let manifest = source.provider.load_manifest(&source.identity).unwrap();
 
         assert_eq!(manifest.files.len(), 1);
-        let (baseline, local, editable, saveable) = text_contents(&manifest.files[0]);
-        assert_eq!(baseline, b"before\n");
-        assert_eq!(local, b"after\n");
-        assert!(!editable);
-        assert!(!saveable);
+        let details = text_details(&manifest.files[0]);
+        assert_eq!(details.baseline, b"before\n");
+        assert_eq!(details.local, b"after\n");
+        assert!(!details.editable);
+        assert_eq!(details.save_destination, None);
     }
 
     #[test]
@@ -1354,19 +1423,39 @@ mod tests {
         let manifest = source.provider.load_manifest(&source.identity).unwrap();
 
         assert_eq!(manifest.files.len(), 3);
+
+        let renamed = &manifest.files[0];
+        let renamed_text = text_details(renamed);
+        assert_eq!(renamed.identity.to_string(), "//depot/new.txt");
+        assert_eq!(renamed.logical_path, PathBuf::from("new.txt"));
+        assert_eq!(
+            renamed.status,
+            ReviewFileStatus::Renamed {
+                from: PathBuf::from("depot/old.txt")
+            }
+        );
+        assert_eq!(renamed_text.baseline, b"before move\n");
+        assert_eq!(renamed_text.local, b"after move\n");
+        assert_eq!(renamed_text.baseline_path, PathBuf::from("depot/old.txt"));
+        assert_eq!(renamed_text.local_path, PathBuf::from("new.txt"));
+        assert!(!renamed_text.editable);
+        assert_eq!(renamed_text.save_destination, None);
+
+        let deleted = &manifest.files[1];
+        let deleted_text = text_details(deleted);
+        assert_eq!(deleted.identity.to_string(), "//depot/deleted.txt");
+        assert_eq!(deleted.logical_path, PathBuf::from("deleted.txt"));
+        assert_eq!(deleted.status, ReviewFileStatus::Deleted);
+        assert_eq!(deleted_text.baseline, b"before delete\n");
+        assert!(deleted_text.local.is_empty());
+        assert_eq!(deleted_text.save_destination, None);
+
+        let binary = &manifest.files[2];
+        assert_eq!(binary.identity.to_string(), "//depot/image.bin");
+        assert_eq!(binary.logical_path, PathBuf::from("image.bin"));
+        assert_eq!(binary.status, ReviewFileStatus::Modified);
         assert!(matches!(
-            manifest.files[0].status,
-            ReviewFileStatus::Renamed { .. }
-        ));
-        let (_, _, editable, saveable) = text_contents(&manifest.files[0]);
-        assert!(!editable);
-        assert!(!saveable);
-        assert!(matches!(
-            manifest.files[1].status,
-            ReviewFileStatus::Deleted
-        ));
-        assert!(matches!(
-            manifest.files[2].kind,
+            binary.kind,
             super::super::model::ReviewFileKind::Binary { .. }
         ));
     }
@@ -1480,11 +1569,11 @@ mod tests {
             manifest.files[0].status,
             ReviewFileStatus::Deleted
         ));
-        let (baseline, local, editable, saveable) = text_contents(&manifest.files[0]);
-        assert_eq!(baseline, b"before move\n");
-        assert!(local.is_empty());
-        assert!(!editable);
-        assert!(!saveable);
+        let details = text_details(&manifest.files[0]);
+        assert_eq!(details.baseline, b"before move\n");
+        assert!(details.local.is_empty());
+        assert!(!details.editable);
+        assert_eq!(details.save_destination, None);
     }
 
     #[test]
