@@ -160,24 +160,14 @@ fn source_identity_deduplicates_and_navigation_lazily_retains_editors(cx: &mut T
         assert_eq!(session.read(cx).editor_count(), 1);
         let first_editor = session.read(cx).editor(&first).unwrap();
 
-        window.click("review-file-filter", cx);
-        window.input("second", cx);
-        window.render_frame(cx);
-        window.click(("review-file", 0usize), cx);
+        assert!(window.try_find("review-file-filter").is_none());
+        assert!(window.try_find("review-files-header").is_some());
+        assert!(window.try_find("refresh-review").is_some());
+
+        window.click(("review-file", 2usize), cx);
         assert_eq!(session.read(cx).selected_identity(), Some(&second));
         assert_eq!(session.read(cx).editor_count(), 2);
 
-        window.click("review-file-filter", cx);
-        window.press(
-            if cfg!(target_os = "macos") {
-                "cmd-a"
-            } else {
-                "ctrl-a"
-            },
-            cx,
-        );
-        window.press("backspace", cx);
-        window.render_frame(cx);
         window.click(("review-file", 1usize), cx);
         assert_eq!(session.read(cx).editor(&first).unwrap(), first_editor);
 
@@ -626,6 +616,114 @@ fn navigator_keyboard_selection_scrolls_beyond_one_viewport(cx: &mut TestAppCont
         window.press("k", cx);
         window.render_frame(cx);
         assert_eq!(window.find(("review-file", 28usize)).selected(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn navigator_header_and_status_badges_render_without_a_filter(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let manifest = ReviewManifest::new(vec![
+        ReviewFile::binary(
+            ReviewFileIdentity::new("added"),
+            "added.bin".into(),
+            ReviewFileStatus::Added,
+            "Binary content cannot be displayed.",
+        ),
+        ReviewFile::binary(
+            ReviewFileIdentity::new("modified"),
+            "modified.bin".into(),
+            ReviewFileStatus::Modified,
+            "Binary content cannot be displayed.",
+        ),
+        ReviewFile::binary(
+            ReviewFileIdentity::new("deleted"),
+            "deleted.bin".into(),
+            ReviewFileStatus::Deleted,
+            "Binary content cannot be displayed.",
+        ),
+        ReviewFile::binary(
+            ReviewFileIdentity::new("renamed"),
+            "renamed.bin".into(),
+            ReviewFileStatus::Renamed {
+                from: "old.bin".into(),
+            },
+            "Binary content cannot be displayed.",
+        ),
+    ])
+    .unwrap();
+    open_review(
+        &workspace,
+        source(TestProvider::new([manifest]), "status-header"),
+        cx,
+    );
+
+    cx.update(|window, _| {
+        assert!(window.try_find("review-file-filter").is_none());
+        let header = window.find("review-files-header").bounds();
+        let refresh = window.find("refresh-review").bounds();
+        assert!(refresh.top() >= header.top());
+        assert!(refresh.bottom() <= header.bottom());
+
+        for (index, status) in ["Added", "Modified", "Deleted", "Renamed"]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(window.try_find(("review-status-badge", index)).is_some());
+            assert!(
+                window
+                    .find(("review-file", index))
+                    .label()
+                    .unwrap()
+                    .starts_with(status)
+            );
+        }
+    });
+}
+
+#[gpui_kit::test]
+fn refresh_updates_in_place_without_transient_layout_or_focus_change(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let identity = ReviewFileIdentity::new("file");
+    let initial = ReviewManifest::new(vec![text_file(
+        "file",
+        "src/file.rs",
+        "before\n",
+        "after\n",
+    )])
+    .unwrap();
+    let refreshed = ReviewManifest::new(vec![text_file(
+        "file",
+        "src/file.rs",
+        "new baseline\n",
+        "updated\n",
+    )])
+    .unwrap();
+    let provider = TestProvider::new([initial, refreshed]);
+    let (_, session) = open_review(&workspace, source(provider, "in-place-refresh"), cx);
+    let editor = cx.update(|window, cx| {
+        session.update(cx, |session, cx| session.focus_navigator(window, cx));
+        window.render_frame(cx);
+
+        let editor = session.read(cx).editor(&identity).unwrap();
+        let header = window.find("review-files-header").bounds();
+        let list = window.find("review-file-list").bounds();
+        let body = window.find("review-file-body").bounds();
+
+        window.click("refresh-review", cx);
+        window.render_frame(cx);
+
+        assert_eq!(window.find("review-files-header").bounds(), header);
+        assert_eq!(window.find("review-file-list").bounds(), list);
+        assert_eq!(window.find("review-file-body").bounds(), body);
+        assert_eq!(window.find("review-file-list").focused(), Some(true));
+        editor
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(editor.read(cx).current_checkpoint().text, "updated\n");
+        assert_eq!(window.find("review-file-list").focused(), Some(true));
     });
 }
 
