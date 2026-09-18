@@ -241,13 +241,12 @@ impl Workspace {
             .tabs
             .active
             .and_then(|id| self.tabs.get(id))
-            .map(|tab| {
+            .map_or_else(String::new, |tab| {
                 tab.paths.target().file_name().map_or_else(
                     || tab.paths.target().display().to_string(),
                     |name| name.to_string_lossy().into_owned(),
                 )
-            })
-            .unwrap_or_else(|| "".to_owned());
+            });
 
         if title.is_empty() {
             window.set_window_title("yori");
