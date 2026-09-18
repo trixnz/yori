@@ -355,6 +355,7 @@ impl Workspace {
         self.disk_epoch += 1;
         self.watch_paths(cx);
         self.scan_disk(cx);
+        self.update_window_title(window);
         cx.notify();
         Ok(())
     }
@@ -426,8 +427,22 @@ impl Workspace {
         self.selection = WorkspaceSelection::Work;
         self.focus_active(window, cx);
         session.update(cx, |session, cx| session.refresh(window, cx));
+        self.update_window_title(window);
 
         cx.notify();
+    }
+
+    fn update_window_title(&self, window: &mut Window) {
+        let title = (self.selection == WorkspaceSelection::Work)
+            .then(|| self.tabs.active.map(|id| self.tabs.label(id)))
+            .flatten();
+
+        let Some(title) = title.filter(|title| !title.is_empty()) else {
+            window.set_window_title("yori");
+            return;
+        };
+
+        window.set_window_title(&format!("yori - {title}"));
     }
 
     fn choose_merge(&mut self, _: &OpenMerge, window: &mut Window, cx: &mut Context<Self>) {
@@ -750,6 +765,7 @@ impl Workspace {
         self.deactivate(cx);
         self.git_source_chooser = None;
         self.selection = WorkspaceSelection::Home;
+        self.update_window_title(window);
 
         self.focus_active(window, cx);
         cx.notify();
@@ -780,6 +796,7 @@ impl Workspace {
         self.git_source_chooser = None;
         self.tabs.activate(id);
         self.selection = WorkspaceSelection::Work;
+        self.update_window_title(window);
 
         self.focus_active(window, cx);
         cx.notify();
@@ -829,6 +846,7 @@ impl Workspace {
         if self.tabs.entries.is_empty() {
             self.selection = WorkspaceSelection::Home;
         }
+        self.update_window_title(window);
         self.disk_epoch += 1;
         self.watch_paths(cx);
 
