@@ -13,10 +13,7 @@ use gpui_kit::{AppContext, AssetSource, SharedString, WindowOptions};
 use std::{borrow::Cow, env, path::PathBuf, process};
 use workspace::Workspace;
 
-gpui_kit::assets::icon_assets!(
-    WorkspaceIconAssets,
-    [GitMerge, GitPullRequest, RefreshCw, Search]
-);
+gpui_kit::assets::icon_assets!(WorkspaceIconAssets, [GitMerge, GitPullRequest, RefreshCw]);
 
 struct AppAssets {
     components: gpui_kit::assets::Assets,

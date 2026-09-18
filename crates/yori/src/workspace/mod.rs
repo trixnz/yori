@@ -294,7 +294,7 @@ impl Workspace {
         }
 
         self.deactivate(cx);
-        let session = cx.new(|cx| ReviewSession::new(source, window, cx));
+        let session = cx.new(|cx| ReviewSession::new(source, cx));
         let subscription = cx.subscribe_in(
             &session,
             window,
@@ -319,7 +319,7 @@ impl Workspace {
                             transfer_focus: true,
                         } => {
                             changed_session.update(cx, |session, cx| {
-                                session.focus_navigator_or_filter(window, cx);
+                                session.focus_navigator(window, cx);
                             });
                         }
                         ReviewChanged::State
