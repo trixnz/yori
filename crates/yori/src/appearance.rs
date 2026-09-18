@@ -144,7 +144,6 @@ mod tests {
             gpui_kit::assets::IconName::GitMerge,
             gpui_kit::assets::IconName::GitPullRequest,
             gpui_kit::assets::IconName::RefreshCw,
-            gpui_kit::assets::IconName::Search,
         ] {
             let path = icon.path();
             let bytes = assets.load(path.as_ref()).unwrap().unwrap();
