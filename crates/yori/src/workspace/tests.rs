@@ -6,7 +6,7 @@ mod saving;
 use super::*;
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{TestAppContext, VisualTestContext, point};
+use gpui_kit::{KeyDownEvent, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext, point};
 use std::path::Path;
 
 fn merge_paths(result: &str) -> ComparisonPaths {
@@ -20,9 +20,19 @@ fn merge_paths(result: &str) -> ComparisonPaths {
 }
 
 fn harness(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    harness_with_config(cx, None)
+}
+
+fn harness_with_config(
+    cx: &mut TestAppContext,
+    config_path: Option<std::path::PathBuf>,
+) -> (Entity<Workspace>, &mut VisualTestContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         crate::appearance::init(cx);
+        if let Some(path) = config_path {
+            crate::config::init_for_path(path, cx);
+        }
         crate::editor::init(cx);
         super::init(cx);
 
@@ -57,6 +67,237 @@ fn harness(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContex
     cx.run_until_parked();
 
     (workspace, cx)
+}
+
+fn show_preferences(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        window.dispatch_action(Box::new(Preferences), cx);
+        window.render_frame(cx);
+    });
+    cx.run_until_parked();
+    cx.update(TestWindowExt::render_frame);
+}
+
+fn active_editor(workspace: &Entity<Workspace>, cx: &App) -> Entity<AlignedEditor> {
+    let workspace = workspace.read(cx);
+    let id = workspace.tabs.active.unwrap();
+
+    workspace.tabs.get(id).unwrap().content.editor.clone()
+}
+
+#[gpui_kit::test]
+fn preferences_controls_expose_semantics_and_support_keyboard_navigation(cx: &mut TestAppContext) {
+    let (_, cx) = harness(cx);
+    show_preferences(cx);
+
+    cx.update(|window, cx| {
+        let vim = window.find("vim-keybindings");
+        let whitespace = window.find("show-whitespace");
+        let connections = window.find("show-change-connections");
+
+        assert_eq!(vim.role(), Some(gpui_kit::Role::CheckBox));
+        assert_eq!(vim.label(), Some("Use Vim keybindings"));
+        assert_eq!(vim.checked(), Some(false));
+        assert_eq!(whitespace.role(), Some(gpui_kit::Role::CheckBox));
+        assert_eq!(whitespace.label(), Some("Show whitespace"));
+        assert_eq!(connections.role(), Some(gpui_kit::Role::CheckBox));
+        assert_eq!(connections.label(), Some("Show change connections"));
+
+        window.press("tab", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("vim-keybindings").focused(), Some(true));
+    });
+
+    let space = Keystroke::parse("space").unwrap();
+    cx.simulate_event(KeyDownEvent {
+        keystroke: space.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    cx.simulate_event(KeyUpEvent { keystroke: space });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("vim-keybindings").checked(), Some(true));
+
+        window.press("tab", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("show-whitespace").focused(), Some(true));
+    });
+}
+
+#[gpui_kit::test]
+fn cancel_discards_selections_and_restores_editor_focus(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("yori").join("config.toml");
+    let (workspace, cx) = harness_with_config(cx, Some(path.clone()));
+    let editor = cx.update(|_, cx| active_editor(&workspace, cx));
+
+    cx.update(|window, cx| assert!(editor.focus_handle(cx).is_focused(window)));
+    show_preferences(cx);
+    cx.update(|window, cx| {
+        window.click("vim-keybindings", cx);
+        window.click("show-whitespace", cx);
+        window.click("show-change-connections", cx);
+        window.click("preferences-cancel", cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        assert!(!window.has_active_dialog(cx));
+        assert!(editor.focus_handle(cx).is_focused(window));
+        assert_eq!(
+            crate::config::editor(cx),
+            crate::config::EditorConfig::default()
+        );
+    });
+    assert!(!path.exists());
+}
+
+#[gpui_kit::test]
+fn repeated_preferences_action_focuses_one_existing_dialog(cx: &mut TestAppContext) {
+    let (_, cx) = harness(cx);
+    show_preferences(cx);
+
+    cx.update(|window, cx| {
+        window.click("vim-keybindings", cx);
+        window.dispatch_action(Box::new(Preferences), cx);
+        window.render_frame(cx);
+
+        assert_eq!(window.find("vim-keybindings").checked(), Some(true));
+        assert_eq!(
+            window.find("preferences-dialog-content").focused(),
+            Some(true)
+        );
+        assert!(window.has_active_dialog(cx));
+        window.press("escape", cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        assert!(
+            !window.has_active_dialog(cx),
+            "one cancel must close the only preferences dialog"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn apply_updates_all_vim_modes_and_only_future_display_defaults(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("yori").join("config.toml");
+    let (workspace, cx) = harness_with_config(cx, Some(path.clone()));
+    let temporary = tempfile::tempdir().unwrap();
+    let second_left = temporary.path().join("second-left.txt");
+    let second_right = temporary.path().join("second-right.txt");
+    let third_left = temporary.path().join("third-left.txt");
+    let third_right = temporary.path().join("third-right.txt");
+    for file in [&second_left, &second_right, &third_left, &third_right] {
+        std::fs::write(file, "text\n").unwrap();
+    }
+
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_paths(&second_left, &second_right, window, cx);
+        });
+    });
+    let focused_editor = cx.update(|_, cx| active_editor(&workspace, cx));
+    show_preferences(cx);
+
+    std::fs::write(
+        &path,
+        "# external note\n[editor]\nvim_keybindings = false\nfuture_option = \"keep\"\n\n[plugin]\nenabled = true\n",
+    )
+    .unwrap();
+
+    cx.update(|window, cx| {
+        window.click("vim-keybindings", cx);
+        window.click("show-whitespace", cx);
+        window.click("show-change-connections", cx);
+        window.click("preferences-apply", cx);
+    });
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(300));
+    cx.run_until_parked();
+
+    let expected_existing = crate::config::EditorConfig {
+        vim_keybindings: true,
+        show_whitespace: false,
+        show_change_connections: false,
+    };
+    cx.update(|window, cx| {
+        assert!(!window.has_active_dialog(cx));
+        assert!(focused_editor.focus_handle(cx).is_focused(window));
+        assert_eq!(
+            crate::config::editor(cx),
+            crate::config::EditorConfig {
+                vim_keybindings: true,
+                show_whitespace: true,
+                show_change_connections: true,
+            }
+        );
+        for tab in &workspace.read(cx).tabs.entries {
+            assert_eq!(
+                tab.content.editor.read(cx).applied_preferences(),
+                expected_existing
+            );
+        }
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_paths(&third_left, &third_right, window, cx);
+        });
+        assert_eq!(
+            active_editor(&workspace, cx).read(cx).applied_preferences(),
+            crate::config::editor(cx)
+        );
+    });
+
+    let saved = std::fs::read_to_string(path).unwrap();
+    assert!(saved.contains("# external note"));
+    assert!(saved.contains("future_option = \"keep\""));
+    assert!(saved.contains("[plugin]\nenabled = true"));
+}
+
+#[gpui_kit::test]
+fn save_failure_keeps_dialog_selections_and_reports_an_accessible_error(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("yori").join("config.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "[editor]\nvim_keybindings = false\n").unwrap();
+
+    let (_, cx) = harness_with_config(cx, Some(path.clone()));
+    show_preferences(cx);
+    std::fs::write(&path, "[editor\nvim_keybindings = false").unwrap();
+    cx.update(|window, cx| {
+        window.click("vim-keybindings", cx);
+        window.click("show-whitespace", cx);
+        window.click("show-change-connections", cx);
+        window.click("preferences-apply", cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+
+        assert!(window.has_active_dialog(cx));
+        assert_eq!(window.find("vim-keybindings").checked(), Some(true));
+        assert_eq!(window.find("show-whitespace").checked(), Some(true));
+        assert_eq!(window.find("show-change-connections").checked(), Some(true));
+        assert!(
+            crate::config::diagnostic(cx).is_some_and(|message| message.contains("invalid TOML")),
+            "applying over a newly malformed configuration must retain the write error"
+        );
+        let error = window.find("preferences-error");
+        assert_eq!(error.role(), Some(gpui_kit::Role::Alert));
+        assert!(
+            error
+                .label()
+                .is_some_and(|label| label.contains("invalid TOML"))
+        );
+        assert_eq!(
+            crate::config::editor(cx),
+            crate::config::EditorConfig::default()
+        );
+    });
 }
 
 #[gpui_kit::test]

@@ -25,6 +25,27 @@ fn drain(events: &async_channel::Receiver<()>) {
 }
 
 #[test]
+fn preference_updates_leave_live_display_revision_unchanged() {
+    let mut configuration = Configuration::default();
+    let preferences = EditorConfig {
+        vim_keybindings: true,
+        show_whitespace: true,
+        show_change_connections: true,
+    };
+
+    configuration.update_preferences(preferences).unwrap();
+
+    assert_eq!(configuration.editor, preferences);
+    assert_eq!(configuration.display_revision, 0);
+
+    configuration
+        .update_editor(EditorConfig::default())
+        .unwrap();
+
+    assert_eq!(configuration.display_revision, 1);
+}
+
+#[test]
 fn missing_configuration_uses_defaults() {
     let directory = tempfile::tempdir().unwrap();
     let configuration = Configuration::persistent(path(&directory));
