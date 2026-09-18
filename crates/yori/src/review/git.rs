@@ -205,17 +205,41 @@ impl ReviewProvider for GitProvider {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 enum Snapshot {
     Blob {
         bytes: Vec<u8>,
         mode: EntryMode,
-        is_symlink: bool,
+        physical_symlink: bool,
     },
     Submodule {
         id: String,
     },
 }
+
+impl PartialEq for Snapshot {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Blob {
+                    bytes: left_bytes,
+                    mode: left_mode,
+                    ..
+                },
+                Self::Blob {
+                    bytes: right_bytes,
+                    mode: right_mode,
+                    ..
+                },
+            ) => left_bytes == right_bytes && left_mode == right_mode,
+            (Self::Submodule { id: left }, Self::Submodule { id: right }) => left == right,
+            (Self::Blob { .. }, Self::Submodule { .. })
+            | (Self::Submodule { .. }, Self::Blob { .. }) => false,
+        }
+    }
+}
+
+impl Eq for Snapshot {}
 
 impl Snapshot {
     fn is_binary(&self) -> bool {
@@ -229,11 +253,11 @@ impl Snapshot {
         }
     }
 
-    fn is_symlink(&self) -> bool {
+    fn is_physical_symlink(&self) -> bool {
         matches!(
             self,
             Self::Blob {
-                is_symlink: true,
+                physical_symlink: true,
                 ..
             }
         )
@@ -464,7 +488,7 @@ fn working_file(
 
     let baseline = old.and_then(Snapshot::bytes).unwrap_or_default().to_vec();
     let local = new.and_then(Snapshot::bytes).unwrap_or_default().to_vec();
-    let local = if new.is_some_and(Snapshot::is_symlink) {
+    let local = if new.is_some_and(Snapshot::is_physical_symlink) {
         ComparisonDocument::read_only_memory(path.clone(), local)
     } else {
         ComparisonDocument::editable_memory(path.clone(), local, Some(destination))
@@ -529,7 +553,7 @@ fn worktree_snapshot(
         return Ok(Some(Snapshot::Blob {
             bytes: target.as_os_str().as_encoded_bytes().to_vec(),
             mode,
-            is_symlink: true,
+            physical_symlink: true,
         }));
     }
     if !metadata.is_file() {
@@ -542,7 +566,7 @@ fn worktree_snapshot(
     Ok(Some(Snapshot::Blob {
         bytes,
         mode,
-        is_symlink: false,
+        physical_symlink: false,
     }))
 }
 
@@ -608,7 +632,7 @@ fn snapshot_from_tree_entry(
     Ok(Snapshot::Blob {
         bytes: blob.data.clone(),
         mode,
-        is_symlink: mode.is_link(),
+        physical_symlink: false,
     })
 }
 
@@ -1140,6 +1164,41 @@ mod tests {
         assert!(!editable);
         assert!(!saveable);
         assert_eq!(fs::read_to_string(target).unwrap(), "target contents\n");
+    }
+
+    #[test]
+    fn emulated_symlink_staged_then_restored_to_head_is_net_unchanged() {
+        use std::io::Write;
+
+        let mut fixture = RepositoryFixture::unborn();
+        fixture.commit(
+            "symlink",
+            &[("link", TestEntry::Symlink(b"head-target".to_vec()))],
+            &[],
+        );
+        fixture.write_index_from_head();
+        fs::write(fixture.root.join("link"), b"head-target").unwrap();
+
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(fixture.repository.path().join("config"))
+            .unwrap();
+        writeln!(config, "[core]\n\tsymlinks = false").unwrap();
+
+        let mut index = fixture.repository.index_from_tree(&fixture.tree).unwrap();
+        index
+            .entry_mut_by_path_and_stage(b"link".as_bstr(), gix::index::entry::Stage::Unconflicted)
+            .unwrap()
+            .id = fixture
+            .repository
+            .write_blob(b"staged-target")
+            .unwrap()
+            .detach();
+        index.write(gix::index::write::Options::default()).unwrap();
+
+        let manifest = load(&fixture.discovered().working_source());
+
+        assert!(manifest.files.is_empty());
     }
 
     #[cfg(unix)]
