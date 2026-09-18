@@ -190,7 +190,6 @@ impl RenderOnce for HomeControl {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let tab = Tab::new()
             .label("Home")
-            .aria_label("Home")
             .selected(self.selected)
             .with_variant(TabVariant::Tab)
             .with_size(px(38.0))
