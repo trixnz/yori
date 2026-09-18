@@ -79,11 +79,11 @@ jobs:
 
       - name: Provision P4API
         shell: bash
-        run: |
-          ./scripts/fetch-p4api x86_64-pc-windows-msvc .cache/p4api/x86_64-pc-windows-msvc
-          echo "P4API_ROOT=$PWD/.cache/p4api/x86_64-pc-windows-msvc" >> "$GITHUB_ENV"
+        run: ./scripts/fetch-p4api x86_64-pc-windows-msvc .cache/p4api/x86_64-pc-windows-msvc
 
       - name: Run checks
+        env:
+          P4API_ROOT: ${{ github.workspace }}\.cache\p4api\x86_64-pc-windows-msvc
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
