@@ -376,6 +376,7 @@ impl Workspace {
         {
             return;
         }
+
         let Some(directory) = self.perforce_discovery_directory() else {
             window.push_notification(
                 Notification::error("Yori has no invocation directory for Perforce discovery."),

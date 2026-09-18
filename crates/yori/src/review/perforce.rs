@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     future::Future,
     num::NonZeroU32,
     path::{Path, PathBuf},
@@ -13,8 +14,8 @@ use std::{
 
 use yori_p4::{
     ChangedFile, ChangelistDescription, ChangelistId, ChangelistStatus, ChangelistSummary,
-    ClientInfo, DepotRevision, FileAction, HaveRevision, OpenedFile, P4Client, PendingChangelists,
-    WorkspaceMapping,
+    ClientInfo, DepotRevision, ErrorKind, FileAction, HaveRevision, OpenedFile, P4Client,
+    PendingChangelists, WorkspaceMapping,
 };
 
 use crate::comparison::ComparisonDocument;
@@ -28,6 +29,28 @@ const RECENT_CHANGELIST_LIMIT: u32 = 25;
 const PROVIDER_NAME: &str = "Perforce";
 
 type ProviderResult<T> = Result<T, String>;
+type MappingResult<T> = Result<T, ConnectionFailure>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConnectionFailure {
+    kind: ErrorKind,
+    message: String,
+}
+
+impl From<yori_p4::Error> for ConnectionFailure {
+    fn from(error: yori_p4::Error) -> Self {
+        Self {
+            kind: error.kind(),
+            message: error.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for ConnectionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
 
 trait PerforceConnection: Send + Sync {
     fn client_info(&self) -> ProviderResult<ClientInfo>;
@@ -46,7 +69,7 @@ trait PerforceConnection: Send + Sync {
     fn workspace_mappings(
         &self,
         file_specifications: &[String],
-    ) -> ProviderResult<Vec<WorkspaceMapping>>;
+    ) -> MappingResult<Vec<WorkspaceMapping>>;
     fn depot_content(&self, revision: &DepotRevision) -> ProviderResult<Vec<u8>>;
 }
 
@@ -119,12 +142,12 @@ impl PerforceConnection for NativePerforceConnection {
     fn workspace_mappings(
         &self,
         file_specifications: &[String],
-    ) -> ProviderResult<Vec<WorkspaceMapping>> {
+    ) -> MappingResult<Vec<WorkspaceMapping>> {
         block_on(
             self.client
                 .workspace_mappings(file_specifications, &yori_p4::CancellationToken::new()),
         )
-        .map_err(|error| error.to_string())
+        .map_err(ConnectionFailure::from)
     }
 
     fn depot_content(&self, revision: &DepotRevision) -> ProviderResult<Vec<u8>> {
@@ -286,6 +309,7 @@ impl PerforceContext {
                 self.info.server_address, self.info.client_name
             ),
         };
+
         let provider = PerforceReviewProvider {
             connection: Arc::clone(&self.connection),
             info: self.info.clone(),
@@ -342,7 +366,7 @@ impl PerforceConnection for StaticTestConnection {
         Ok(Vec::new())
     }
 
-    fn workspace_mappings(&self, _: &[String]) -> ProviderResult<Vec<WorkspaceMapping>> {
+    fn workspace_mappings(&self, _: &[String]) -> MappingResult<Vec<WorkspaceMapping>> {
         Ok(Vec::new())
     }
 
@@ -459,6 +483,7 @@ impl PerforceReviewProvider {
                         ReviewFile::text(identity, logical_path, status, comparison)
                     });
                 };
+
                 let baseline = self.pending_baseline(source, have)?;
 
                 TextComparison::new(
@@ -526,7 +551,8 @@ impl PerforceReviewProvider {
             return Ok(path.clone());
         }
 
-        self.effective_mapping(&file.depot_path)?
+        self.effective_mapping(&file.depot_path)
+            .map_err(|error| error.to_string())?
             .map(|mapping| mapping.local_path)
             .ok_or_else(|| {
                 format!(
@@ -542,36 +568,39 @@ impl PerforceReviewProvider {
             return Err(format!("changelist {changelist} is not submitted"));
         }
 
-        let paired_move_deletes = paired_move_deletes_changed(&description.files);
-        let mut files = Vec::with_capacity(description.files.len());
-        let mut mapping_errors = Vec::new();
+        let mut mappings = HashMap::new();
+        for file in &description.files {
+            if let Some(mapping) = self
+                .effective_mapping(&file.depot_path)
+                .map_err(|error| error.to_string())?
+            {
+                mappings.insert(file.depot_path.clone(), mapping);
+            }
+        }
+
+        let represented_move_deletes = represented_move_deletes(&description.files, &mappings);
+        let mut files = Vec::with_capacity(mappings.len());
 
         for file in &description.files {
+            let Some(mapping) = mappings.get(&file.depot_path) else {
+                continue;
+            };
+
             if matches!(file.action, FileAction::MoveDelete)
-                && paired_move_deletes.contains(&file.depot_path)
+                && represented_move_deletes.contains(&file.depot_path)
             {
                 continue;
             }
 
-            let mapping = match self.effective_mapping(&file.depot_path) {
-                Ok(Some(mapping)) => mapping,
-                Ok(None) => continue,
-                Err(error) => {
-                    mapping_errors.push(error);
-                    continue;
-                }
-            };
             let rename_source = move_source_changed(file, &description.files);
-            files.push(self.submitted_file(file, rename_source, &mapping)?);
+            files.push(self.submitted_file(file, rename_source, mapping)?);
         }
 
         if files.is_empty() && !description.files.is_empty() {
-            return Err(mapping_errors.into_iter().next().unwrap_or_else(|| {
-                format!(
-                    "submitted changelist {changelist} has no files in the active client view {}; check P4CLIENT and its view",
-                    self.info.client_name
-                )
-            }));
+            return Err(format!(
+                "submitted changelist {changelist} has no files in the active client view {}; check P4CLIENT and its view",
+                self.info.client_name
+            ));
         }
 
         ReviewManifest::new(files)
@@ -680,10 +709,12 @@ impl PerforceReviewProvider {
         })
     }
 
-    fn effective_mapping(&self, depot_path: &str) -> ProviderResult<Option<WorkspaceMapping>> {
-        let mappings = self
-            .connection
-            .workspace_mappings(&[depot_path.to_owned()])?;
+    fn effective_mapping(&self, depot_path: &str) -> MappingResult<Option<WorkspaceMapping>> {
+        let mappings = match self.connection.workspace_mappings(&[depot_path.to_owned()]) {
+            Ok(mappings) => mappings,
+            Err(error) if error.kind == ErrorKind::Mapping => return Ok(None),
+            Err(error) => return Err(error),
+        };
 
         Ok(mappings
             .into_iter()
@@ -731,10 +762,15 @@ fn move_source_opened<'a>(file: &OpenedFile, files: &'a [OpenedFile]) -> Option<
     })
 }
 
-fn paired_move_deletes_changed(files: &[ChangedFile]) -> HashSet<String> {
+fn represented_move_deletes(
+    files: &[ChangedFile],
+    mappings: &HashMap<String, WorkspaceMapping>,
+) -> HashSet<String> {
     files
         .iter()
-        .filter(|file| matches!(file.action, FileAction::MoveAdd))
+        .filter(|file| {
+            matches!(file.action, FileAction::MoveAdd) && mappings.contains_key(&file.depot_path)
+        })
         .filter_map(|file| file.moved_file.clone())
         .collect()
 }
@@ -827,7 +863,7 @@ mod tests {
         opened: HashMap<ChangelistId, Vec<OpenedFile>>,
         descriptions: HashMap<NonZeroU32, ChangelistDescription>,
         have: Vec<HaveRevision>,
-        mappings: HashMap<String, ProviderResult<Vec<WorkspaceMapping>>>,
+        mappings: HashMap<String, MappingResult<Vec<WorkspaceMapping>>>,
         contents: HashMap<String, Vec<u8>>,
         calls: Mutex<Vec<String>>,
     }
@@ -891,10 +927,14 @@ mod tests {
         fn workspace_mappings(
             &self,
             file_specifications: &[String],
-        ) -> ProviderResult<Vec<WorkspaceMapping>> {
-            let path = file_specifications
-                .first()
-                .ok_or_else(|| "missing file specification".to_owned())?;
+        ) -> MappingResult<Vec<WorkspaceMapping>> {
+            let Some(path) = file_specifications.first() else {
+                return Err(ConnectionFailure {
+                    kind: ErrorKind::InvalidResponse,
+                    message: "missing file specification".into(),
+                });
+            };
+
             self.calls.lock().unwrap().push(format!("where:{path}"));
             self.mappings
                 .get(path)
@@ -1332,6 +1372,122 @@ mod tests {
     }
 
     #[test]
+    fn submitted_mapping_operational_failure_rejects_the_whole_manifest() {
+        let root = PathBuf::from("/work/client");
+        let number = NonZeroU32::new(44).unwrap();
+        let included = "//depot/included.txt";
+        let unavailable = "//depot/unavailable.txt";
+        let description = ChangelistDescription {
+            summary: summary(
+                ChangelistId::Number(number),
+                ChangelistStatus::Submitted,
+                "Mixed mapping result",
+            ),
+            files: vec![
+                changed(included, 1, FileAction::Add),
+                changed(unavailable, 1, FileAction::Add),
+            ],
+        };
+        let fake = Arc::new(FakeConnection {
+            info: Some(info(&root)),
+            pending: Some(pending_lists()),
+            recent: vec![description.summary.clone()],
+            descriptions: HashMap::from([(number, description)]),
+            mappings: HashMap::from([
+                (
+                    included.into(),
+                    Ok(vec![mapping(included, &root.join("included.txt"))]),
+                ),
+                (
+                    unavailable.into(),
+                    Err(ConnectionFailure {
+                        kind: ErrorKind::Authentication,
+                        message: "Perforce ticket expired; log in with an existing Perforce client, then retry"
+                            .into(),
+                    }),
+                ),
+            ]),
+            contents: HashMap::from([(format!("{included}#1"), b"included\n".to_vec())]),
+            ..FakeConnection::default()
+        });
+        let context = PerforceContext::discover_with(fake.clone()).unwrap();
+        let source = context.submitted_source(&context.recent[0]).unwrap();
+
+        let error = source.provider.load_manifest(&source.identity).unwrap_err();
+
+        assert!(error.contains("ticket expired"));
+        assert!(error.contains("log in with an existing Perforce client"));
+        assert!(
+            fake.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|call| !call.starts_with("print:")),
+            "mapping must complete before any partial manifest content is loaded"
+        );
+    }
+
+    #[test]
+    fn submitted_move_source_remains_a_deletion_when_destination_is_outside_view() {
+        let root = PathBuf::from("/work/client");
+        let number = NonZeroU32::new(45).unwrap();
+        let old_path = "//depot/visible/old.txt";
+        let new_path = "//depot/hidden/new.txt";
+        let mut move_delete = changed(old_path, 6, FileAction::MoveDelete);
+        move_delete.moved_file = Some(new_path.into());
+        let mut move_add = changed(new_path, 1, FileAction::MoveAdd);
+        move_add.moved_file = Some(old_path.into());
+        let description = ChangelistDescription {
+            summary: summary(
+                ChangelistId::Number(number),
+                ChangelistStatus::Submitted,
+                "Move across client view",
+            ),
+            files: vec![move_delete, move_add],
+        };
+        let fake = Arc::new(FakeConnection {
+            info: Some(info(&root)),
+            pending: Some(pending_lists()),
+            recent: vec![description.summary.clone()],
+            descriptions: HashMap::from([(number, description)]),
+            mappings: HashMap::from([
+                (
+                    old_path.into(),
+                    Ok(vec![mapping(old_path, &root.join("visible/old.txt"))]),
+                ),
+                (
+                    new_path.into(),
+                    Err(ConnectionFailure {
+                        kind: ErrorKind::Mapping,
+                        message: "file(s) not in client view".into(),
+                    }),
+                ),
+            ]),
+            contents: HashMap::from([(format!("{old_path}#5"), b"before move\n".to_vec())]),
+            ..FakeConnection::default()
+        });
+        let context = PerforceContext::discover_with(fake).unwrap();
+        let source = context.submitted_source(&context.recent[0]).unwrap();
+
+        let manifest = source.provider.load_manifest(&source.identity).unwrap();
+
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(
+            manifest.files[0].logical_path,
+            PathBuf::from("visible/old.txt")
+        );
+        assert!(matches!(
+            manifest.files[0].status,
+            ReviewFileStatus::Deleted
+        ));
+        let (baseline, local, editable, saveable) = text_contents(&manifest.files[0]);
+        assert_eq!(baseline, b"before move\n");
+        assert!(local.is_empty());
+        assert!(!editable);
+        assert!(!saveable);
+    }
+
+    #[test]
     fn direct_numbers_canonicalize_source_identity_and_reject_foreign_pending_changes() {
         let root = PathBuf::from("/work/client");
         let number = NonZeroU32::new(41).unwrap();
@@ -1406,7 +1562,10 @@ mod tests {
             descriptions: HashMap::from([(number, description)]),
             mappings: HashMap::from([(
                 depot_path.into(),
-                Err("file(s) not in client view; check the active P4CLIENT view".into()),
+                Err(ConnectionFailure {
+                    kind: ErrorKind::Mapping,
+                    message: "file(s) not in client view; check the active P4CLIENT view".into(),
+                }),
             )]),
             ..FakeConnection::default()
         });

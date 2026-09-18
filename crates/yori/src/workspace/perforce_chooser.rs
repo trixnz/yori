@@ -135,6 +135,7 @@ impl PerforceSourceChooser {
         let Some(summary) = self.summaries().get(self.selection).copied() else {
             return;
         };
+
         let source = match self.mode {
             Mode::Pending => Ok(self.context.pending_source(summary)),
             Mode::Recent => self.context.submitted_source(summary),
