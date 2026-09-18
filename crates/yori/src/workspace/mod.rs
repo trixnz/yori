@@ -194,7 +194,7 @@ impl Workspace {
 
         if invocation.comparisons.is_empty() {
             window.activate_window();
-            if let Ok(repository) = GitRepository::discover(&invocation.directory) {
+            if let Ok(repository) = self.review_repository() {
                 self.open_git_source_chooser(repository, window, cx)?;
             } else {
                 self.focus_active(window, cx);
@@ -387,16 +387,7 @@ impl Workspace {
             return;
         }
 
-        let Some(context) = self.review_context() else {
-            window.push_notification(
-                Notification::error(
-                    "Open a local file or invoke yori from a Git repository first.",
-                ),
-                cx,
-            );
-            return;
-        };
-        let repository = match GitRepository::discover(&context) {
+        let repository = match self.review_repository() {
             Ok(repository) => repository,
             Err(error) => {
                 window.push_notification(Notification::error(error), cx);
@@ -409,15 +400,33 @@ impl Workspace {
         }
     }
 
-    fn review_context(&self) -> Option<std::path::PathBuf> {
-        self.invocation_directory.clone().or_else(|| {
-            self.tabs
-                .active
-                .and_then(|id| self.tabs.get(id))
-                .and_then(|tab| tab.identity.comparison())
-                .and_then(|comparison| comparison.target().parent())
-                .map(std::path::Path::to_owned)
-        })
+    fn review_repository(&self) -> Result<GitRepository, String> {
+        let invocation_repository = self
+            .invocation_directory
+            .as_deref()
+            .map(GitRepository::discover);
+        if let Some(Ok(repository)) = &invocation_repository {
+            return Ok(repository.clone());
+        }
+
+        if let Some(context) = self.active_comparison_context() {
+            return GitRepository::discover(&context);
+        }
+
+        match invocation_repository {
+            Some(Err(error)) => Err(error),
+            Some(Ok(_)) => unreachable!("successful discovery returned above"),
+            None => Err("Open a local file or invoke yori from a Git repository first.".into()),
+        }
+    }
+
+    fn active_comparison_context(&self) -> Option<std::path::PathBuf> {
+        self.tabs
+            .active
+            .and_then(|id| self.tabs.get(id))
+            .and_then(|tab| tab.identity.comparison())
+            .and_then(|comparison| comparison.target().parent())
+            .map(std::path::Path::to_owned)
     }
 
     fn open_git_source_chooser(

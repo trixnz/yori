@@ -80,9 +80,11 @@ impl GitSourceChooser {
             .selected
             .saturating_add_signed(offset)
             .min(self.option_count() - 1);
+
         if self.selected > 0 && self.selected <= self.commits.len() {
             self.scroll.scroll_to_item(self.selected - 1);
         }
+
         self.message = None;
         cx.notify();
     }
@@ -91,12 +93,14 @@ impl GitSourceChooser {
         if event.keystroke.modifiers.modified() {
             return;
         }
+
         if event.keystroke.key == "escape" {
             cx.emit(GitSourceChooserEvent::Cancelled);
             window.prevent_default();
             cx.stop_propagation();
             return;
         }
+
         if self.revision.focus_handle(cx).is_focused(window) {
             return;
         }
@@ -143,6 +147,7 @@ impl GitSourceChooser {
 
     fn open_revision(&mut self, cx: &mut Context<Self>) {
         let revision = self.revision.read(cx).text().to_string();
+
         match self.repository.commit_source(revision.trim()) {
             Ok(source) => cx.emit(GitSourceChooserEvent::Chosen(source)),
             Err(error) => {
@@ -155,6 +160,7 @@ impl GitSourceChooser {
     fn select_revision(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = self.revision_index();
         self.message = None;
+
         self.revision.focus_handle(cx).focus(window, cx);
         cx.notify();
     }

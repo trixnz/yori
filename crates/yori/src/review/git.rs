@@ -207,8 +207,14 @@ impl ReviewProvider for GitProvider {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Snapshot {
-    Blob { bytes: Vec<u8>, mode: EntryMode },
-    Submodule { id: String },
+    Blob {
+        bytes: Vec<u8>,
+        mode: EntryMode,
+        is_symlink: bool,
+    },
+    Submodule {
+        id: String,
+    },
 }
 
 impl Snapshot {
@@ -221,6 +227,16 @@ impl Snapshot {
             Self::Blob { bytes, .. } => Some(bytes),
             Self::Submodule { .. } => None,
         }
+    }
+
+    fn is_symlink(&self) -> bool {
+        matches!(
+            self,
+            Self::Blob {
+                is_symlink: true,
+                ..
+            }
+        )
     }
 
     fn submodule_id(&self) -> Option<&str> {
@@ -317,11 +333,12 @@ fn working_manifest(repository: &gix::Repository) -> Result<ReviewManifest, Stri
     let mut changes = BTreeMap::new();
     for path in candidates {
         let old = tree_snapshot(repository, &baseline_tree, &path)?;
-        let new = worktree_snapshot(work_dir, &index, &path, old.as_ref())?;
+        let new = worktree_snapshot(repository, work_dir, &index, &path, old.as_ref())?;
 
         if old == new && !matches!(old, Some(Snapshot::Submodule { .. })) {
             continue;
         }
+
         changes.insert(path.clone(), WorkingChange { path, old, new });
     }
 
@@ -393,6 +410,7 @@ fn reconcile_renames(
         if hints.contains_key(destination) {
             continue;
         }
+
         if let Some((source, _)) = deletions.iter().find(|(source, removed)| {
             !hints.values().any(|hint| hint == *source) && *removed == added
         }) {
@@ -446,24 +464,37 @@ fn working_file(
 
     let baseline = old.and_then(Snapshot::bytes).unwrap_or_default().to_vec();
     let local = new.and_then(Snapshot::bytes).unwrap_or_default().to_vec();
+    let local = if new.is_some_and(Snapshot::is_symlink) {
+        ComparisonDocument::read_only_memory(path.clone(), local)
+    } else {
+        ComparisonDocument::editable_memory(path.clone(), local, Some(destination))
+    };
     let comparison = TextComparison::new(
         ComparisonDocument::read_only_memory(path.clone(), baseline),
-        ComparisonDocument::editable_memory(path.clone(), local, Some(destination)),
+        local,
     )?;
 
     Ok(ReviewFile::text(identity, path, status, comparison))
 }
 
 fn worktree_snapshot(
+    repository: &gix::Repository,
     work_dir: &Path,
     index: &gix::worktree::Index,
     path: &Path,
     baseline: Option<&Snapshot>,
 ) -> Result<Option<Snapshot>, String> {
     let destination = work_dir.join(path);
-    let metadata = match fs::symlink_metadata(&destination) {
+    let metadata = match gix::index::fs::Metadata::from_path_no_follow(&destination) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(error) => {
             return Err(format!("cannot inspect {}: {error}", destination.display()));
         }
@@ -475,26 +506,30 @@ fn worktree_snapshot(
         || index_entry.is_some_and(|entry| entry.mode.is_submodule());
 
     if is_submodule && metadata.is_dir() {
-        let id = gix::discover(&destination)
+        let id = gix::open(&destination)
             .ok()
             .and_then(|nested| nested.head_id().ok().map(gix::Id::detach))
             .map_or_else(
                 || index_entry.map_or_else(|| "(unborn)".to_owned(), |entry| entry.id.to_string()),
                 |id| id.to_string(),
             );
+
         return Ok(Some(Snapshot::Submodule { id }));
     }
 
-    if metadata.file_type().is_symlink() {
+    let mode = worktree_mode(repository, index_entry, &metadata)?;
+    if metadata.is_symlink() {
         let target = fs::read_link(&destination).map_err(|error| {
             format!(
                 "cannot read symbolic link {}: {error}",
                 destination.display()
             )
         })?;
+
         return Ok(Some(Snapshot::Blob {
             bytes: target.as_os_str().as_encoded_bytes().to_vec(),
-            mode: EntryMode::try_from(0o120_000).expect("symlink mode is valid"),
+            mode,
+            is_symlink: true,
         }));
     }
     if !metadata.is_file() {
@@ -503,14 +538,35 @@ fn worktree_snapshot(
 
     let bytes = fs::read(&destination)
         .map_err(|error| format!("cannot read {}: {error}", destination.display()))?;
-    let mode = baseline
-        .and_then(|snapshot| match snapshot {
-            Snapshot::Blob { mode, .. } => Some(*mode),
-            Snapshot::Submodule { .. } => None,
-        })
-        .unwrap_or_else(|| EntryMode::try_from(0o100_644).expect("blob mode is valid"));
 
-    Ok(Some(Snapshot::Blob { bytes, mode }))
+    Ok(Some(Snapshot::Blob {
+        bytes,
+        mode,
+        is_symlink: false,
+    }))
+}
+
+fn worktree_mode(
+    repository: &gix::Repository,
+    index_entry: Option<&gix::index::Entry>,
+    metadata: &gix::index::fs::Metadata,
+) -> Result<EntryMode, String> {
+    let config = repository.config_snapshot();
+    let executable_bit = config
+        .try_boolean("core.fileMode")
+        .map_err(|error| format!("cannot read core.fileMode: {error}"))?
+        .unwrap_or(true);
+    let symlink = config
+        .try_boolean("core.symlinks")
+        .map_err(|error| format!("cannot read core.symlinks: {error}"))?
+        .unwrap_or(true);
+    let index_mode = index_entry.map_or(gix::index::entry::Mode::FILE, |entry| entry.mode);
+    let mode = index_mode
+        .change_to_match_fs(metadata, symlink, executable_bit)
+        .map_or(index_mode, |change| change.apply(index_mode));
+
+    mode.to_tree_entry_mode()
+        .ok_or_else(|| format!("unsupported Git file mode {mode:?}"))
 }
 
 fn tree_snapshot(
@@ -524,6 +580,9 @@ fn tree_snapshot(
     else {
         return Ok(None);
     };
+    if entry.mode().is_tree() {
+        return Ok(None);
+    }
 
     snapshot_from_tree_entry(repository, entry.mode(), entry.object_id()).map(Some)
 }
@@ -549,6 +608,7 @@ fn snapshot_from_tree_entry(
     Ok(Snapshot::Blob {
         bytes: blob.data.clone(),
         mode,
+        is_symlink: mode.is_link(),
     })
 }
 
@@ -592,6 +652,7 @@ fn commit_manifest(
             files.push(file);
         }
     }
+
     files.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
     ReviewManifest::new(files)
 }
@@ -610,6 +671,7 @@ fn historical_file(
             if entry_mode.is_tree() {
                 return Ok(None);
             }
+
             (
                 git_path(location.as_ref())?,
                 ReviewFileStatus::Added,
@@ -626,6 +688,7 @@ fn historical_file(
             if entry_mode.is_tree() {
                 return Ok(None);
             }
+
             (
                 git_path(location.as_ref())?,
                 ReviewFileStatus::Deleted,
@@ -643,6 +706,7 @@ fn historical_file(
             if previous_entry_mode.is_tree() || entry_mode.is_tree() {
                 return Ok(None);
             }
+
             (
                 git_path(location.as_ref())?,
                 ReviewFileStatus::Modified,
@@ -667,6 +731,7 @@ fn historical_file(
             if source_entry_mode.is_tree() || entry_mode.is_tree() {
                 return Ok(None);
             }
+
             let path = git_path(location.as_ref())?;
             let status = if copy {
                 ReviewFileStatus::Added
@@ -803,6 +868,16 @@ mod tests {
             extra_parents: &[gix::ObjectId],
         ) -> gix::ObjectId {
             let tree = write_tree(&self.repository, entries);
+
+            self.commit_tree(message, tree, extra_parents)
+        }
+
+        fn commit_tree(
+            &mut self,
+            message: &str,
+            tree: gix::ObjectId,
+            extra_parents: &[gix::ObjectId],
+        ) -> gix::ObjectId {
             let mut parents = self.head.into_iter().collect::<Vec<_>>();
             parents.extend_from_slice(extra_parents);
             let time = format!("{} +0000", self.timestamp);
@@ -819,6 +894,7 @@ mod tests {
                 .detach();
             self.head = Some(id);
             self.tree = tree;
+
             id
         }
 
@@ -870,6 +946,7 @@ mod tests {
     enum TestEntry {
         Blob(Vec<u8>),
         Binary(Vec<u8>),
+        Symlink(Vec<u8>),
         Submodule(gix::ObjectId),
     }
 
@@ -881,6 +958,10 @@ mod tests {
                     TestEntry::Blob(bytes) | TestEntry::Binary(bytes) => (
                         EntryMode::try_from(0o100_644).unwrap(),
                         repository.write_blob(bytes).unwrap().detach(),
+                    ),
+                    TestEntry::Symlink(target) => (
+                        EntryMode::try_from(0o120_000).unwrap(),
+                        repository.write_blob(target).unwrap().detach(),
                     ),
                     TestEntry::Submodule(id) => (EntryMode::try_from(0o160_000).unwrap(), *id),
                 };
@@ -1038,6 +1119,169 @@ mod tests {
             diff.local.save_destination(),
             Some(fixture.root.join("mixed.txt").as_path())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn working_symlink_snapshot_is_read_only_and_cannot_save_through_the_target() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = RepositoryFixture::unborn();
+        let target = fixture.root.join("target.txt");
+        let link = fixture.root.join("link.txt");
+        fs::write(&target, "target contents\n").unwrap();
+        symlink("target.txt", &link).unwrap();
+
+        let manifest = load(&fixture.discovered().working_source());
+        let files = by_path(&manifest);
+        let (_, local, editable, saveable) = text_bytes(files["link.txt"]);
+
+        assert_eq!(local, b"target.txt");
+        assert!(!editable);
+        assert!(!saveable);
+        assert_eq!(fs::read_to_string(target).unwrap(), "target contents\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn working_manifest_reports_executable_bit_changes_when_filemode_is_enabled() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = RepositoryFixture::committed(&[("script.sh", b"echo test\n")]);
+        let path = fixture.root.join("script.sh");
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        let manifest = load(&fixture.discovered().working_source());
+        let files = by_path(&manifest);
+
+        assert_eq!(files["script.sh"].status, ReviewFileStatus::Modified);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn working_manifest_respects_disabled_filemode() {
+        use std::{io::Write, os::unix::fs::PermissionsExt};
+
+        let fixture = RepositoryFixture::committed(&[("script.sh", b"echo test\n")]);
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(fixture.repository.path().join("config"))
+            .unwrap();
+        writeln!(config, "[core]\n\tfilemode = false").unwrap();
+        let path = fixture.root.join("script.sh");
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        let manifest = load(&fixture.discovered().working_source());
+
+        assert!(manifest.files.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn working_manifest_reports_symlink_replaced_by_regular_file() {
+        let mut fixture = RepositoryFixture::unborn();
+        fixture.commit(
+            "symlink",
+            &[("link", TestEntry::Symlink(b"target".to_vec()))],
+            &[],
+        );
+        fixture.write_index_from_head();
+        fs::write(fixture.root.join("link"), b"target").unwrap();
+
+        let manifest = load(&fixture.discovered().working_source());
+        let files = by_path(&manifest);
+
+        assert_eq!(files["link"].status, ReviewFileStatus::Modified);
+        let (_, local, editable, saveable) = text_bytes(files["link"]);
+        assert_eq!(local, b"target");
+        assert!(editable);
+        assert!(saveable);
+    }
+
+    #[test]
+    fn directory_replaced_by_file_yields_addition_and_descendant_deletion() {
+        let mut fixture = RepositoryFixture::unborn();
+        let child = fixture.repository.write_blob(b"child\n").unwrap().detach();
+        let subtree = fixture
+            .repository
+            .write_object(Tree {
+                entries: vec![Entry {
+                    mode: EntryMode::try_from(0o100_644).unwrap(),
+                    filename: "child.txt".into(),
+                    oid: child,
+                }],
+            })
+            .unwrap()
+            .detach();
+        let root = fixture
+            .repository
+            .write_object(Tree {
+                entries: vec![Entry {
+                    mode: EntryMode::try_from(0o040_000).unwrap(),
+                    filename: "node".into(),
+                    oid: subtree,
+                }],
+            })
+            .unwrap()
+            .detach();
+        fixture.commit_tree("directory", root, &[]);
+        fixture.write_index_from_head();
+        fs::write(fixture.root.join("node"), b"replacement\n").unwrap();
+
+        let manifest = load(&fixture.discovered().working_source());
+        let files = by_path(&manifest);
+
+        assert_eq!(files["node"].status, ReviewFileStatus::Added);
+        assert_eq!(files["node/child.txt"].status, ReviewFileStatus::Deleted);
+    }
+
+    #[test]
+    fn uninitialized_submodule_uses_the_index_gitlink_without_upward_discovery() {
+        let mut fixture = RepositoryFixture::unborn();
+        let baseline_id = fixture.detached_commit(
+            "baseline submodule",
+            &[("file", TestEntry::Blob(b"baseline\n".to_vec()))],
+            &[],
+        );
+        let index_id = fixture.detached_commit(
+            "indexed submodule",
+            &[("file", TestEntry::Blob(b"indexed\n".to_vec()))],
+            &[],
+        );
+        fixture.commit(
+            "superproject",
+            &[("vendor", TestEntry::Submodule(baseline_id))],
+            &[],
+        );
+        fixture.write_index_from_head();
+        let mut index = fixture.repository.index_from_tree(&fixture.tree).unwrap();
+        index
+            .entry_mut_by_path_and_stage(
+                b"vendor".as_bstr(),
+                gix::index::entry::Stage::Unconflicted,
+            )
+            .unwrap()
+            .id = index_id;
+        index.write(gix::index::write::Options::default()).unwrap();
+        fs::create_dir(fixture.root.join("vendor")).unwrap();
+
+        let manifest = load(&fixture.discovered().working_source());
+        let files = by_path(&manifest);
+        let ReviewFileKind::Submodule {
+            old_identifier,
+            new_identifier,
+        } = &files["vendor"].kind
+        else {
+            panic!("expected submodule entry")
+        };
+
+        assert_eq!(old_identifier.as_ref(), baseline_id.to_string());
+        assert_eq!(new_identifier.as_ref(), index_id.to_string());
+        assert_ne!(new_identifier.as_ref(), fixture.head.unwrap().to_string());
     }
 
     #[test]

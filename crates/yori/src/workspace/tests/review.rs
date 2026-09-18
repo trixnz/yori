@@ -772,6 +772,52 @@ fn invocation_routes_git_chooser_and_deduplication_to_the_invoking_repository(
 }
 
 #[gpui_kit::test]
+fn git_chooser_falls_back_to_the_active_local_comparison_repository(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let repository = tempfile::tempdir().unwrap();
+    gix::init(repository.path()).unwrap();
+    let baseline = repository.path().join("baseline.txt");
+    let local = repository.path().join("local.txt");
+    std::fs::write(&baseline, "before\n").unwrap();
+    std::fs::write(&local, "after\n").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let window = cx.update(|window, _| {
+        window
+            .window_handle()
+            .downcast::<gpui_kit::component::Root>()
+            .unwrap()
+    });
+
+    crate::dispatch_invocation(
+        window,
+        &workspace,
+        &InvocationRequest::new(outside.path().to_owned(), Vec::new()),
+        &mut cx.cx,
+    )
+    .unwrap();
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_paths(&baseline, &local, window, cx);
+            workspace.choose_git_review(&OpenGitReview, window, cx);
+        });
+        window.render_frame(cx);
+
+        let chooser = workspace
+            .read(cx)
+            .git_source_chooser
+            .as_ref()
+            .expect("active local comparison should provide repository context")
+            .0
+            .clone();
+        assert_eq!(
+            chooser.read(cx).work_dir(),
+            repository.path().canonicalize().unwrap()
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn git_working_document_edits_save_to_the_real_worktree_path(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
     let repository = tempfile::tempdir().unwrap();
@@ -807,6 +853,53 @@ fn git_working_document_edits_save_to_the_real_worktree_path(cx: &mut TestAppCon
     cx.run_until_parked();
 
     assert!(std::fs::read_to_string(path).unwrap().contains("edited"));
+}
+
+#[cfg(unix)]
+#[gpui_kit::test]
+fn git_symlink_working_document_cannot_edit_or_save_through_its_target(cx: &mut TestAppContext) {
+    use std::os::unix::fs::symlink;
+
+    let (workspace, cx) = harness(cx);
+    let repository = tempfile::tempdir().unwrap();
+    gix::init(repository.path()).unwrap();
+    let target = repository.path().join("target.txt");
+    let link = repository.path().join("link.txt");
+    std::fs::write(&target, "target contents\n").unwrap();
+    symlink("target.txt", &link).unwrap();
+    let window = cx.update(|window, _| {
+        window
+            .window_handle()
+            .downcast::<gpui_kit::component::Root>()
+            .unwrap()
+    });
+
+    crate::dispatch_invocation(
+        window,
+        &workspace,
+        &InvocationRequest::new(repository.path().to_owned(), Vec::new()),
+        &mut cx.cx,
+    )
+    .unwrap();
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+    cx.update(TestWindowExt::render_frame);
+
+    cx.update(|window, cx| {
+        edit_active(window, cx, "must not reach target ");
+        window.press("ctrl-s", cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "target contents\n"
+    );
+    assert_eq!(std::fs::read_link(link).unwrap(), Path::new("target.txt"));
 }
 
 #[gpui_kit::test]
