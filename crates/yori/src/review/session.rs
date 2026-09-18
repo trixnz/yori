@@ -3,9 +3,8 @@
 use std::{collections::HashMap, collections::VecDeque, rc::Rc};
 
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, Sizable,
+    ActiveTheme, Disableable, Sizable,
     button::{Button, ButtonVariants},
-    input::{Input, InputEvent, InputState},
     scroll::ScrollableElement,
 };
 use gpui_kit::{
@@ -155,8 +154,6 @@ pub(crate) struct ReviewSession {
     entries: Vec<SessionEntry>,
     selected: Option<ReviewFileIdentity>,
     editors: HashMap<ReviewFileIdentity, ReviewEditor>,
-    query: Entity<InputState>,
-    _query_subscription: Subscription,
     navigator_focus: FocusHandle,
     navigator_scroll: ScrollHandle,
     navigator_selection: Option<ReviewFileIdentity>,
@@ -167,23 +164,12 @@ pub(crate) struct ReviewSession {
 }
 
 impl ReviewSession {
-    pub(crate) fn new(source: ReviewSource, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Filter files"));
-        let subscription = cx.subscribe(&query, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.navigator_selection = None;
-                this.navigator_scroll.scroll_to_item(0);
-                cx.notify();
-            }
-        });
-
+    pub(crate) fn new(source: ReviewSource, cx: &mut Context<Self>) -> Self {
         Self {
             source,
             entries: Vec::new(),
             selected: None,
             editors: HashMap::new(),
-            query,
-            _query_subscription: subscription,
             navigator_focus: cx.focus_handle(),
             navigator_scroll: ScrollHandle::new(),
             navigator_selection: None,
@@ -218,16 +204,12 @@ impl ReviewSession {
         } else if self.selected_is_non_text() {
             self.non_text_body_focus.focus(window, cx);
         } else {
-            self.query.focus_handle(cx).focus(window, cx);
+            self.navigator_focus.focus(window, cx);
         }
     }
 
-    pub(crate) fn focus_navigator_or_filter(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.entries.is_empty() {
-            self.query.focus_handle(cx).focus(window, cx);
-        } else {
-            self.navigator_focus.focus(window, cx);
-        }
+    pub(crate) fn focus_navigator(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigator_focus.focus(window, cx);
     }
 
     fn selected_is_non_text(&self) -> bool {
@@ -388,7 +370,7 @@ impl ReviewSession {
             self.ensure_editor(&selected, window, cx)?;
         }
 
-        self.reconcile_navigator_selection(cx);
+        self.reconcile_navigator_selection();
 
         Ok(old_selected != self.selected || old_active_editor != self.active_editor())
     }
@@ -657,16 +639,14 @@ impl ReviewSession {
             .find(|entry| &entry.file.identity == selected)
     }
 
-    fn visible_identities(&self, cx: &App) -> Vec<ReviewFileIdentity> {
-        let query = self.query.read(cx).text().to_string();
+    fn visible_identities(&self) -> Vec<ReviewFileIdentity> {
         self.entries
             .iter()
-            .filter(|entry| entry.file.matches_query(&query))
             .map(|entry| entry.file.identity.clone())
             .collect()
     }
 
-    fn reconcile_navigator_selection(&mut self, cx: &App) {
+    fn reconcile_navigator_selection(&mut self) {
         let navigator_exists = self.navigator_selection.as_ref().is_some_and(|selected| {
             self.entries
                 .iter()
@@ -676,15 +656,15 @@ impl ReviewSession {
             self.navigator_selection = self.selected.clone();
         }
 
-        self.reveal_navigator_selection(cx);
+        self.reveal_navigator_selection();
     }
 
-    fn reveal_navigator_selection(&self, cx: &App) {
+    fn reveal_navigator_selection(&self) {
         let Some(selected) = self.navigator_selection.as_ref() else {
             return;
         };
         let Some(index) = self
-            .visible_identities(cx)
+            .visible_identities()
             .iter()
             .position(|identity| identity == selected)
         else {
@@ -695,7 +675,7 @@ impl ReviewSession {
     }
 
     fn move_navigator_selection(&mut self, offset: isize, cx: &mut Context<Self>) {
-        let visible = self.visible_identities(cx);
+        let visible = self.visible_identities();
         if visible.is_empty() {
             self.navigator_selection = None;
             cx.notify();
@@ -778,6 +758,12 @@ impl ReviewSession {
         };
         let warning = entry.warning.as_ref().map(EntryWarning::label);
         let badge = entry.file.status.badge();
+        let badge_color = match &entry.file.status {
+            super::model::ReviewFileStatus::Added => cx.theme().success,
+            super::model::ReviewFileStatus::Modified => cx.theme().warning,
+            super::model::ReviewFileStatus::Deleted => cx.theme().danger,
+            super::model::ReviewFileStatus::Renamed { .. } => cx.theme().info,
+        };
         let accessible_label = format!(
             "{}; {}; {}{}",
             entry.file.status.label(),
@@ -808,10 +794,12 @@ impl ReviewSession {
             }))
             .child(
                 div()
+                    .id(("review-status-badge", index))
+                    .test_support()
                     .w(px(20.0))
                     .flex_shrink_0()
                     .text_center()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(badge_color)
                     .child(badge),
             )
             .child(
@@ -840,12 +828,7 @@ impl ReviewSession {
     }
 
     fn render_navigator(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let query = self.query.read(cx).text().to_string();
-        let visible = self
-            .entries
-            .iter()
-            .filter(|entry| entry.file.matches_query(&query))
-            .collect::<Vec<_>>();
+        let visible = self.entries.iter().collect::<Vec<_>>();
         let selected = self
             .navigator_selection
             .as_ref()
@@ -864,22 +847,16 @@ impl ReviewSession {
             .bg(cx.theme().secondary)
             .child(
                 div()
-                    .p(px(8.0))
+                    .id("review-files-header")
+                    .test_support()
+                    .px(px(8.0))
+                    .py(px(6.0))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            Input::new(&self.query)
-                                .id("review-file-filter")
-                                .prefix(Icon::new(gpui_kit::assets::IconName::Search))
-                                .cleanable(true)
-                                .with_size(px(28.0))
-                                .aria_label("Filter review files"),
-                        ),
-                    )
+                    .child(div().flex_1().min_w_0().child("Files"))
                     .child(
                         Button::new("refresh-review")
                             .icon(gpui_kit::assets::IconName::RefreshCw)
@@ -1008,7 +985,6 @@ impl ReviewSession {
 impl Render for ReviewSession {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let message = self.message.clone();
-        let refreshing = self.refreshing && !self.entries.is_empty();
         let warning = self
             .selected_entry()
             .and_then(|entry| entry.warning.as_ref())
@@ -1029,16 +1005,6 @@ impl Render for ReviewSession {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .children(refreshing.then(|| {
-                        div()
-                            .flex_shrink_0()
-                            .px(px(12.0))
-                            .py(px(6.0))
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().muted)
-                            .child("Refreshing review…")
-                    }))
                     .children(message.map(|message| {
                         div()
                             .flex_shrink_0()
@@ -1118,10 +1084,6 @@ impl ReviewSession {
             .find(|entry| &entry.file.identity == identity)
             .and_then(|entry| entry.warning.as_ref())
             .map(EntryWarning::label)
-    }
-
-    pub(crate) fn focus_navigator(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigator_focus.focus(window, cx);
     }
 
     pub(crate) fn navigator_is_scrolled(&self) -> bool {
