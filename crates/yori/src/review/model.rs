@@ -237,24 +237,6 @@ impl ReviewFile {
         }
     }
 
-    pub(crate) fn matches_query(&self, query: &str) -> bool {
-        let query = query.trim().to_lowercase();
-        if query.is_empty() {
-            return true;
-        }
-
-        self.logical_path
-            .to_string_lossy()
-            .to_lowercase()
-            .contains(&query)
-            || self.status.label().to_lowercase().contains(&query)
-            || matches!(
-                &self.status,
-                ReviewFileStatus::Renamed { from }
-                    if from.to_string_lossy().to_lowercase().contains(&query)
-            )
-    }
-
     pub(crate) fn path(&self) -> &Path {
         &self.logical_path
     }
@@ -349,21 +331,5 @@ mod tests {
         );
 
         assert!(ReviewManifest::new(vec![first, second]).is_err());
-    }
-
-    #[test]
-    fn renamed_entry_searches_both_paths() {
-        let file = ReviewFile::binary(
-            ReviewFileIdentity::new("rename"),
-            "src/new-name.bin".into(),
-            ReviewFileStatus::Renamed {
-                from: "src/old-name.bin".into(),
-            },
-            "Binary content cannot be displayed.",
-        );
-
-        assert!(file.matches_query("new-name"));
-        assert!(file.matches_query("old-name"));
-        assert!(file.matches_query("renamed"));
     }
 }
