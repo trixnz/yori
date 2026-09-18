@@ -254,12 +254,9 @@ impl AlignedEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pane = match side {
-            Side::Left => &mut self.left,
-            Side::Right => &mut self.right,
-            Side::Incoming => &mut self.merge.as_mut().expect("incoming pane").incoming,
-        };
-        pane.set_language(language);
+        if self.document_mut(side).change_language(language) {
+            self.schedule_highlighting(side, window, cx);
+        }
 
         self.focus.focus(window, cx);
         cx.notify();

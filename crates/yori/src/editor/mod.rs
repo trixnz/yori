@@ -127,6 +127,7 @@ pub(super) struct PaneDocument {
     max_display_columns: usize,
     document: Document,
     highlighter: Option<SyntaxHighlighter>,
+    highlight_generation: u64,
     syntax_cache: RefCell<highlighting::SyntaxCache>,
     language_override: Option<Language>,
     line_endings: LineEndings,
@@ -135,7 +136,6 @@ pub(super) struct PaneDocument {
 impl PaneDocument {
     pub(super) fn new(path: PathBuf, document: Document) -> Self {
         let max_display_columns = max_display_columns(&document, TAB_WIDTH);
-        let highlighter = Self::highlighter_for(Language::detect(&path), &document);
         let line_endings = LineEndings::from_document(&document);
 
         Self {
@@ -144,11 +144,20 @@ impl PaneDocument {
             saveable: false,
             max_display_columns,
             document,
-            highlighter,
+            highlighter: None,
+            highlight_generation: 0,
             syntax_cache: RefCell::default(),
             language_override: None,
             line_endings,
         }
+    }
+
+    #[cfg(test)]
+    fn new_highlighted(path: PathBuf, document: Document) -> Self {
+        let mut pane = Self::new(path, document);
+        pane.highlighter = Self::highlighter_for(pane.language(), &pane.document);
+
+        pane
     }
 
     fn language(&self) -> Language {
@@ -156,6 +165,7 @@ impl PaneDocument {
             .unwrap_or_else(|| Language::detect(&self.path))
     }
 
+    #[cfg(test)]
     fn highlighter_for(language: Language, document: &Document) -> Option<SyntaxHighlighter> {
         let grammar = highlighting::grammar_for(language)?;
         let mut highlighter = SyntaxHighlighter::new(grammar);
@@ -164,15 +174,24 @@ impl PaneDocument {
         Some(highlighter)
     }
 
-    fn set_language(&mut self, language: Option<Language>) {
+    fn change_language(&mut self, language: Option<Language>) -> bool {
         let previous = self.language();
         self.language_override = language;
         if self.language() == previous {
-            return;
+            return false;
         }
 
-        self.highlighter = Self::highlighter_for(self.language(), &self.document);
+        self.highlighter = None;
         self.syntax_cache.get_mut().clear();
+
+        true
+    }
+
+    #[cfg(test)]
+    fn set_language(&mut self, language: Option<Language>) {
+        if self.change_language(language) {
+            self.highlighter = Self::highlighter_for(self.language(), &self.document);
+        }
     }
 
     fn refresh_after_edit(&mut self, edit: &EditOutcome) {
@@ -365,7 +384,7 @@ impl AlignedEditor {
         })
         .detach();
 
-        Self {
+        let mut editor = Self {
             left,
             right,
             alignment,
@@ -389,7 +408,49 @@ impl AlignedEditor {
                 point(px(0.0), px(0.0)),
                 window.viewport_size(),
             ))),
-        }
+        };
+        editor.schedule_highlighting(Side::Left, window, cx);
+        editor.schedule_highlighting(Side::Right, window, cx);
+
+        editor
+    }
+
+    fn schedule_highlighting(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.document_mut(side);
+        pane.highlight_generation = pane.highlight_generation.wrapping_add(1);
+        pane.highlighter = None;
+        pane.syntax_cache.get_mut().clear();
+
+        let generation = pane.highlight_generation;
+        let language = pane.language();
+        let Some(grammar) = highlighting::grammar_for(language) else {
+            return;
+        };
+        let text = pane.document.text().to_owned();
+        let build = cx.background_executor().spawn(async move {
+            let mut highlighter = SyntaxHighlighter::new(grammar);
+            highlighter.update(None, &Rope::from(text.as_str()), None);
+
+            (text, highlighter)
+        });
+
+        cx.spawn_in(window, async move |editor, cx| {
+            let (text, highlighter) = build.await;
+            let _ = editor.update_in(cx, |editor, _, cx| {
+                let pane = editor.document_mut(side);
+                if pane.highlight_generation != generation
+                    || pane.language() != language
+                    || pane.document.text() != text
+                {
+                    return;
+                }
+
+                pane.highlighter = Some(highlighter);
+                pane.syntax_cache.get_mut().clear();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn can_edit(&self) -> bool {
@@ -398,6 +459,15 @@ impl AlignedEditor {
 
     pub(super) fn can_save(&self) -> bool {
         self.right.saveable
+    }
+
+    #[cfg(test)]
+    pub(crate) fn highlighting_ready(&self) -> bool {
+        let ready = |pane: &PaneDocument| {
+            pane.highlighter.is_some() || highlighting::grammar_for(pane.language()).is_none()
+        };
+
+        ready(&self.left) && ready(&self.right)
     }
 
     #[cfg(test)]
@@ -510,6 +580,20 @@ impl AlignedEditor {
                 &self
                     .merge
                     .as_ref()
+                    .expect("incoming pane requires merge mode")
+                    .incoming
+            }
+        }
+    }
+
+    fn document_mut(&mut self, side: Side) -> &mut PaneDocument {
+        match side {
+            Side::Left => &mut self.left,
+            Side::Right => &mut self.right,
+            Side::Incoming => {
+                &mut self
+                    .merge
+                    .as_mut()
                     .expect("incoming pane requires merge mode")
                     .incoming
             }
@@ -1442,14 +1526,71 @@ pub(super) fn init(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_kit::component::highlighter::HighlightTheme;
+    use gpui_kit::{AppContext, component::highlighter::HighlightTheme};
     use yori_document::editing::TextSelection;
 
     fn pane(text: &str) -> PaneDocument {
-        PaneDocument::new(
+        PaneDocument::new_highlighted(
             PathBuf::from("fixture.rs"),
             Document::from_bytes(text.as_bytes().to_vec()).unwrap(),
         )
+    }
+
+    #[gpui_kit::test]
+    fn background_highlighting_cannot_overwrite_a_replaced_pane(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::component::init(cx);
+            crate::appearance::init(cx);
+            crate::editor::init(cx);
+        });
+
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                AlignedEditor::new(
+                    PaneDocument::new(
+                        "baseline.rs".into(),
+                        Document::from_bytes(b"fn baseline() {}\n".to_vec()).unwrap(),
+                    ),
+                    PaneDocument::new(
+                        "current.rs".into(),
+                        Document::from_bytes(b"fn old() {}\n".to_vec()).unwrap(),
+                    ),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(view.clone());
+
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let editor = editor.unwrap();
+
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.right = PaneDocument::new(
+                    "current.rs".into(),
+                    Document::from_bytes(b"fn replacement() {}\n".to_vec()).unwrap(),
+                );
+                editor.schedule_highlighting(Side::Right, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let editor = editor.read(cx);
+            assert_eq!(editor.right.document.text(), "fn replacement() {}\n");
+            assert_eq!(
+                editor
+                    .right
+                    .highlighter
+                    .as_ref()
+                    .unwrap()
+                    .text()
+                    .to_string(),
+                editor.right.document.text()
+            );
+        });
     }
 
     #[test]
@@ -1499,7 +1640,7 @@ mod tests {
             .unwrap();
         pane.refresh_after_edit(&edit);
 
-        let fresh = PaneDocument::new(pane.path.clone(), pane.document.clone());
+        let fresh = PaneDocument::new_highlighted(pane.path.clone(), pane.document.clone());
         let theme = HighlightTheme::default_dark();
         let range = 0..pane.document.text().len();
         let expected = fresh

@@ -1,6 +1,6 @@
 //! Saved checkpoints and reloads retain editor ownership of source and history.
 
-use gpui_kit::Context;
+use gpui_kit::{Context, Window};
 use yori::navigation::ChangeNavigation;
 use yori_diff::Alignment;
 use yori_document::Document;
@@ -97,6 +97,7 @@ impl AlignedEditor {
         mut right: PaneDocument,
         editable: bool,
         saveable: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let selection = self.selection.clone();
@@ -104,10 +105,10 @@ impl AlignedEditor {
 
         left.editable = false;
         left.saveable = false;
-        left.set_language(self.left.language_override);
+        left.change_language(self.left.language_override);
         right.editable = editable;
         right.saveable = editable && saveable;
-        right.set_language(self.right.language_override);
+        right.change_language(self.right.language_override);
         self.left = left;
         if replace_local {
             self.right = right;
@@ -117,6 +118,10 @@ impl AlignedEditor {
 
         self.alignment = Alignment::between(&self.left.document, &self.right.document);
         self.navigation = ChangeNavigation::default();
+        self.schedule_highlighting(super::Side::Left, window, cx);
+        if replace_local {
+            self.schedule_highlighting(super::Side::Right, window, cx);
+        }
         self.selection = selection.map(|mut selection| {
             let text = self.document(selection.side).document.text();
             selection.anchor = normalize_offset(text, selection.anchor);
@@ -135,6 +140,7 @@ impl AlignedEditor {
         &mut self,
         baseline: bool,
         document: Document,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.deactivate(cx);
@@ -142,7 +148,7 @@ impl AlignedEditor {
         let mut replacement = PaneDocument::new(old.path.clone(), document);
         replacement.editable = old.editable;
         replacement.saveable = old.saveable;
-        replacement.set_language(old.language_override);
+        replacement.change_language(old.language_override);
         if baseline {
             self.left = replacement;
         } else {
@@ -153,6 +159,15 @@ impl AlignedEditor {
 
         self.alignment = Alignment::between(&self.left.document, &self.right.document);
         self.navigation = ChangeNavigation::default();
+        self.schedule_highlighting(
+            if baseline {
+                super::Side::Left
+            } else {
+                super::Side::Right
+            },
+            window,
+            cx,
+        );
         self.selection = None;
         self.preferred_column = None;
         self.hovered_connection = None;
@@ -173,7 +188,7 @@ mod tests {
     use crate::editor::{Selection, Side};
 
     fn pane(path: &str, text: &str) -> PaneDocument {
-        PaneDocument::new(
+        PaneDocument::new_highlighted(
             path.into(),
             Document::from_bytes(text.as_bytes().to_vec()).unwrap(),
         )
@@ -205,7 +220,7 @@ mod tests {
         });
         let editor = editor.unwrap();
 
-        cx.update(|_, cx| {
+        cx.update(|window, cx| {
             editor.update(cx, |editor, cx| {
                 editor.selection = Some(Selection {
                     side: Side::Right,
@@ -218,6 +233,7 @@ mod tests {
                     pane("new.rs", "éx\n"),
                     true,
                     true,
+                    window,
                     cx,
                 );
 
@@ -252,7 +268,7 @@ mod tests {
         });
         let editor = editor.unwrap();
 
-        cx.update(|_, cx| {
+        cx.update(|window, cx| {
             editor.update(cx, |editor, cx| {
                 editor.selection = Some(Selection {
                     side: Side::Right,
@@ -265,6 +281,7 @@ mod tests {
                     pane("new.rs", "éx\n"),
                     true,
                     true,
+                    window,
                     cx,
                 );
 
@@ -307,7 +324,7 @@ mod tests {
         let editor = editor.unwrap();
         cx.update(TestWindowExt::render_frame);
 
-        cx.update(|_, cx| {
+        cx.update(|window, cx| {
             editor.update(cx, |editor, cx| {
                 editor.selection = Some(Selection {
                     side: Side::Right,
@@ -331,6 +348,7 @@ mod tests {
                     pane("new.rs", "refreshed local\n"),
                     true,
                     true,
+                    window,
                     cx,
                 );
 

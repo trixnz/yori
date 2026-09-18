@@ -107,6 +107,7 @@ impl AlignedEditor {
             head: offset,
         });
         editor.refresh_merge_projection();
+        editor.schedule_highlighting(Side::Incoming, window, cx);
 
         editor
     }

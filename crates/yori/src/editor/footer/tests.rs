@@ -11,14 +11,14 @@ use yori_document::{
 };
 
 fn pane(path: &str, text: &str) -> PaneDocument {
-    PaneDocument::new(
+    PaneDocument::new_highlighted(
         path.into(),
         Document::from_bytes(text.as_bytes().to_vec()).unwrap(),
     )
 }
 
 fn assert_matches_fresh_highlighting(pane: &PaneDocument) {
-    let mut fresh = PaneDocument::new(pane.path.clone(), pane.document.clone());
+    let mut fresh = PaneDocument::new_highlighted(pane.path.clone(), pane.document.clone());
     fresh.set_language(pane.language_override);
     let theme = HighlightTheme::default_dark();
     let range = 0..pane.document.text().len();

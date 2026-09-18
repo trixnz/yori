@@ -531,7 +531,7 @@ impl Workspace {
                     Err(error) => this.set_message(id, format!("Reload failed: {error}"), cx),
                     Ok(Reloaded::Diff(snapshot, document)) => {
                         editor.update(cx, |editor, cx| {
-                            editor.reload_diff(role == Role::Baseline, document, cx);
+                            editor.reload_diff(role == Role::Baseline, document, window, cx);
                         });
                         if let Some(tab) = this.tabs.entries.iter_mut().find(|tab| tab.id == id)
                             && let Some(comparison) = tab.content.comparison_mut()

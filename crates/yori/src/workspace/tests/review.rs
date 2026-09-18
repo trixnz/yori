@@ -576,6 +576,50 @@ fn navigator_selection_displays_files_and_ctrl_h_l_moves_between_panes(cx: &mut 
 }
 
 #[gpui_kit::test]
+fn navigator_displays_a_fresh_file_before_syntax_highlighting_finishes(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let first = ReviewFileIdentity::new("first");
+    let second = ReviewFileIdentity::new("second");
+    let manifest = ReviewManifest::new(vec![
+        text_file(
+            "first",
+            "src/first.rs",
+            "fn before() {}\n",
+            "fn after() {}\n",
+        ),
+        text_file(
+            "second",
+            "src/second.rs",
+            "fn previous() {}\n",
+            "fn current() {}\n",
+        ),
+    ])
+    .unwrap();
+    let (_, session) = open_review(
+        &workspace,
+        source(TestProvider::new([manifest]), "background-highlighting"),
+        cx,
+    );
+
+    cx.update(|window, cx| {
+        assert_eq!(session.read(cx).selected_identity(), Some(&first));
+        session.update(cx, |session, cx| session.focus_navigator(window, cx));
+
+        window.press("j", cx);
+
+        assert_eq!(session.read(cx).selected_identity(), Some(&second));
+        let editor = session.read(cx).editor(&second).unwrap();
+        assert!(!editor.read(cx).highlighting_ready());
+    });
+    cx.run_until_parked();
+
+    cx.update(|_, cx| {
+        let editor = session.read(cx).editor(&second).unwrap();
+        assert!(editor.read(cx).highlighting_ready());
+    });
+}
+
+#[gpui_kit::test]
 fn navigator_keyboard_selection_scrolls_beyond_one_viewport(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
     let files = (0..40)

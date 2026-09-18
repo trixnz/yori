@@ -308,6 +308,7 @@ impl ReviewSession {
                         loaded.right,
                         loaded.editable,
                         loaded.saveable,
+                        window,
                         cx,
                     );
                 });
