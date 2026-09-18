@@ -324,6 +324,7 @@ impl Workspace {
             self.deactivate(cx);
         }
         self.tabs.remove(id);
+        self.update_window_title(window);
         self.disk_epoch += 1;
         self.watch_paths();
 
