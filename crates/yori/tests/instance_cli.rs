@@ -141,6 +141,10 @@ fn cli_forwards_invocation_directories_and_file_roles_before_exiting() {
         command.args(&paths[..count]);
         let mut child = RunningCli(command.spawn().unwrap());
         let (invocation, reply) = incoming.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            invocation.directory.canonicalize().unwrap(),
+            directory.as_path()
+        );
         let expected = if count == 0 {
             Vec::new()
         } else {
@@ -148,13 +152,12 @@ fn cli_forwards_invocation_directories_and_file_roles_before_exiting() {
                 Comparison::from_paths(
                     &paths[..count]
                         .iter()
-                        .map(|path| directory.join(path))
+                        .map(|path| invocation.directory.join(path))
                         .collect::<Vec<_>>(),
                 )
                 .unwrap(),
             ]
         };
-        assert_eq!(invocation.directory, directory.as_path());
         assert_eq!(invocation.comparisons, expected);
         assert!(
             child.0.try_wait().unwrap().is_none(),
