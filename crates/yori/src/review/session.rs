@@ -1478,8 +1478,24 @@ impl ReviewSession {
 
 #[cfg(test)]
 mod layout_tests {
-    use super::{common_directory, group_directory, heading_is_shown};
+    use super::super::model::ReviewFileStatus;
+    use super::{
+        ReviewFile, ReviewFileIdentity, SessionEntry, common_directory, group_directory,
+        heading_is_shown, leading_elements,
+    };
     use std::path::{Path, PathBuf};
+
+    fn entry(path: &str) -> SessionEntry {
+        SessionEntry {
+            file: ReviewFile::binary(
+                ReviewFileIdentity::new(path),
+                PathBuf::from(path),
+                ReviewFileStatus::Modified,
+                "Binary content cannot be displayed.",
+            ),
+            warning: None,
+        }
+    }
 
     fn base(paths: &[&str]) -> Option<PathBuf> {
         common_directory(paths.iter().map(Path::new))
@@ -1502,6 +1518,39 @@ mod layout_tests {
         // A file at the root leaves nothing to share.
         assert_eq!(base(&["crates/yori/src/review/git.rs", "README.md"]), None);
         assert_eq!(base(&[]), None);
+    }
+
+    /// Scrolling addresses the list's children, so every base line and heading
+    /// above a row shifts that row's index. The keyboard scroll test cannot
+    /// catch a mistake here because its fixture is one flat directory.
+    #[test]
+    fn scroll_indices_count_the_base_line_and_every_heading_above_a_row() {
+        let entries = [
+            entry("crates/yori/src/lib.rs"),
+            entry("crates/yori/src/editor/mod.rs"),
+            entry("crates/yori/src/review/git.rs"),
+            entry("crates/yori/src/review/model.rs"),
+        ];
+        let entries = entries.iter().collect::<Vec<_>>();
+
+        // The base line counts for every row; a file sitting directly in the
+        // base adds no heading of its own.
+        assert_eq!(leading_elements(&entries, 0), 1);
+        assert_eq!(leading_elements(&entries, 1), 2);
+        assert_eq!(leading_elements(&entries, 2), 3);
+        // The fourth file shares the third's heading, so nothing new precedes it.
+        assert_eq!(leading_elements(&entries, 3), 3);
+    }
+
+    #[test]
+    fn a_root_file_takes_a_heading_when_the_review_shares_no_base() {
+        let entries = [entry("README.md"), entry("src/main.rs")];
+        let entries = entries.iter().collect::<Vec<_>>();
+
+        // No shared base means no base line, but the root file still needs its
+        // own heading or it would read as part of the run below it.
+        assert_eq!(leading_elements(&entries, 0), 1);
+        assert_eq!(leading_elements(&entries, 1), 2);
     }
 
     #[test]

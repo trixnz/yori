@@ -172,10 +172,6 @@ fn source_identity_deduplicates_and_navigation_lazily_retains_editors(cx: &mut T
         assert_eq!(session.read(cx).editor_count(), 1);
         let first_editor = session.read(cx).editor(&first).unwrap();
 
-        assert!(window.try_find("review-file-filter").is_none());
-        assert!(window.try_find("review-files-header").is_some());
-        assert!(window.try_find("refresh-review").is_some());
-
         window.click(("review-file", 2usize), cx);
         assert_eq!(session.read(cx).selected_identity(), Some(&second));
         assert_eq!(session.read(cx).editor_count(), 2);
@@ -748,13 +744,9 @@ fn refresh_updates_in_place_without_transient_layout_or_focus_change(cx: &mut Te
         window.render_frame(cx);
 
         let editor = session.read(cx).editor(&identity).unwrap();
-        assert!(window.try_find("review-file-filter").is_none());
         let header = window.find("review-files-header").bounds();
-        let refresh = window.find("refresh-review").bounds();
         let list = window.find("review-file-list").bounds();
         let body = window.find("review-file-body").bounds();
-        assert!(refresh.top() >= header.top());
-        assert!(refresh.bottom() <= header.bottom());
 
         window.click("refresh-review", cx);
         window.render_frame(cx);

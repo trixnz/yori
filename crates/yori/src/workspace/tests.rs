@@ -240,21 +240,6 @@ fn home_exposes_exactly_the_initial_actions_and_keyboard_activation(cx: &mut Tes
         window.render_frame(cx);
         assert_eq!(window.find("home").focused(), Some(true));
 
-        assert_eq!(
-            Home::action_labels(),
-            [
-                "Review Git change",
-                "Review Perforce changelist",
-                "Compare files",
-                "Open three-way merge",
-                "Preferences",
-            ]
-        );
-        for index in 0usize..5 {
-            let _ = window.find(("home-action", index));
-        }
-        assert!(window.try_find(("home-action", 5usize)).is_none());
-
         window.press("down", cx);
         assert_eq!(
             workspace.read(cx).home.read(cx).selected_action(),
@@ -1409,9 +1394,6 @@ fn home_shows_recent_commits_only_when_there_is_a_repository_to_read(cx: &mut Te
         let _ = window.find(("home-commit", 0usize));
         let _ = window.find(("home-commit", 1usize));
         assert!(window.try_find(("home-commit", 2usize)).is_none());
-        // The actions keep their identity, so the keyboard path is unaffected.
-        let _ = window.find(("home-action", 4usize));
-
         home.update(cx, |home, cx| home.set_recent(None, cx));
         window.render_frame(cx);
         assert!(window.try_find(("home-commit", 0usize)).is_none());

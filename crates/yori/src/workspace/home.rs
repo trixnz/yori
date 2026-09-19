@@ -519,10 +519,6 @@ impl Home {
     pub(super) fn selected_action(&self) -> HomeAction {
         ACTIONS[self.selected]
     }
-
-    pub(super) fn action_labels() -> Vec<&'static str> {
-        ACTIONS.into_iter().map(HomeAction::label).collect()
-    }
 }
 
 pub(super) fn init(cx: &mut App) {
