@@ -13,6 +13,7 @@
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+      p4apiSha256 = "466352f49f585f514bfee13efcb927e93ea567bcc2dde200ef2c750d8555a0dc";
       p4apiFor = system:
         let pkgs = import nixpkgs { inherit system; };
         in
@@ -21,10 +22,22 @@
           hash = "sha256-F/9Qhf5cAiiDcy0RhhGNc2mT7LlB8VKpVxDL+SY6zcg=";
           url = "https://ftp.perforce.com/perforce/r25.1/bin.linux26x86_64/p4api-glibc2.3-openssl3.5.tgz";
         };
-      packageFor = system:
+      p4apiCacheFor = system:
         let
           pkgs = import nixpkgs { inherit system; };
           p4api = p4apiFor system;
+          target = "x86_64-unknown-linux-gnu";
+        in
+        pkgs.runCommand "yori-p4api-cache" { } ''
+          cache="$out/${target}/${p4apiSha256}"
+          mkdir -p "$cache"
+          ln -s "${p4api}" "$cache/root"
+          printf '%s\n' '${p4apiSha256}' > "$cache/complete"
+        '';
+      packageFor = system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          p4apiCache = p4apiCacheFor system;
           runtimeLibraries = with pkgs; [
             fontconfig
             freetype
@@ -59,7 +72,7 @@
             pkg-config
           ];
           buildInputs = runtimeLibraries;
-          P4API_ROOT = p4api;
+          P4API_CACHE_DIR = p4apiCache;
 
           # CI runs the complete suite. The package repeats only the native
           # provider tests so the pinned P4API and OpenSSL linkage is verified.
@@ -114,7 +127,7 @@
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
-          p4api = p4apiFor system;
+          p4apiCache = p4apiCacheFor system;
           runtimeLibraries = with pkgs; [
             fontconfig
             freetype
@@ -131,7 +144,7 @@
             ];
             buildInputs = runtimeLibraries;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibraries;
-            P4API_ROOT = p4api;
+            P4API_CACHE_DIR = p4apiCache;
           };
           kachePackage = kache.packages.${system}.kache;
         in {

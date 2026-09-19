@@ -94,17 +94,19 @@ extra-trusted-public-keys = trixnz-yori.cachix.org-1:v0OV3ETheOdXTYZRhtaDUeO5dEt
 ## Building from source
 
 Perforce review links Perforce's official C++ P4API rather than shelling out to the
-`p4` executable, so a source build needs that library in place before Cargo runs:
+`p4` executable. Cargo downloads the pinned P4API for the build target on first use,
+verifies its SHA-256, and reuses the extracted files from the platform cache.
+That cache lives under `%LOCALAPPDATA%\yori\p4api` on Windows and
+`$XDG_CACHE_HOME/yori/p4api` or `~/.cache/yori/p4api` on Linux:
 
 ```sh
-export P4API_ROOT="$(./scripts/fetch-p4api)"
 cargo build --release -p yori
 ```
 
-The fetch script downloads the pinned P4API for the host target and verifies its
-SHA-256 before extraction. P4API and the pinned OpenSSL 3.5 source are statically
-linked; building requires Perl and the platform C/C++ toolchain, but no system
-OpenSSL development package. Nix provisions the required build tools.
+P4API and the pinned OpenSSL 3.5 source are statically linked. Building requires
+`curl`, `tar`, Perl, and the platform C/C++ build toolchain, including `make` on
+Unix, but no system OpenSSL development package. Windows 10 and later include
+`curl` and `tar`; Nix provisions all required build tools and the P4API cache.
 
 The resulting binary carries P4API with it. Running yori needs no Perforce
 installation, though Perforce review still needs a reachable server and the client

@@ -18,9 +18,10 @@ depot content.
 
 ## Native artifacts
 
-The build expects `P4API_ROOT` to contain extracted `include/` and `lib/`
-directories. `scripts/fetch-p4api` provisions these pinned archives and verifies
-the archive SHA-256 before extraction.
+The build script downloads the pinned P4API archive for the target on first use,
+verifies its SHA-256, and reuses the extracted files from the platform cache.
+Set `P4API_CACHE_DIR` only when the cache must live somewhere other than the
+platform default, such as in CI or a Nix build.
 
 | Target | P4API 2025.1 patch 3042095 artifact | SHA-256 |
 | --- | --- | --- |
