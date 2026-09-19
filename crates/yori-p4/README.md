@@ -1,6 +1,6 @@
 # yori-p4
 
-`yori-p4` is Yori's safe asynchronous boundary around Perforce's official C++
+`yori-p4` is yori's safe asynchronous boundary around Perforce's official C++
 P4API. It does not invoke or require the `p4` executable.
 
 A dedicated worker enters the P4API thread runtime, creates and uses the
@@ -34,4 +34,4 @@ runtime OpenSSL dependency or mismatch. The Windows P4API artifact's `dyn`
 marker refers to its MSVC `/MD` runtime compatibility, not OpenSSL linkage.
 
 Binary packages must ship the repository's `THIRD_PARTY_NOTICES.md` alongside
-the Yori license. The Nix package installs both under `share/doc/yori`.
+the yori license. The Nix package installs both under `share/doc/yori`.

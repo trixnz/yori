@@ -1,6 +1,6 @@
 # Third-party notices
 
-Yori statically links Perforce P4API 2025.1 patch 3042095 and OpenSSL 3.5 for
+yori statically links Perforce P4API 2025.1 patch 3042095 and OpenSSL 3.5 for
 native Perforce access. The following notice is reproduced from the
 `clientlegal` object distributed in the pinned P4API archive.
 

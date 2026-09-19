@@ -71,7 +71,7 @@ impl Error {
         Self {
             kind: ErrorKind::InvalidResponse,
             message: message.into(),
-            remedy: Some("check that the server and Yori use compatible Perforce versions"),
+            remedy: Some("check that the server and yori use compatible Perforce versions"),
         }
     }
 
@@ -102,7 +102,7 @@ impl Error {
         Self {
             kind: ErrorKind::Lifecycle,
             message: format!("Perforce native {phase} failed: {}", detail.trim()),
-            remedy: Some("restart Yori; if the failure persists, reinstall the application"),
+            remedy: Some("restart yori; if the failure persists, reinstall the application"),
         }
     }
 

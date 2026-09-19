@@ -917,7 +917,7 @@ mod tests {
             parents.extend_from_slice(extra_parents);
             let time = format!("{} +0000", self.timestamp);
             let signature = gix::actor::SignatureRef {
-                name: "Yori fixture".into(),
+                name: "yori fixture".into(),
                 email: "fixture@example.com".into(),
                 time: &time,
             };
@@ -942,7 +942,7 @@ mod tests {
             let tree = write_tree(&self.repository, entries);
             let time = format!("{} +0000", self.timestamp);
             let signature = gix::actor::SignatureRef {
-                name: "Yori fixture".into(),
+                name: "yori fixture".into(),
                 email: "fixture@example.com".into(),
                 time: &time,
             };

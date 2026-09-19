@@ -168,7 +168,7 @@ impl Home {
                 div()
                     .text_size(px(22.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .child("Yori"),
+                    .child("yori"),
             )
             .child(
                 div()

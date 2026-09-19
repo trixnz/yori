@@ -11,7 +11,8 @@ restoration, conflict resolution, and multiple open files in a tabbed workspace.
 
 > [!NOTE]
 > yori is under active development. Linux remains the primary development platform.
-> Linux and Windows are tested in CI; macOS is not yet supported.
+> Linux and Windows are tested in CI; macOS is not yet supported. Perforce review is
+> new and needs a configured Perforce client in the directory yori is launched from.
 
 ## Features
 
@@ -92,6 +93,9 @@ extra-trusted-public-keys = trixnz-yori.cachix.org-1:v0OV3ETheOdXTYZRhtaDUeO5dEt
 
 ## Building from source
 
+Perforce review links Perforce's official C++ P4API rather than shelling out to the
+`p4` executable, so a source build needs that library in place before Cargo runs:
+
 ```sh
 export P4API_ROOT="$(./scripts/fetch-p4api)"
 cargo build --release -p yori
@@ -101,6 +105,10 @@ The fetch script downloads the pinned P4API for the host target and verifies its
 SHA-256 before extraction. P4API and the pinned OpenSSL 3.5 source are statically
 linked; building requires Perl and the platform C/C++ toolchain, but no system
 OpenSSL development package. Nix provisions the required build tools.
+
+The resulting binary carries P4API with it. Running yori needs no Perforce
+installation, though Perforce review still needs a reachable server and the client
+configuration described under [Usage](#reviewing-changes).
 
 ### Nix
 
@@ -143,6 +151,29 @@ invocations exit once the workspace accepts the request; they do not wait for ed
 or merge completion. External-tool integrations requiring that lifecycle remain
 experimental.
 
+### Reviewing changes
+
+Launch yori from a working tree to review a whole change rather than a file pair:
+
+```sh
+cd path/to/repository
+yori
+```
+
+Home lists recent commits from the repository yori was launched in, with uncommitted
+working changes above them, so the most likely review is one click away.
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd> opens the Git chooser, which also takes
+any revision by name — a commit, branch, or tag.
+
+A review opens as a single tab with a file navigator listing every changed file and
+its change counts. Working changes and Perforce pending changelists leave the local
+file editable and saveable; committed and submitted revisions open read-only on both
+sides.
+
+Perforce review reads the ambient configuration of the launch directory, including
+`P4CONFIG`, ticket, and trust files, and offers the pending and submitted changelists
+of that client.
+
 ## Keyboard shortcuts
 
 | Action | Shortcut |
@@ -164,6 +195,22 @@ Lists and the review navigator also accept <kbd>J</kbd> and <kbd>K</kbd> to move
 <kbd>Enter</kbd> or <kbd>Space</kbd> to open, and <kbd>Ctrl</kbd>+<kbd>H</kbd> /
 <kbd>Ctrl</kbd>+<kbd>L</kbd> to move between panes. On macOS, substitute
 <kbd>Cmd</kbd> for <kbd>Ctrl</kbd> in the table above.
+
+## Configuration
+
+Preferences live in `config.toml` under the platform configuration directory —
+`~/.config/yori/config.toml` on Linux. Open the dialog with
+<kbd>Ctrl</kbd>+<kbd>,</kbd>, or edit the file directly:
+
+```toml
+[editor]
+vim_keybindings = false
+show_whitespace = false
+show_change_connections = false
+```
+
+yori rewrites only the keys it owns, so comments and unrelated entries survive a
+change made through the dialog.
 
 ## Project structure
 
