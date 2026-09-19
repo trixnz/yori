@@ -117,6 +117,7 @@ struct LoadedText {
 
 impl LoadedText {
     fn load(comparison: &TextComparison) -> Result<Self, String> {
+        let capabilities = comparison.capabilities();
         let comparison = comparison.comparison().resolve()?;
         let Comparison::Diff(diff) = &comparison else {
             unreachable!("review text entries are always two-way comparisons");
@@ -130,27 +131,15 @@ impl LoadedText {
             diff.local.logical_path().to_owned(),
             files.document(DocumentRole::Local).clone(),
         );
-        let capabilities = comparison_capabilities(comparison);
 
         Ok(Self {
             files,
             left,
             right,
-            editable: capabilities.0,
-            saveable: capabilities.1,
+            editable: capabilities.editable,
+            saveable: capabilities.saveable,
         })
     }
-}
-
-fn comparison_capabilities(comparison: Comparison) -> (bool, bool) {
-    let Comparison::Diff(diff) = comparison else {
-        unreachable!("review text entries are always two-way comparisons");
-    };
-
-    (
-        diff.local.editable(),
-        diff.local.save_destination().is_some(),
-    )
 }
 
 /// The longest directory every reviewed file sits under. Naming it once keeps

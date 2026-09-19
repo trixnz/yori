@@ -329,6 +329,7 @@ impl P4Client {
         if cancellation.is_cancelled() {
             return Err(Error::cancelled());
         }
+
         let request_cancellation = Arc::new(crate::CancellationState::following(Arc::clone(
             &cancellation.state,
         )));

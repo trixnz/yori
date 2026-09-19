@@ -640,7 +640,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.picking_files || window.has_active_dialog(cx) {
+        if self.picking_files
+            || self.perforce_discovery == PerforceDiscovery::Loading
+            || window.has_active_dialog(cx)
+        {
             return;
         }
 
@@ -1064,7 +1067,7 @@ impl Workspace {
                     .with_size(px(28.0))
                     .accessibility_label("Open Git review")
                     .tooltip("Open Git review (Ctrl+Shift+G)")
-                    .disabled(self.picking_files)
+                    .disabled(opening)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.choose_git_review(&OpenGitReview, window, cx);
                     })),

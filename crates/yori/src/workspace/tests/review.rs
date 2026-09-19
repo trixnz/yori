@@ -1162,6 +1162,25 @@ fn invocation_routes_git_chooser_and_deduplication_to_the_invoking_repository(
 }
 
 #[gpui_kit::test]
+fn git_review_is_unavailable_while_perforce_discovery_runs(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let repository = tempfile::tempdir().unwrap();
+    gix::init(repository.path()).unwrap();
+
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.invocation_directory = Some(repository.path().to_owned());
+            workspace.perforce_discovery = PerforceDiscovery::Loading;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.click("open-git-review", cx);
+
+        assert!(workspace.read(cx).git_source_chooser.is_none());
+    });
+}
+
+#[gpui_kit::test]
 fn git_chooser_falls_back_to_the_active_local_comparison_repository(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
     let repository = tempfile::tempdir().unwrap();

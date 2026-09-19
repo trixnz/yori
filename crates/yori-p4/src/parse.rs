@@ -143,7 +143,12 @@ fn changelist_summaries(
             let id = record.required_text("change")?.parse().map_err(|_| {
                 Error::invalid_response("Perforce returned an invalid changelist identifier")
             })?;
-            let status = parse_status(record.text("status").as_deref()).unwrap_or(expected_status);
+            let status = match record.text("status") {
+                None => expected_status,
+                Some(value) => parse_status(Some(&value)).ok_or_else(|| {
+                    Error::invalid_response("Perforce returned an invalid changelist status")
+                })?,
+            };
 
             Ok(ChangelistSummary {
                 id,

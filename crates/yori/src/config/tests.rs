@@ -34,6 +34,25 @@ fn missing_configuration_uses_defaults() {
 }
 
 #[test]
+fn in_memory_updates_preserve_the_unavailable_configuration_diagnostic() {
+    let diagnostic = "cannot locate the platform configuration directory";
+    let editor = EditorConfig {
+        vim_keybindings: true,
+        show_whitespace: true,
+        show_change_connections: false,
+    };
+    let mut configuration = Configuration {
+        diagnostic: Some(diagnostic.into()),
+        ..Configuration::default()
+    };
+
+    configuration.update_editor(editor).unwrap();
+
+    assert_eq!(configuration.editor, editor);
+    assert_eq!(configuration.diagnostic.as_deref(), Some(diagnostic));
+}
+
+#[test]
 fn valid_configuration_survives_a_new_store() {
     let directory = tempfile::tempdir().unwrap();
     let path = path(&directory);

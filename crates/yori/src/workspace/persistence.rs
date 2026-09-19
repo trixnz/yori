@@ -271,6 +271,7 @@ impl Workspace {
         else {
             return false;
         };
+
         let session = session.clone();
         let view = cx.weak_entity();
         self.saving = true;

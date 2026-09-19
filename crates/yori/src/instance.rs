@@ -29,7 +29,7 @@ use interprocess::{
 
 use crate::invocation::InvocationRequest;
 
-const INSTANCE_NAME: &str = "io.github.trixnz.yori.instance.v1";
+const INSTANCE_NAME: &str = "io.github.trixnz.yori.instance.v2";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ELECTION_RETRY_INTERVAL: Duration = Duration::from_millis(10);

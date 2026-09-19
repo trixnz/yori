@@ -72,11 +72,13 @@ fn main() {
         println!("cargo:rustc-link-lib=static=libclient");
         println!("cargo:rustc-link-lib=static=librpc");
         println!("cargo:rustc-link-lib=static=libsupp");
+        println!("cargo:rustc-link-lib=static=libp4script_cstub");
 
         link_openssl();
 
         for library in [
-            "advapi32", "bcrypt", "crypt32", "iphlpapi", "kernel32", "oldnames", "user32", "ws2_32",
+            "advapi32", "bcrypt", "crypt32", "iphlpapi", "kernel32", "oldnames", "ole32",
+            "shell32", "user32", "ws2_32",
         ] {
             println!("cargo:rustc-link-lib={library}");
         }

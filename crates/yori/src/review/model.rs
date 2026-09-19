@@ -175,10 +175,6 @@ impl TextComparison {
         &self.comparison
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "provider integrations are deferred")
-    )]
     pub(crate) fn capabilities(&self) -> ReviewFileCapabilities {
         self.capabilities
     }

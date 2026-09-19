@@ -123,6 +123,8 @@ fn cli_forwards_invocation_directories_and_file_roles_before_exiting() {
     let name = instance_name();
     let repository_a = tempfile::tempdir().unwrap();
     let repository_b = tempfile::tempdir().unwrap();
+    let repository_a_path = repository_a.path().canonicalize().unwrap();
+    let repository_b_path = repository_b.path().canonicalize().unwrap();
     let (incoming, worker) = workspace_stub(&name, 5);
     let paths = paths();
 
@@ -131,9 +133,9 @@ fn cli_forwards_invocation_directories_and_file_roles_before_exiting() {
         .enumerate()
     {
         let directory = if index == 1 {
-            repository_b.path()
+            &repository_b_path
         } else {
-            repository_a.path()
+            &repository_a_path
         };
         let mut command = cli(&name, directory);
         command.args(&paths[..count]);
@@ -152,7 +154,7 @@ fn cli_forwards_invocation_directories_and_file_roles_before_exiting() {
                 .unwrap(),
             ]
         };
-        assert_eq!(invocation.directory, directory);
+        assert_eq!(invocation.directory, directory.as_path());
         assert_eq!(invocation.comparisons, expected);
         assert!(
             child.0.try_wait().unwrap().is_none(),

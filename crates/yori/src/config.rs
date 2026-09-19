@@ -76,7 +76,6 @@ impl Configuration {
     fn update_editor(&mut self, editor: EditorConfig) -> Result<(), String> {
         let Some(path) = &self.path else {
             self.editor = editor;
-            self.diagnostic = None;
             return Ok(());
         };
 
