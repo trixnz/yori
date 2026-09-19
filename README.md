@@ -1,14 +1,13 @@
-# yori
+<h1>
+  <img src="assets/platform/linux/hicolor/256x256/apps/io.github.trixnz.yori.png" width="32" alt="" valign="middle">
+  yori
+</h1>
 
-<p align="center">
-  <img src="assets/app-icon.png" width="128" alt="yori application icon">
-</p>
+yori is a native desktop application for diffing, merging, and reviewing source files.
 
-yori is a native desktop application for comparing and merging source files.
-
-It combines side-by-side review with direct editing, supporting two-way comparisons,
-three-way merges, change restoration, conflict resolution, and multiple open files in
-a tabbed workspace.
+It combines side-by-side comparison with direct editing, supporting two-way
+comparisons, three-way merges, multi-file reviews of Git and Perforce changes, change
+restoration, conflict resolution, and multiple open files in a tabbed workspace.
 
 > [!NOTE]
 > yori is under active development. Linux remains the primary development platform.
@@ -16,14 +15,30 @@ a tabbed workspace.
 
 ## Features
 
+### Compare and merge
+
 - Side-by-side two-way file comparison
-- Editable local files with undo and redo
-- Whole-change and selected-line restoration
 - Three-way merging with explicit conflict resolution
-- Multiple comparisons and merges in tabs
+- Whole-change and selected-line restoration
 - Synchronized scrolling and change navigation
-- Syntax highlighting for C, C++, Go, and Rust
 - Word- and token-level change highlighting
+- Multiple comparisons, merges, and reviews in tabs
+
+### Review
+
+- Multi-file review of any Git revision: a commit, branch, tag, or other revision
+- Review of uncommitted working changes, including untracked files
+- Perforce pending and submitted changelists through the native P4API, without the
+  `p4` executable
+- Keyboard-first file navigator with per-file change counts
+- Local files stay editable in working-change and pending-changelist reviews;
+  historical revisions open read-only
+- Binary files and submodules are listed with their status rather than diffed
+
+### Edit
+
+- Editable local files with undo and redo
+- Syntax highlighting for C, C++, Go, and Rust
 - Guarded saves with external file-change detection
 - Preservation of LF, CRLF, Unicode, tabs, and missing final newlines
 - Optional whitespace markers, change connections, and Vim-style input
@@ -134,13 +149,21 @@ experimental.
 | --- | --- |
 | Open a comparison | <kbd>Ctrl</kbd>+<kbd>O</kbd> |
 | Open a merge | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>M</kbd> |
+| Open a Git review | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd> |
+| Open Home | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> |
 | Save | <kbd>Ctrl</kbd>+<kbd>S</kbd> |
 | Close the active tab | <kbd>Ctrl</kbd>+<kbd>W</kbd> |
-| Open Home | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> |
-| Switch tabs | <kbd>Ctrl</kbd>+<kbd>Tab</kbd> |
+| Switch tabs | <kbd>Ctrl</kbd>+<kbd>Tab</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Tab</kbd> |
 | Visit the previous or next change | <kbd>Alt</kbd>+<kbd>Up</kbd> / <kbd>Alt</kbd>+<kbd>Down</kbd> |
 | Apply the selected-line action | <kbd>Alt</kbd>+<kbd>Enter</kbd> |
 | Undo or redo | <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> |
+| Open preferences | <kbd>Ctrl</kbd>+<kbd>,</kbd> |
+| Quit | <kbd>Ctrl</kbd>+<kbd>Q</kbd> |
+
+Lists and the review navigator also accept <kbd>J</kbd> and <kbd>K</kbd> to move,
+<kbd>Enter</kbd> or <kbd>Space</kbd> to open, and <kbd>Ctrl</kbd>+<kbd>H</kbd> /
+<kbd>Ctrl</kbd>+<kbd>L</kbd> to move between panes. On macOS, substitute
+<kbd>Cmd</kbd> for <kbd>Ctrl</kbd> in the table above.
 
 ## Project structure
 
