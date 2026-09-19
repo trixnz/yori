@@ -82,9 +82,6 @@ fn main() {
         ] {
             println!("cargo:rustc-link-lib={library}");
         }
-
-        // openssl-src's static objects reference a build-only PDB which is not shipped.
-        println!("cargo:rustc-link-arg=/IGNORE:4099");
     } else {
         println!("cargo:rustc-link-lib=static=client");
         println!("cargo:rustc-link-lib=static=rpc");
