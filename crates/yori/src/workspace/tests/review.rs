@@ -56,7 +56,9 @@ impl ReviewProvider for TestProvider {
 fn source(provider: Arc<TestProvider>, key: &str) -> ReviewSource {
     ReviewSource::new(
         ReviewSourceIdentity::new("test", key),
+        "Working changes — fixture",
         "Working changes",
+        "fixture",
         provider,
     )
 }
@@ -183,6 +185,48 @@ fn source_identity_deduplicates_and_navigation_lazily_retains_editors(cx: &mut T
 }
 
 #[gpui_kit::test]
+fn clicking_a_file_selects_it_and_hands_focus_to_its_editor(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let second = ReviewFileIdentity::new("second");
+    let manifest = ReviewManifest::new(vec![
+        text_file("first", "src/first.rs", "one\n", "ONE\n"),
+        text_file("second", "src/second.rs", "two\n", "TWO\n"),
+    ])
+    .unwrap();
+    let (_, session) = open_review(
+        &workspace,
+        source(TestProvider::new([manifest]), "click-focus"),
+        cx,
+    );
+
+    cx.update(|window, cx| {
+        session.update(cx, |session, cx| session.focus_navigator(window, cx));
+        window.render_frame(cx);
+        assert_eq!(window.find("review-file-list").focused(), Some(true));
+        // Parked here by the keyboard, so the list shows its focus.
+        assert!(session.read(cx).navigator_focus_is_visible());
+
+        // Selection commits on mouse down, so focus reaches the editor without
+        // a frame in between where the list still holds both.
+        window.click(("review-file", 1usize), cx);
+        window.render_frame(cx);
+
+        assert_eq!(session.read(cx).selected_identity(), Some(&second));
+        let editor = session.read(cx).editor(&second).unwrap();
+        assert!(editor.focus_handle(cx).contains_focused(window, cx));
+        assert_ne!(window.find("review-file-list").focused(), Some(true));
+        // The press never rests in the navigator, so it must not light it up
+        // on the way through to the editor.
+        assert!(!session.read(cx).navigator_focus_is_visible());
+
+        // Returning by keyboard shows focus again.
+        session.update(cx, |session, cx| session.focus_navigator(window, cx));
+        window.render_frame(cx);
+        assert!(session.read(cx).navigator_focus_is_visible());
+    });
+}
+
+#[gpui_kit::test]
 fn refresh_keeps_dirty_removed_files_and_drops_clean_removed_files(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
     let kept = ReviewFileIdentity::new("kept");
@@ -203,6 +247,9 @@ fn refresh_keeps_dirty_removed_files_and_drops_clean_removed_files(cx: &mut Test
     let (_, session) = open_review(&workspace, source(provider.clone(), "dirty-removal"), cx);
 
     let removed_editor = cx.update(|window, cx| {
+        // The navigator orders files by path, so src/removed.rs sits below
+        // src/kept.rs; select it explicitly rather than relying on that order.
+        window.click(("review-file", 1usize), cx);
         edit_active(window, cx, "dirty ");
         let editor = session.read(cx).editor(&removed).unwrap();
         window.click("refresh-review", cx);
@@ -622,7 +669,7 @@ fn navigator_displays_a_fresh_file_before_syntax_highlighting_finishes(cx: &mut 
 #[gpui_kit::test]
 fn navigator_keyboard_selection_scrolls_beyond_one_viewport(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
-    let files = (0..40)
+    let files = (0..80)
         .map(|index| {
             ReviewFile::binary(
                 ReviewFileIdentity::new(format!("binary-{index}")),
@@ -641,14 +688,14 @@ fn navigator_keyboard_selection_scrolls_beyond_one_viewport(cx: &mut TestAppCont
 
     cx.update(|window, cx| {
         session.update(cx, |session, cx| session.focus_navigator(window, cx));
-        for _ in 0..30 {
+        for _ in 0..60 {
             window.press("j", cx);
         }
         window.render_frame(cx);
         window.render_frame(cx);
 
         let list = window.find("review-file-list").bounds();
-        let selected = window.find(("review-file", 29usize));
+        let selected = window.find(("review-file", 59usize));
         assert_eq!(selected.selected(), Some(true));
         assert!(selected.bounds().bottom() > list.top());
         assert!(
@@ -662,7 +709,7 @@ fn navigator_keyboard_selection_scrolls_beyond_one_viewport(cx: &mut TestAppCont
 
         window.press("k", cx);
         window.render_frame(cx);
-        assert_eq!(window.find(("review-file", 28usize)).selected(), Some(true));
+        assert_eq!(window.find(("review-file", 58usize)).selected(), Some(true));
     });
 }
 

@@ -233,10 +233,7 @@ impl PerforceContext {
     }
 
     pub(crate) fn pending_source(&self, summary: &ChangelistSummary) -> ReviewSource {
-        self.source(
-            PerforceReviewKind::Pending(summary.id),
-            source_label("Pending", summary),
-        )
+        self.source(PerforceReviewKind::Pending(summary.id), "Pending", summary)
     }
 
     pub(crate) fn submitted_source(
@@ -247,10 +244,7 @@ impl PerforceContext {
             return Err("submitted changelists must have a number".into());
         };
 
-        Ok(self.source(
-            PerforceReviewKind::Submitted(number),
-            source_label("Submitted", summary),
-        ))
+        Ok(self.source(PerforceReviewKind::Submitted(number), "Submitted", summary))
     }
 
     pub(crate) fn source_for_number(&self, number: NonZeroU32) -> ProviderResult<ReviewSource> {
@@ -268,13 +262,13 @@ impl PerforceContext {
 
                 Ok(self.source(
                     PerforceReviewKind::Pending(ChangelistId::Number(number)),
-                    source_label("Pending", summary),
+                    "Pending",
+                    summary,
                 ))
             }
-            ChangelistStatus::Submitted => Ok(self.source(
-                PerforceReviewKind::Submitted(number),
-                source_label("Submitted", summary),
-            )),
+            ChangelistStatus::Submitted => {
+                Ok(self.source(PerforceReviewKind::Submitted(number), "Submitted", summary))
+            }
         }
     }
 
@@ -298,7 +292,12 @@ impl PerforceContext {
         }
     }
 
-    fn source(&self, kind: PerforceReviewKind, label: String) -> ReviewSource {
+    fn source(
+        &self,
+        kind: PerforceReviewKind,
+        descriptor: &'static str,
+        summary: &ChangelistSummary,
+    ) -> ReviewSource {
         let key = match kind {
             PerforceReviewKind::Pending(changelist) => format!(
                 "{} | {} | pending {changelist}",
@@ -316,9 +315,12 @@ impl PerforceContext {
             kind,
         };
 
+        let headline = source_headline(summary);
         ReviewSource::new(
             ReviewSourceIdentity::new(PROVIDER_NAME, key),
-            label,
+            format!("{descriptor} {headline}"),
+            descriptor,
+            headline,
             Arc::new(provider),
         )
     }
@@ -375,7 +377,9 @@ impl PerforceConnection for StaticTestConnection {
     }
 }
 
-fn source_label(prefix: &str, summary: &ChangelistSummary) -> String {
+/// Names a changelist by number and first description line, without the
+/// pending/submitted prefix that `ReviewSource::kind` already carries.
+fn source_headline(summary: &ChangelistSummary) -> String {
     let description = summary
         .description
         .lines()
@@ -384,9 +388,9 @@ fn source_label(prefix: &str, summary: &ChangelistSummary) -> String {
         .trim();
 
     if description.is_empty() {
-        format!("{prefix} {}", summary.id)
+        summary.id.to_string()
     } else {
-        format!("{prefix} {}: {description}", summary.id)
+        format!("{}: {description}", summary.id)
     }
 }
 

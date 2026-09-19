@@ -6,7 +6,10 @@ use std::{
     sync::Arc,
 };
 
+use yori_diff::{Alignment, DiffKind};
+
 use crate::comparison::{Comparison, ComparisonDocument};
+use crate::workspace::files::{Files, Role};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ReviewSourceIdentity {
@@ -30,7 +33,16 @@ impl ReviewSourceIdentity {
 #[derive(Clone)]
 pub(crate) struct ReviewSource {
     pub identity: ReviewSourceIdentity,
+    /// The full title, used where a review needs to be named on its own, such
+    /// as a workspace tab.
     pub label: Arc<str>,
+    /// What sort of change this is — "Commit", "Working changes", "Pending".
+    /// Shown as context beside the review's summary, never on its own.
+    pub kind: &'static str,
+    /// The part of the title that distinguishes this review from its siblings,
+    /// with any `kind` stripped off. This is what the navigator header leads
+    /// with, so it must survive truncation.
+    pub headline: Arc<str>,
     pub provider: Arc<dyn ReviewProvider>,
 }
 
@@ -38,11 +50,15 @@ impl ReviewSource {
     pub(crate) fn new(
         identity: ReviewSourceIdentity,
         label: impl Into<Arc<str>>,
+        kind: &'static str,
+        headline: impl Into<Arc<str>>,
         provider: Arc<dyn ReviewProvider>,
     ) -> Self {
         Self {
             identity,
             label: label.into(),
+            kind,
+            headline: headline.into(),
             provider,
         }
     }
@@ -92,6 +108,20 @@ impl ReviewFileStatus {
             Self::Deleted => "Deleted",
             Self::Renamed { .. } => "Renamed",
         }
+    }
+}
+
+/// Added and removed line counts for one reviewed file. Measuring is best
+/// effort, so an unmeasured or unmeasurable file simply carries no stat.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DiffStat {
+    pub added: usize,
+    pub removed: usize,
+}
+
+impl DiffStat {
+    pub(crate) fn total(self) -> usize {
+        self.added + self.removed
     }
 }
 
@@ -178,6 +208,8 @@ pub(crate) struct ReviewFile {
     pub logical_path: PathBuf,
     pub status: ReviewFileStatus,
     pub kind: ReviewFileKind,
+    /// Filled in after the manifest loads; see `ReviewManifest::measure`.
+    pub stat: Option<DiffStat>,
 }
 
 impl ReviewFile {
@@ -192,6 +224,7 @@ impl ReviewFile {
             logical_path,
             status,
             kind: ReviewFileKind::Text(comparison),
+            stat: None,
         }
     }
 
@@ -208,6 +241,7 @@ impl ReviewFile {
             kind: ReviewFileKind::Binary {
                 explanation: explanation.into(),
             },
+            stat: None,
         }
     }
 
@@ -226,6 +260,7 @@ impl ReviewFile {
                 old_identifier: old_identifier.into(),
                 new_identifier: new_identifier.into(),
             },
+            stat: None,
         }
     }
 
@@ -240,6 +275,25 @@ pub(crate) struct ReviewManifest {
 }
 
 impl ReviewManifest {
+    /// Measures added and removed line counts for every text file. This resolves
+    /// and diffs each file's content, so callers run it off the main thread. A
+    /// file that cannot be measured keeps its empty stat rather than failing the
+    /// manifest — the counts are decoration, not correctness.
+    /// Orders files by path so that the navigator can group them by directory.
+    /// Providers are free to build a manifest in whatever order suits them.
+    pub(crate) fn sort(&mut self) {
+        self.files
+            .sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+    }
+
+    pub(crate) fn measure(&mut self) {
+        for file in &mut self.files {
+            if let ReviewFileKind::Text(comparison) = &file.kind {
+                file.stat = measure_text(comparison);
+            }
+        }
+    }
+
     pub(crate) fn new(files: Vec<ReviewFile>) -> Result<Self, String> {
         let mut identities = std::collections::HashSet::new();
         for file in &files {
@@ -253,6 +307,31 @@ impl ReviewManifest {
 
         Ok(Self { files })
     }
+}
+
+/// Counts the changed lines on each side of a two-way text comparison. Every
+/// changed row contributes to the side it actually occupies, so a modified row
+/// counts once as removed and once as added, matching `git diff --numstat`.
+fn measure_text(comparison: &TextComparison) -> Option<DiffStat> {
+    let resolved = comparison.comparison().resolve().ok()?;
+    let files = Files::load(&resolved).ok()?;
+    let alignment = Alignment::between(files.document(Role::Baseline), files.document(Role::Local));
+
+    let mut stat = DiffStat::default();
+    for row in alignment.rows() {
+        if row.kind == DiffKind::Equal {
+            continue;
+        }
+
+        if row.left.is_some() {
+            stat.removed += 1;
+        }
+        if row.right.is_some() {
+            stat.added += 1;
+        }
+    }
+
+    Some(stat)
 }
 
 #[cfg(test)]
@@ -303,6 +382,47 @@ mod tests {
             deleted.local.content(),
             DocumentContent::Memory(bytes) if bytes.is_empty()
         ));
+    }
+
+    #[test]
+    fn measuring_counts_changed_lines_on_the_side_they_occupy() {
+        let path = PathBuf::from("src/lib.rs");
+        let comparison = TextComparison::new(
+            ComparisonDocument::read_only_memory(path.clone(), b"a\nb\nc\n".to_vec()),
+            ComparisonDocument::read_only_memory(path.clone(), b"a\nB\nc\nd\n".to_vec()),
+        )
+        .unwrap();
+        let binary = ReviewFile::binary(
+            ReviewFileIdentity::new("logo"),
+            "logo.png".into(),
+            ReviewFileStatus::Modified,
+            "Binary content cannot be displayed.",
+        );
+        let mut manifest = ReviewManifest::new(vec![
+            ReviewFile::text(
+                ReviewFileIdentity::new("lib"),
+                path,
+                ReviewFileStatus::Modified,
+                comparison,
+            ),
+            binary,
+        ])
+        .unwrap();
+
+        assert!(manifest.files.iter().all(|file| file.stat.is_none()));
+        manifest.measure();
+
+        // The rewritten line counts on both sides; the appended line only adds.
+        assert_eq!(
+            manifest.files[0].stat,
+            Some(DiffStat {
+                added: 2,
+                removed: 1
+            })
+        );
+        assert_eq!(manifest.files[0].stat.unwrap().total(), 3);
+        // Binary files have no lines to count, so they stay unmeasured.
+        assert_eq!(manifest.files[1].stat, None);
     }
 
     #[test]

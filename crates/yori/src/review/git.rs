@@ -64,9 +64,12 @@ impl GitRepository {
 
     pub(crate) fn working_source(&self) -> ReviewSource {
         let key = format!("{}:working", self.work_dir.display());
+        let repository = repository_name(&self.work_dir);
         ReviewSource::new(
             ReviewSourceIdentity::new("git", key),
-            format!("Working changes — {}", repository_name(&self.work_dir)),
+            format!("Working changes — {repository}"),
+            "Working changes",
+            repository,
             Arc::new(GitProvider {
                 work_dir: self.work_dir.clone(),
                 source: GitSource::Working,
@@ -84,9 +87,12 @@ impl GitRepository {
             .map_or_else(|_| id.to_string()[..7].to_owned(), |id| id.to_string());
         let key = format!("{}:commit:{id}", self.identity.display());
 
+        let headline = format!("{short_id} {title}");
         Ok(ReviewSource::new(
             ReviewSourceIdentity::new("git", key),
-            format!("{short_id} {title}"),
+            headline.clone(),
+            "Commit",
+            headline,
             Arc::new(GitProvider {
                 work_dir: self.work_dir.clone(),
                 source: GitSource::Commit(id),

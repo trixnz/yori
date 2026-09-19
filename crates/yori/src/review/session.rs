@@ -1,18 +1,27 @@
 //! Native review-session surface and lifecycle.
 
-use std::{collections::HashMap, collections::VecDeque, rc::Rc};
+use std::{
+    collections::HashMap,
+    collections::VecDeque,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable,
     button::{Button, ButtonVariants},
     scroll::ScrollableElement,
+    tooltip::Tooltip,
 };
 use gpui_kit::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyBinding, ParentElement, Render, Role as AccessibilityRole, ScrollHandle,
-    StatefulInteractiveElement, Styled, Subscription, TestSupportExt, Window, div,
-    prelude::FluentBuilder, px,
+    AnyElement, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement, Render,
+    Role as AccessibilityRole, ScrollHandle, StatefulInteractiveElement, Styled, Subscription,
+    TestSupportExt, Window, div, prelude::FluentBuilder, px,
 };
+
+use yori::document_info::path_labels;
 
 use crate::{
     comparison::Comparison,
@@ -22,7 +31,8 @@ use crate::{
 };
 
 use super::model::{
-    ReviewFile, ReviewFileIdentity, ReviewFileKind, ReviewManifest, ReviewSource, TextComparison,
+    DiffStat, ReviewFile, ReviewFileIdentity, ReviewFileKind, ReviewManifest, ReviewSource,
+    TextComparison,
 };
 
 const NAVIGATOR_KEY_CONTEXT: &str = "ReviewNavigator";
@@ -97,12 +107,6 @@ struct ReviewEditor {
     files: Files,
 }
 
-#[derive(Clone, Copy)]
-enum FileSelectionFocus {
-    Content,
-    Navigator,
-}
-
 struct LoadedText {
     files: Files,
     left: PaneDocument,
@@ -149,6 +153,216 @@ fn comparison_capabilities(comparison: Comparison) -> (bool, bool) {
     )
 }
 
+/// The longest directory every reviewed file sits under. Naming it once keeps
+/// it off the front of every heading, where it would be the part of the path
+/// that carries no information. `None` when the files share nothing.
+fn common_directory<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Option<PathBuf> {
+    let mut shared: Option<Vec<OsString>> = None;
+
+    for path in paths {
+        let parent = path
+            .parent()
+            .map(|parent| {
+                parent
+                    .components()
+                    .map(|component| component.as_os_str().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        shared = Some(match shared {
+            None => parent,
+            Some(shared) => shared
+                .into_iter()
+                .zip(parent)
+                .take_while(|(shared, parent)| shared == parent)
+                .map(|(shared, _)| shared)
+                .collect(),
+        });
+    }
+
+    let shared = shared?;
+    (!shared.is_empty()).then(|| shared.into_iter().collect())
+}
+
+/// The heading a file belongs under, relative to the review's shared base.
+fn group_directory(path: &Path, base: Option<&Path>) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    base.and_then(|base| parent.strip_prefix(base).ok())
+        .unwrap_or(parent)
+        .to_path_buf()
+}
+
+/// Files sitting directly in the shared base need no heading — the base line
+/// above them already names their directory. Without a shared base, a file at
+/// the repository root still needs one, or it would look like part of the run
+/// above it.
+fn heading_is_shown(directory: &Path, base: Option<&Path>) -> bool {
+    !directory.as_os_str().is_empty() || base.is_none()
+}
+
+/// Counts the elements that precede an entry's row but are not rows themselves.
+/// Rendering and scrolling both go through this so the two cannot disagree.
+fn leading_elements(entries: &[&SessionEntry], entry_index: usize) -> usize {
+    let base = common_directory(entries.iter().map(|entry| entry.file.path()));
+    let mut count = usize::from(base.is_some());
+    let mut group: Option<PathBuf> = None;
+
+    for entry in entries.iter().take(entry_index + 1) {
+        let directory = group_directory(entry.file.path(), base.as_deref());
+        if group.as_ref() != Some(&directory) {
+            if heading_is_shown(&directory, base.as_deref()) {
+                count += 1;
+            }
+            group = Some(directory);
+        }
+    }
+
+    count
+}
+
+/// Names the directory the whole review sits under, once, above the first run.
+fn render_base_directory(base: &Path, cx: &App) -> AnyElement {
+    div()
+        .id("review-base-directory")
+        .test_support()
+        .px(px(10.0))
+        .pt(px(8.0))
+        .pb(px(2.0))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis_start()
+        .text_size(px(11.0))
+        .text_color(cx.theme().muted_foreground)
+        .child(format!("{}/", base.display()))
+        .into_any_element()
+}
+
+/// Names the directory a run of files shares. Truncation drops the front of the
+/// path because the trailing segments are what tell two directories apart.
+fn render_directory_heading(directory: &Path, index: usize, cx: &App) -> AnyElement {
+    let label = if directory.as_os_str().is_empty() {
+        "/".to_owned()
+    } else {
+        directory.display().to_string()
+    };
+
+    div()
+        .id(("review-directory-heading", index))
+        .test_support()
+        .px(px(10.0))
+        .pt(px(10.0))
+        .pb(px(2.0))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis_start()
+        .text_size(px(11.0))
+        .text_color(cx.theme().muted_foreground)
+        .child(label)
+        .into_any_element()
+}
+
+/// Everything the navigator shows about one file apart from its status badge.
+struct FileRowLabels {
+    index: usize,
+    name: String,
+    old_path: Option<String>,
+    warning: Option<&'static str>,
+    stat: Option<DiffStat>,
+    modified: bool,
+    /// The full path, shown on hover because both label lines are truncated.
+    tooltip: String,
+}
+
+/// Renders a file by name alone; the directory it sits in comes from the group
+/// heading above it, so a deep path costs nothing in the scan column.
+fn render_file_labels(labels: FileRowLabels, cx: &App) -> impl IntoElement + use<> {
+    let FileRowLabels {
+        index,
+        name,
+        old_path,
+        warning,
+        stat,
+        modified,
+        tooltip,
+    } = labels;
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .child(
+            div()
+                .h(px(18.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .id(("review-file-name", index))
+                        .test_support()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis_middle()
+                        .child(name)
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)),
+                )
+                .children(stat.map(|stat| render_stat(stat, index)))
+                .child(
+                    div()
+                        .size(px(6.0))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .bg(if modified {
+                            cx.theme().foreground
+                        } else {
+                            cx.theme().transparent
+                        }),
+                ),
+        )
+        .children(old_path.map(|path| {
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis_middle()
+                .text_size(px(11.0))
+                .text_color(cx.theme().muted_foreground)
+                .child(path)
+        }))
+        .children(warning.map(|warning| {
+            div()
+                .text_size(px(11.0))
+                .text_color(crate::appearance::removed().marker)
+                .child(warning)
+        }))
+}
+
+/// Renders one file's line counts as `+12 -3`, dropping a side that did not
+/// change so an addition-only file reads as a single number.
+fn render_stat(stat: DiffStat, index: usize) -> impl IntoElement {
+    div()
+        .id(("review-file-stat", index))
+        .test_support()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(px(11.0))
+        .children((stat.added > 0).then(|| {
+            div()
+                .text_color(crate::appearance::added().marker)
+                .child(format!("+{}", stat.added))
+        }))
+        .children((stat.removed > 0).then(|| {
+            div()
+                .text_color(crate::appearance::removed().marker)
+                .child(format!("\u{2212}{}", stat.removed))
+        }))
+}
+
 pub(crate) type SaveCompletion = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 
 struct SaveRun {
@@ -162,6 +376,12 @@ pub(crate) struct ReviewSession {
     selected: Option<ReviewFileIdentity>,
     editors: HashMap<ReviewFileIdentity, ReviewEditor>,
     navigator_focus: FocusHandle,
+    /// Whether the navigator should *look* focused, in the spirit of the web's
+    /// `:focus-visible`. Holding focus and showing it are different questions:
+    /// a click passes through navigator focus on its way to the editor, and
+    /// drawing that is a flash with no state behind it. Only the keyboard, which
+    /// can rest here and move the selection without committing, turns it on.
+    navigator_focus_visible: bool,
     navigator_scroll: ScrollHandle,
     non_text_body_focus: FocusHandle,
     refreshing: bool,
@@ -177,6 +397,7 @@ impl ReviewSession {
             selected: None,
             editors: HashMap::new(),
             navigator_focus: cx.focus_handle(),
+            navigator_focus_visible: true,
             navigator_scroll: ScrollHandle::new(),
             non_text_body_focus: cx.focus_handle(),
             refreshing: false,
@@ -203,17 +424,20 @@ impl ReviewSession {
         }
     }
 
-    pub(crate) fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = self.active_editor() {
             editor.focus_handle(cx).focus(window, cx);
         } else if self.selected_is_non_text() {
             self.non_text_body_focus.focus(window, cx);
         } else {
-            self.navigator_focus.focus(window, cx);
+            // Nothing to open, so the navigator is where focus comes to rest
+            // rather than somewhere it passes through.
+            self.focus_navigator(window, cx);
         }
     }
 
-    pub(crate) fn focus_navigator(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_navigator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigator_focus_visible = true;
         self.navigator_focus.focus(window, cx);
     }
 
@@ -240,9 +464,13 @@ impl ReviewSession {
 
         let provider = self.source.provider.clone();
         let identity = self.source.identity.clone();
-        let load = cx
-            .background_executor()
-            .spawn(async move { provider.load_manifest(&identity) });
+        let load = cx.background_executor().spawn(async move {
+            provider.load_manifest(&identity).map(|mut manifest| {
+                manifest.sort();
+                manifest.measure();
+                manifest
+            })
+        });
         cx.spawn_in(window, async move |view, cx| {
             let result = load.await;
             let _ = view.update_in(cx, |this, window, cx| {
@@ -475,7 +703,7 @@ impl ReviewSession {
             window,
             |this, _, boundary: &PaneFocusBoundary, window, cx| {
                 if *boundary == PaneFocusBoundary::Previous {
-                    this.navigator_focus.focus(window, cx);
+                    this.focus_navigator(window, cx);
                     cx.notify();
                 }
             },
@@ -497,7 +725,6 @@ impl ReviewSession {
     fn select(
         &mut self,
         identity: ReviewFileIdentity,
-        focus: FileSelectionFocus,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -512,10 +739,9 @@ impl ReviewSession {
         self.selected = Some(identity);
         self.reveal_selected();
 
-        match focus {
-            FileSelectionFocus::Content => self.focus_active(window, cx),
-            FileSelectionFocus::Navigator => self.navigator_focus.focus(window, cx),
-        }
+        // Selecting keeps the keyboard in the navigator. Callers that want the
+        // content instead, such as a click or Enter, move focus themselves.
+        self.navigator_focus.focus(window, cx);
 
         cx.notify();
     }
@@ -681,7 +907,17 @@ impl ReviewSession {
             return;
         };
 
-        self.navigator_scroll.scroll_to_item(index);
+        self.navigator_scroll
+            .scroll_to_item(self.element_index(index));
+    }
+
+    /// Maps an entry's position among the files to its position among the list's
+    /// children, which also hold the base line and one heading per directory
+    /// run. Scrolling addresses children, so the two indices only agree in a
+    /// repository flat enough to need no headings at all.
+    fn element_index(&self, entry_index: usize) -> usize {
+        let visible = self.entries.iter().collect::<Vec<_>>();
+        entry_index + leading_elements(&visible, entry_index)
     }
 
     fn move_file_selection(&mut self, offset: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -705,12 +941,8 @@ impl ReviewSession {
             },
         );
 
-        self.select(
-            visible[next].clone(),
-            FileSelectionFocus::Navigator,
-            window,
-            cx,
-        );
+        self.navigator_focus_visible = true;
+        self.select(visible[next].clone(), window, cx);
     }
 
     fn select_previous_file(
@@ -750,7 +982,56 @@ impl ReviewSession {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigator_focus.focus(window, cx);
+        self.focus_navigator(window, cx);
+    }
+
+    /// Sums the measured line counts across every file in the review.
+    fn totals(&self) -> DiffStat {
+        self.entries
+            .iter()
+            .filter_map(|entry| entry.file.stat)
+            .fold(DiffStat::default(), |mut total, stat| {
+                total.added += stat.added;
+                total.removed += stat.removed;
+                total
+            })
+    }
+
+    /// Lays the navigator out as runs of files under the directory they share.
+    /// Entries arrive sorted by path, so a run is simply a stretch of rows whose
+    /// directory has not changed. Headings are relative to the directory the
+    /// whole review shares, which is named once at the top instead of repeating
+    /// at the front of every heading.
+    fn render_file_groups(
+        &self,
+        visible: &[&SessionEntry],
+        selected: Option<&ReviewFileIdentity>,
+        navigator_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let base = common_directory(visible.iter().map(|entry| entry.file.path()));
+        let mut elements = Vec::with_capacity(visible.len() + 1);
+        if let Some(base) = &base {
+            elements.push(render_base_directory(base, cx));
+        }
+
+        let mut group: Option<PathBuf> = None;
+        for (index, entry) in visible.iter().enumerate() {
+            let directory = group_directory(entry.file.path(), base.as_deref());
+            if group.as_ref() != Some(&directory) {
+                if heading_is_shown(&directory, base.as_deref()) {
+                    elements.push(render_directory_heading(&directory, index, cx));
+                }
+                group = Some(directory);
+            }
+
+            elements.push(
+                self.render_file_row(index, visible.len(), entry, selected, navigator_focused, cx)
+                    .into_any_element(),
+            );
+        }
+
+        elements
     }
 
     fn render_file_row(
@@ -769,6 +1050,8 @@ impl ReviewSession {
             .get(&identity)
             .is_some_and(|state| state.editor.read(cx).needs_save());
         let path = entry.file.path().to_string_lossy().into_owned();
+        let (name, _) = path_labels(entry.file.path());
+        let stat = entry.file.stat.filter(|stat| stat.total() > 0);
         let old_path = match &entry.file.status {
             super::model::ReviewFileStatus::Renamed { from } => {
                 Some(format!("from {}", from.display()))
@@ -801,16 +1084,39 @@ impl ReviewSession {
             .aria_selected(is_selected)
             .relative()
             .px(px(10.0))
-            .py(px(8.0))
+            .py(px(6.0))
             .flex()
-            .items_center()
+            .items_start()
             .gap(px(8.0))
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .when(is_selected, |row| row.bg(cx.theme().accent))
+            // Selection says which file is open; brightness says whether the
+            // keyboard is in this list. One element carries both, so moving
+            // focus does not light up a second part of the sidebar.
+            .when(is_selected, |row| {
+                row.bg(if navigator_focused {
+                    cx.theme().selection
+                } else {
+                    cx.theme().accent
+                })
+            })
+            .when(!is_selected, |row| {
+                row.hover(|row| row.bg(cx.theme().secondary_hover))
+            })
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.select(identity.clone(), FileSelectionFocus::Content, window, cx);
+            // Selection commits on press and focus moves on release. Pressing
+            // focuses the list either way, so selecting on release would leave
+            // a frame where the list is focused but the previous row is still
+            // the selected one — lighting up the row being left behind. The
+            // focus transfer waits for release because the press-time focus
+            // change lands after this handler and would undo it.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.navigator_focus_visible = false;
+                    this.select(identity.clone(), window, cx);
+                }),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.focus_active(window, cx);
             }))
             .children((is_selected && navigator_focused).then(|| {
                 div()
@@ -819,73 +1125,75 @@ impl ReviewSession {
                     .top_0()
                     .bottom_0()
                     .w(px(2.0))
-                    .bg(cx.theme().foreground.opacity(0.75))
+                    .bg(cx.theme().ring)
             }))
             .child(
                 div()
                     .id(("review-status-badge", index))
                     .test_support()
                     .w(px(20.0))
+                    .h(px(18.0))
                     .flex_shrink_0()
                     .text_center()
                     .text_color(badge_color)
                     .child(badge),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(path)
-                    .children(old_path.map(|path| {
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(path)
-                    })),
-            )
-            .children(warning.map(|warning| {
-                div()
-                    .text_color(crate::appearance::removed().marker)
-                    .child(warning)
-            }))
-            .child(div().size(px(6.0)).rounded_full().bg(if modified {
-                cx.theme().foreground
-            } else {
-                cx.theme().transparent
-            }))
+            .child(render_file_labels(
+                FileRowLabels {
+                    index,
+                    name,
+                    old_path,
+                    warning,
+                    stat,
+                    modified,
+                    tooltip: path,
+                },
+                cx,
+            ))
     }
 
-    fn render_navigator(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let visible = self.entries.iter().collect::<Vec<_>>();
-        let selected = self.selected.clone();
-        let visible_count = visible.len();
-        let navigator_focused = self.navigator_focus.is_focused(window);
+    /// Names the change under review, then summarises how big it is. The label
+    /// is whatever the provider called the source: a commit subject for Git, a
+    /// changelist for Perforce.
+    fn render_navigator_header(
+        &self,
+        visible_count: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let headline = self.source.headline.to_string();
+        let tooltip = self.source.label.to_string();
+        let totals = self.totals();
 
         div()
-            .w(px(280.0))
-            .h_full()
-            .flex_shrink_0()
+            .id("review-files-header")
+            .test_support()
+            .px(px(8.0))
+            .py(px(6.0))
             .flex()
             .flex_col()
-            .border_r_1()
+            .gap(px(2.0))
+            .border_b_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
             .child(
                 div()
-                    .id("review-files-header")
-                    .test_support()
-                    .px(px(8.0))
-                    .py(px(6.0))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .when(navigator_focused, |header| {
-                        header.bg(cx.theme().accent.opacity(0.65))
-                    })
-                    .child(div().flex_1().min_w_0().child("Files"))
+                    .child(
+                        div()
+                            .id("review-source-label")
+                            .test_support()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis_middle()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(headline)
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(tooltip.clone()).build(window, cx)
+                            }),
+                    )
                     .child(
                         Button::new("refresh-review")
                             .icon(gpui_kit::assets::IconName::RefreshCw)
@@ -899,6 +1207,51 @@ impl ReviewSession {
                             })),
                     ),
             )
+            .child(
+                div()
+                    .id("review-source-summary")
+                    .test_support()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(11.0))
+                    .child(div().text_color(cx.theme().muted_foreground).child(
+                        if visible_count == 1 {
+                            format!("{} \u{b7} 1 file", self.source.kind)
+                        } else {
+                            format!("{} \u{b7} {visible_count} files", self.source.kind)
+                        },
+                    ))
+                    .children((totals.added > 0).then(|| {
+                        div()
+                            .text_color(crate::appearance::added().marker)
+                            .child(format!("+{}", totals.added))
+                    }))
+                    .children((totals.removed > 0).then(|| {
+                        div()
+                            .text_color(crate::appearance::removed().marker)
+                            .child(format!("\u{2212}{}", totals.removed))
+                    })),
+            )
+    }
+
+    fn render_navigator(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let visible = self.entries.iter().collect::<Vec<_>>();
+        let selected = self.selected.clone();
+        let visible_count = visible.len();
+        let navigator_focused =
+            self.navigator_focus.is_focused(window) && self.navigator_focus_visible;
+
+        div()
+            .w(px(280.0))
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .child(self.render_navigator_header(visible_count, cx))
             .child(
                 div()
                     .id("review-file-list")
@@ -921,16 +1274,12 @@ impl ReviewSession {
                             .size_full()
                             .track_scroll(&self.navigator_scroll)
                             .overflow_y_scroll()
-                            .children(visible.into_iter().enumerate().map(|(index, entry)| {
-                                self.render_file_row(
-                                    index,
-                                    visible_count,
-                                    entry,
-                                    selected.as_ref(),
-                                    navigator_focused,
-                                    cx,
-                                )
-                            }))
+                            .children(self.render_file_groups(
+                                &visible,
+                                selected.as_ref(),
+                                navigator_focused,
+                                cx,
+                            ))
                             .vertical_scrollbar(&self.navigator_scroll),
                     ),
             )
@@ -1114,11 +1463,62 @@ impl ReviewSession {
             .map(EntryWarning::label)
     }
 
+    pub(crate) fn navigator_focus_is_visible(&self) -> bool {
+        self.navigator_focus_visible
+    }
+
     pub(crate) fn navigator_is_scrolled(&self) -> bool {
         self.navigator_scroll.offset().y < px(0.0)
     }
 
     pub(crate) fn editor(&self, identity: &ReviewFileIdentity) -> Option<Entity<AlignedEditor>> {
         self.editors.get(identity).map(|state| state.editor.clone())
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{common_directory, group_directory, heading_is_shown};
+    use std::path::{Path, PathBuf};
+
+    fn base(paths: &[&str]) -> Option<PathBuf> {
+        common_directory(paths.iter().map(Path::new))
+    }
+
+    #[test]
+    fn the_shared_base_is_the_deepest_directory_every_file_sits_under() {
+        assert_eq!(
+            base(&[
+                "crates/yori/src/review/git.rs",
+                "crates/yori/src/editor/chrome.rs"
+            ]),
+            Some(PathBuf::from("crates/yori/src"))
+        );
+        // One file contributes its whole directory.
+        assert_eq!(
+            base(&["crates/yori/src/review/git.rs"]),
+            Some(PathBuf::from("crates/yori/src/review"))
+        );
+        // A file at the root leaves nothing to share.
+        assert_eq!(base(&["crates/yori/src/review/git.rs", "README.md"]), None);
+        assert_eq!(base(&[]), None);
+    }
+
+    #[test]
+    fn headings_are_relative_to_the_base_and_vanish_inside_it() {
+        let base = PathBuf::from("crates/yori/src");
+        let directory = group_directory(Path::new("crates/yori/src/review/git.rs"), Some(&base));
+        assert_eq!(directory, PathBuf::from("review"));
+        assert!(heading_is_shown(&directory, Some(&base)));
+
+        // A file directly in the base is already named by the base line.
+        let directory = group_directory(Path::new("crates/yori/src/lib.rs"), Some(&base));
+        assert_eq!(directory, PathBuf::from(""));
+        assert!(!heading_is_shown(&directory, Some(&base)));
+
+        // Without a base, a root file still needs a heading of its own.
+        let directory = group_directory(Path::new("README.md"), None);
+        assert_eq!(directory, PathBuf::from(""));
+        assert!(heading_is_shown(&directory, None));
     }
 }
