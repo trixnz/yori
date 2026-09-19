@@ -11,27 +11,15 @@
 
   outputs = { self, nixpkgs, kache }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" ];
+      systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
       p4apiFor = system:
-        let
-          artifact = {
-            x86_64-linux = {
-              name = "p4api-glibc2.3-openssl3.5.tgz";
-              hash = "sha256-F/9Qhf5cAiiDcy0RhhGNc2mT7LlB8VKpVxDL+SY6zcg=";
-              platform = "bin.linux26x86_64";
-            };
-            aarch64-linux = {
-              name = "p4api-openssl3.5.tgz";
-              hash = "sha256-CPwH5PPIWc8ACCWuN53gRcEWBmBF0xflVpEclOxhJJs=";
-              platform = "bin.linux26aarch64";
-            };
-          }.${system};
-          pkgs = import nixpkgs { inherit system; };
+        let pkgs = import nixpkgs { inherit system; };
         in
         pkgs.fetchzip {
-          inherit (artifact) name hash;
-          url = "https://ftp.perforce.com/perforce/r25.1/${artifact.platform}/${artifact.name}";
+          name = "p4api-glibc2.3-openssl3.5.tgz";
+          hash = "sha256-F/9Qhf5cAiiDcy0RhhGNc2mT7LlB8VKpVxDL+SY6zcg=";
+          url = "https://ftp.perforce.com/perforce/r25.1/bin.linux26x86_64/p4api-glibc2.3-openssl3.5.tgz";
         };
       packageFor = system:
         let

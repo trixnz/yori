@@ -25,7 +25,6 @@ the archive SHA-256 before extraction.
 | Target | P4API 2025.1 patch 3042095 artifact | SHA-256 |
 | --- | --- | --- |
 | `x86_64-unknown-linux-gnu` | `p4api-glibc2.3-openssl3.5.tgz` | `466352f49f585f514bfee13efcb927e93ea567bcc2dde200ef2c750d8555a0dc` |
-| `aarch64-unknown-linux-gnu` | `p4api-openssl3.5.tgz` | `3bba25b44917341ddbc2416bdc68ab84118d2dc37ca90edc5ec829064ade2b63` |
 | `x86_64-pc-windows-msvc` | `p4api_vs2022_dyn_openssl3.5.zip` | `b05db557dc5dd8d3b3e316632afb457bb1c4bdf4b696ffc14e5df78acc743a57` |
 
 P4API and OpenSSL 3.5 are statically linked on every supported platform.

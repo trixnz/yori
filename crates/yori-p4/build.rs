@@ -41,7 +41,7 @@ fn main() {
     assert!(
         matches!(
             target.as_str(),
-            "x86_64-unknown-linux-gnu" | "aarch64-unknown-linux-gnu" | "x86_64-pc-windows-msvc"
+            "x86_64-unknown-linux-gnu" | "x86_64-pc-windows-msvc"
         ),
         "the native Perforce provider does not support target {target}"
     );
