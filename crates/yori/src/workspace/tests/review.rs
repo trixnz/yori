@@ -63,6 +63,16 @@ fn source(provider: Arc<TestProvider>, key: &str) -> ReviewSource {
     )
 }
 
+/// Home is the landing surface, so its first action opens the Git chooser that
+/// an invocation used to open by itself.
+fn open_git_chooser_from_home(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.press("enter", cx);
+    });
+    cx.run_until_parked();
+}
+
 fn text_file(identity: &str, path: &str, baseline: &str, local: &str) -> ReviewFile {
     let path = PathBuf::from(path);
     let comparison = TextComparison::new(
@@ -989,6 +999,62 @@ fn perforce_source_chooser_is_keyboard_first_without_stealing_input_keys(cx: &mu
 }
 
 #[gpui_kit::test]
+fn invoking_inside_a_repository_lands_on_home_and_offers_its_working_changes(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, cx) = harness(cx);
+    let repository = tempfile::tempdir().unwrap();
+    gix::init(repository.path()).unwrap();
+    std::fs::write(repository.path().join("working.txt"), "working\n").unwrap();
+    let window = cx.update(|window, _| {
+        window
+            .window_handle()
+            .downcast::<gpui_kit::component::Root>()
+            .unwrap()
+    });
+
+    crate::dispatch_invocation(
+        window,
+        &workspace,
+        &InvocationRequest::new(repository.path().to_owned(), Vec::new()),
+        &mut cx.cx,
+    )
+    .unwrap();
+    cx.run_until_parked();
+
+    let before = cx.update(|window, cx| {
+        window.render_frame(cx);
+        // Home is the landing surface; nothing opens over it.
+        assert!(workspace.read(cx).git_source_chooser.is_none());
+        let _ = window.find("home");
+
+        let count = workspace.read(cx).tabs.entries.len();
+        window.click("home-working-changes", cx);
+        count
+    });
+    cx.run_until_parked();
+
+    cx.update(|_, cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.tabs.entries.len(), before + 1);
+        let active = workspace.tabs.active.unwrap();
+        assert!(
+            workspace
+                .tabs
+                .get(active)
+                .unwrap()
+                .identity
+                .description()
+                .contains("working")
+        );
+    });
+}
+
+#[gpui_kit::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one sequence walks invocation, chooser routing, and tab reuse across two repositories; splitting it would duplicate the setup without separating the behaviour"
+)]
 fn invocation_routes_git_chooser_and_deduplication_to_the_invoking_repository(
     cx: &mut TestAppContext,
 ) {
@@ -1014,6 +1080,7 @@ fn invocation_routes_git_chooser_and_deduplication_to_the_invoking_repository(
     )
     .unwrap();
     cx.run_until_parked();
+    open_git_chooser_from_home(cx);
     cx.update(|window, cx| {
         window.render_frame(cx);
         let chooser = workspace
@@ -1048,6 +1115,7 @@ fn invocation_routes_git_chooser_and_deduplication_to_the_invoking_repository(
     )
     .unwrap();
     cx.run_until_parked();
+    open_git_chooser_from_home(cx);
     let before = cx.update(|window, cx| {
         window.render_frame(cx);
         let chooser = workspace
@@ -1092,6 +1160,7 @@ fn invocation_routes_git_chooser_and_deduplication_to_the_invoking_repository(
     )
     .unwrap();
     cx.run_until_parked();
+    open_git_chooser_from_home(cx);
     cx.update(|window, cx| {
         window.render_frame(cx);
         window.press("enter", cx);
@@ -1168,6 +1237,7 @@ fn git_working_document_edits_save_to_the_real_worktree_path(cx: &mut TestAppCon
     )
     .unwrap();
     cx.run_until_parked();
+    open_git_chooser_from_home(cx);
     cx.update(|window, cx| {
         window.render_frame(cx);
         window.press("enter", cx);
@@ -1211,6 +1281,7 @@ fn git_symlink_working_document_cannot_edit_or_save_through_its_target(cx: &mut 
     )
     .unwrap();
     cx.run_until_parked();
+    open_git_chooser_from_home(cx);
     cx.update(|window, cx| {
         window.render_frame(cx);
         window.press("enter", cx);

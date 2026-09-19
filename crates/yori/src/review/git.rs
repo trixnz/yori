@@ -29,6 +29,8 @@ pub(crate) struct GitCommitSummary {
     pub short_id: String,
     pub title: String,
     pub is_merge: bool,
+    /// Commit time in seconds since the epoch, for rendering a relative age.
+    pub time_seconds: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -131,11 +133,14 @@ impl GitRepository {
                     .map_or_else(|_| id.to_string()[..7].to_owned(), |id| id.to_string());
                 let is_merge = commit.parent_ids().nth(1).is_some();
 
+                let time_seconds = commit.time().map_or(0, |time| time.seconds);
+
                 Ok(GitCommitSummary {
                     revision: id.to_string(),
                     short_id,
                     title: commit_title(&commit),
                     is_merge,
+                    time_seconds,
                 })
             })
             .collect()

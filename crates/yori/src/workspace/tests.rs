@@ -6,6 +6,7 @@ mod saving;
 
 use super::*;
 use crate::comparison::ComparisonDocument;
+use crate::review::GitCommitSummary;
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Modifiers, TestAppContext, VisualTestContext, point};
@@ -1364,5 +1365,56 @@ fn native_close_can_discard_edits_and_close_the_window(cx: &mut TestAppContext) 
             cx.windows().is_empty(),
             "confirming discard must close the window"
         );
+    });
+}
+
+#[gpui_kit::test]
+fn home_shows_recent_commits_only_when_there_is_a_repository_to_read(cx: &mut TestAppContext) {
+    let (workspace, cx) = empty_harness(cx);
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        // A plain folder has nothing to list, so Home collapses to one column.
+        assert!(window.try_find(("home-commit", 0usize)).is_none());
+        assert!(window.try_find("home-working-changes").is_none());
+
+        let home = workspace.read(cx).home.clone();
+        home.update(cx, |home, cx| {
+            home.set_recent(
+                Some(RecentCommits {
+                    repository: "yori".to_owned(),
+                    commits: vec![
+                        GitCommitSummary {
+                            revision: "a".repeat(40),
+                            short_id: "aaaaaaa".to_owned(),
+                            title: "first".to_owned(),
+                            is_merge: false,
+                            time_seconds: 0,
+                        },
+                        GitCommitSummary {
+                            revision: "b".repeat(40),
+                            short_id: "bbbbbbb".to_owned(),
+                            title: "second".to_owned(),
+                            is_merge: true,
+                            time_seconds: 0,
+                        },
+                    ],
+                }),
+                cx,
+            );
+        });
+        window.render_frame(cx);
+
+        let _ = window.find("home-working-changes");
+        let _ = window.find(("home-commit", 0usize));
+        let _ = window.find(("home-commit", 1usize));
+        assert!(window.try_find(("home-commit", 2usize)).is_none());
+        // The actions keep their identity, so the keyboard path is unaffected.
+        let _ = window.find(("home-action", 4usize));
+
+        home.update(cx, |home, cx| home.set_recent(None, cx));
+        window.render_frame(cx);
+        assert!(window.try_find(("home-commit", 0usize)).is_none());
+        assert!(window.try_find("home-working-changes").is_none());
     });
 }

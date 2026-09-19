@@ -36,7 +36,7 @@ use crate::review::{
     ReviewSession, ReviewSource,
 };
 use decision_dialog::{Decision, DecisionDialog, DecisionShortcut};
-use home::{ActionChosen, Home, HomeAction, HomeControl};
+use home::{Home, HomeAction, HomeControl, HomeEvent, RecentCommits};
 use perforce_chooser::{PerforceSourceChooser, SourceChosen};
 use preferences_dialog::PreferencesDialog;
 use tabs::{TabIdentity, Tabs};
@@ -170,8 +170,12 @@ impl Workspace {
         let home_subscription = cx.subscribe_in(
             &home,
             window,
-            |this, _, event: &ActionChosen, window, cx| {
-                this.start_home_action(event.0, window, cx);
+            |this, _, event: &HomeEvent, window, cx| match event {
+                HomeEvent::Action(action) => this.start_home_action(*action, window, cx),
+                HomeEvent::WorkingChanges => this.open_working_changes(window, cx),
+                HomeEvent::Revision(revision) => {
+                    this.open_git_revision(revision, window, cx);
+                }
             },
         );
 
@@ -244,14 +248,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         self.invocation_directory = Some(invocation.directory.clone());
+        self.refresh_home_recents(cx);
 
+        // An invocation with nothing to compare means "show me the start screen
+        // for this directory". Home lists the same commits the chooser does, so
+        // opening the chooser here only hid Home behind something that looked
+        // like it. The chooser stays one action away for anything older or by
+        // ref.
         if invocation.comparisons.is_empty() {
             window.activate_window();
-            if let Ok(repository) = self.review_repository() {
-                self.open_git_source_chooser(repository, window, cx)?;
-            } else {
-                self.focus_active(window, cx);
-            }
+            self.show_home(&ShowHome, window, cx);
 
             return Ok(());
         }
@@ -472,6 +478,68 @@ impl Workspace {
                 self.open_preferences(&Preferences, window, cx);
             }
         }
+    }
+
+    /// Opens a revision picked on Home. Home lists commits from the same
+    /// repository the chooser would, so this is the chooser's outcome without
+    /// the intermediate dialog.
+    fn open_git_revision(&mut self, revision: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picking_files || window.has_active_dialog(cx) {
+            return;
+        }
+
+        let source = self
+            .review_repository()
+            .and_then(|repository| repository.commit_source(revision));
+        self.open_home_source(source, window, cx);
+    }
+
+    /// Opens the repository's uncommitted work, which is the chooser's first
+    /// row and the most likely thing to be reviewing.
+    fn open_working_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picking_files || window.has_active_dialog(cx) {
+            return;
+        }
+
+        let source = self
+            .review_repository()
+            .map(|repository| repository.working_source());
+        self.open_home_source(source, window, cx);
+    }
+
+    /// Reports a failed pick the way the chooser would, rather than leaving the
+    /// click looking like it did nothing.
+    fn open_home_source(
+        &mut self,
+        source: Result<ReviewSource, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match source {
+            Ok(source) => self.open_review_source(source, window, cx),
+            Err(error) => window.push_notification(Notification::error(error), cx),
+        }
+    }
+
+    /// Reloads the commits Home offers. Git discovery is local and cheap, so
+    /// Home can show them without being asked; Perforce stays behind its action
+    /// because discovery there is a server round-trip.
+    fn refresh_home_recents(&mut self, cx: &mut Context<Self>) {
+        let recent = self.review_repository().ok().and_then(|repository| {
+            let repository_name = repository
+                .work_dir()
+                .file_name()
+                .unwrap_or(repository.work_dir().as_os_str())
+                .to_string_lossy()
+                .into_owned();
+
+            Some(RecentCommits {
+                repository: repository_name,
+                commits: repository.recent_commits().ok()?,
+            })
+        });
+
+        self.home.update(cx, |home, cx| home.set_recent(recent, cx));
     }
 
     fn choose_perforce_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -766,6 +834,7 @@ impl Workspace {
         self.git_source_chooser = None;
         self.selection = WorkspaceSelection::Home;
         self.update_window_title(window);
+        self.refresh_home_recents(cx);
 
         self.focus_active(window, cx);
         cx.notify();
