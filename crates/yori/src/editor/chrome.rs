@@ -1,7 +1,5 @@
 //! Compact standard controls around the custom diff surface.
 
-use std::path::Path;
-
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
@@ -11,26 +9,9 @@ use gpui_kit::{
     Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement, Styled, TestSupportExt, div, px,
 };
-use yori::{geometry::display_units, navigation::ChangeDirection};
+use yori::{document_info::path_labels, geometry::display_units, navigation::ChangeDirection};
 
 use super::{AlignedEditor, HEADER_HEIGHT, NextChange, PreviousChange, Side};
-
-fn path_labels(path: &Path) -> (String, String) {
-    let name = path
-        .file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned();
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty());
-    let directory = parent
-        .unwrap_or_else(|| Path::new("."))
-        .display()
-        .to_string();
-
-    (name, directory)
-}
 
 fn pane_id(side: Side) -> usize {
     match side {
@@ -222,6 +203,7 @@ impl AlignedEditor {
     ) -> impl IntoElement {
         let path = &self.document(side).path;
         let (name, directory) = path_labels(path);
+        let directory = directory.unwrap_or_else(|| ".".to_owned());
         let full_path = path.display().to_string();
         let filename_tooltip = full_path.clone();
 
@@ -289,6 +271,13 @@ impl AlignedEditor {
                             } else {
                                 "Baseline · Read-only"
                             })
+                    }))
+                    .children((side == Side::Right && !self.can_edit()).then(|| {
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(12.0))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Local · Read-only")
                     }))
                     .children((side == Side::Right).then(|| self.render_review_controls(cx)))
                     .children((self.merge.is_some() && side == Side::Incoming).then(|| {
@@ -407,15 +396,15 @@ mod tests {
     fn headers_separate_file_identity_from_directory_metadata() {
         assert_eq!(
             path_labels(Path::new("parser.rs")),
-            ("parser.rs".into(), ".".into())
+            ("parser.rs".into(), None)
         );
         assert_eq!(
             path_labels(Path::new("/project/源/parser.rs")),
-            ("parser.rs".into(), "/project/源".into())
+            ("parser.rs".into(), Some("/project/源".into()))
         );
         assert_eq!(
             path_labels(Path::new("../src/config.go")),
-            ("config.go".into(), "../src".into())
+            ("config.go".into(), Some("../src".into()))
         );
     }
 }

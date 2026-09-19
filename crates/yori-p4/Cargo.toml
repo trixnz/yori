@@ -1,0 +1,27 @@
+[package]
+name = "yori-p4"
+description = "Native Perforce review provider for yori"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[dependencies]
+async-channel = "=2.5.0"
+cxx = "=1.0.194"
+
+[build-dependencies]
+cxx-build = "=1.0.194"
+openssl-src = "=300.5.5"
+sha2 = "=0.10.9"

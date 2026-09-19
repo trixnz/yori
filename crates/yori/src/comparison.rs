@@ -1,6 +1,135 @@
-//! File roles shared by CLI handoff, workspace identity, and editor construction.
+//! Document identity, content sources, capabilities, and comparison construction.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DocumentContent {
+    File(PathBuf),
+    Memory(Arc<[u8]>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ComparisonDocument {
+    logical_path: PathBuf,
+    content: DocumentContent,
+    editable: bool,
+    save_destination: Option<PathBuf>,
+}
+
+impl ComparisonDocument {
+    pub fn read_only_file(path: PathBuf) -> Self {
+        Self {
+            logical_path: path.clone(),
+            content: DocumentContent::File(path),
+            editable: false,
+            save_destination: None,
+        }
+    }
+
+    pub fn editable_file(path: PathBuf) -> Self {
+        Self {
+            logical_path: path.clone(),
+            content: DocumentContent::File(path.clone()),
+            editable: true,
+            save_destination: Some(path),
+        }
+    }
+
+    pub fn read_only_memory(logical_path: PathBuf, content: Vec<u8>) -> Self {
+        Self {
+            logical_path,
+            content: DocumentContent::Memory(content.into()),
+            editable: false,
+            save_destination: None,
+        }
+    }
+
+    pub fn editable_memory(
+        logical_path: PathBuf,
+        content: Vec<u8>,
+        save_destination: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            logical_path,
+            content: DocumentContent::Memory(content.into()),
+            editable: true,
+            save_destination,
+        }
+    }
+
+    pub fn logical_path(&self) -> &Path {
+        &self.logical_path
+    }
+
+    pub fn content(&self) -> &DocumentContent {
+        &self.content
+    }
+
+    pub fn editable(&self) -> bool {
+        self.editable
+    }
+
+    pub fn save_destination(&self) -> Option<&Path> {
+        self.save_destination.as_deref()
+    }
+
+    fn resolve(&self) -> Result<Self, String> {
+        let (content, resolved_source) = match &self.content {
+            DocumentContent::File(path) => {
+                let resolved = resolve_input(path)?;
+                (
+                    DocumentContent::File(resolved.clone()),
+                    Some((path, resolved)),
+                )
+            }
+            DocumentContent::Memory(bytes) => (DocumentContent::Memory(bytes.clone()), None),
+        };
+
+        let logical_path = resolved_source
+            .as_ref()
+            .filter(|(original, _)| self.logical_path == **original)
+            .map_or_else(
+                || self.logical_path.clone(),
+                |(_, resolved)| resolved.clone(),
+            );
+        let save_destination = self
+            .save_destination
+            .as_ref()
+            .map(|destination| {
+                resolved_source
+                    .as_ref()
+                    .filter(|(original, _)| destination == *original)
+                    .map_or_else(
+                        || resolve_result(destination),
+                        |(_, resolved)| Ok(resolved.clone()),
+                    )
+            })
+            .transpose()?;
+
+        Ok(Self {
+            logical_path,
+            content,
+            editable: self.editable,
+            save_destination,
+        })
+    }
+
+    fn file_path(&self) -> Option<&Path> {
+        match &self.content {
+            DocumentContent::File(path) => Some(path),
+            DocumentContent::Memory(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiffComparison {
+    pub baseline: ComparisonDocument,
+    pub local: ComparisonDocument,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MergePaths {
@@ -11,14 +140,21 @@ pub(crate) struct MergePaths {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ComparisonPaths {
-    Diff { baseline: PathBuf, local: PathBuf },
+pub(crate) enum Comparison {
+    Diff(DiffComparison),
     Merge(MergePaths),
 }
 
-impl ComparisonPaths {
+impl Comparison {
     pub fn diff(baseline: PathBuf, local: PathBuf) -> Self {
-        Self::Diff { baseline, local }
+        Self::two_way(
+            ComparisonDocument::read_only_file(baseline),
+            ComparisonDocument::editable_file(local),
+        )
+    }
+
+    pub fn two_way(baseline: ComparisonDocument, local: ComparisonDocument) -> Self {
+        Self::Diff(DiffComparison { baseline, local })
     }
 
     pub fn from_paths(paths: &[PathBuf]) -> Result<Self, String> {
@@ -34,25 +170,56 @@ impl ComparisonPaths {
         }
     }
 
-    pub fn paths(&self) -> Vec<&Path> {
+    pub fn wire_paths(&self) -> Result<Vec<&Path>, String> {
         match self {
-            Self::Diff { baseline, local } => vec![baseline, local],
-            Self::Merge(paths) => vec![&paths.base, &paths.local, &paths.incoming, &paths.result],
+            Self::Diff(diff) => {
+                let baseline = diff
+                    .baseline
+                    .file_path()
+                    .ok_or("in-memory comparisons cannot be forwarded to another yori instance")?;
+                let local = diff
+                    .local
+                    .file_path()
+                    .ok_or("in-memory comparisons cannot be forwarded to another yori instance")?;
+
+                let representable = !diff.baseline.editable()
+                    && diff.baseline.save_destination().is_none()
+                    && diff.local.editable()
+                    && diff.local.save_destination() == Some(local);
+                if !representable {
+                    return Err(
+                        "comparison document capabilities cannot be represented by the current instance protocol"
+                            .into(),
+                    );
+                }
+
+                Ok(vec![baseline, local])
+            }
+            Self::Merge(paths) => Ok(vec![
+                &paths.base,
+                &paths.local,
+                &paths.incoming,
+                &paths.result,
+            ]),
         }
     }
 
     pub fn resolve(&self) -> Result<Self, String> {
-        let input = |path: &Path| {
-            path.canonicalize()
-                .map_err(|error| format!("cannot open {}: {error}", path.display()))
-        };
-
         match self {
-            Self::Diff { baseline, local } => Ok(Self::diff(input(baseline)?, input(local)?)),
+            Self::Diff(diff) => {
+                if diff.baseline.editable() {
+                    return Err("baseline documents must be read-only".into());
+                }
+
+                Ok(Self::two_way(
+                    diff.baseline.resolve()?,
+                    diff.local.resolve()?,
+                ))
+            }
             Self::Merge(paths) => Ok(Self::Merge(MergePaths {
-                base: input(&paths.base)?,
-                local: input(&paths.local)?,
-                incoming: input(&paths.incoming)?,
+                base: resolve_input(&paths.base)?,
+                local: resolve_input(&paths.local)?,
+                incoming: resolve_input(&paths.incoming)?,
                 result: resolve_result(&paths.result)?,
             })),
         }
@@ -60,18 +227,18 @@ impl ComparisonPaths {
 
     pub fn target(&self) -> &Path {
         match self {
-            Self::Diff { local, .. } => local,
+            Self::Diff(diff) => diff.local.logical_path(),
             Self::Merge(paths) => &paths.result,
         }
     }
 
     pub fn description(&self) -> String {
         match self {
-            Self::Diff { baseline, local } => {
+            Self::Diff(diff) => {
                 format!(
                     "Baseline: {}\nLocal: {}",
-                    baseline.display(),
-                    local.display()
+                    diff.baseline.logical_path().display(),
+                    diff.local.logical_path().display()
                 )
             }
             Self::Merge(paths) => format!(
@@ -86,7 +253,7 @@ impl ComparisonPaths {
 
     pub fn qualifier(&self) -> String {
         match self {
-            Self::Diff { baseline, .. } => baseline.display().to_string(),
+            Self::Diff(diff) => diff.baseline.logical_path().display().to_string(),
             Self::Merge(paths) => format!(
                 "merge {} + {} (base {})",
                 paths.local.display(),
@@ -95,6 +262,11 @@ impl ComparisonPaths {
             ),
         }
     }
+}
+
+fn resolve_input(path: &Path) -> Result<PathBuf, String> {
+    path.canonicalize()
+        .map_err(|error| format!("cannot open {}: {error}", path.display()))
 }
 
 fn resolve_result(path: &Path) -> Result<PathBuf, String> {
@@ -130,6 +302,26 @@ fn resolve_result(path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_memory_documents_resolve_without_touching_their_logical_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let comparison = Comparison::two_way(
+            ComparisonDocument::read_only_memory(
+                directory.path().join("src/original.rs"),
+                b"old\n".to_vec(),
+            ),
+            ComparisonDocument::read_only_memory(
+                directory.path().join("src/current.rs"),
+                b"new\n".to_vec(),
+            ),
+        );
+
+        let resolved = comparison.resolve().unwrap();
+
+        assert_eq!(resolved, comparison);
+        assert!(directory.path().read_dir().unwrap().next().is_none());
+    }
 
     #[test]
     fn result_identity_supports_new_paths_and_input_aliases_without_writing() {

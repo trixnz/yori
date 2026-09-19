@@ -83,6 +83,8 @@ gpui_kit::actions!(
         MoveFinish,
         PreviousChange,
         NextChange,
+        FocusPreviousPane,
+        FocusNextPane,
     ]
 );
 
@@ -91,6 +93,12 @@ enum Side {
     Left,
     Right,
     Incoming,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PaneFocusBoundary {
+    Previous,
+    Next,
 }
 
 #[derive(Clone, Debug)]
@@ -114,9 +122,12 @@ struct RowHighlighting<'a> {
 
 pub(super) struct PaneDocument {
     path: PathBuf,
+    editable: bool,
+    saveable: bool,
     max_display_columns: usize,
     document: Document,
     highlighter: Option<SyntaxHighlighter>,
+    highlight_generation: u64,
     syntax_cache: RefCell<highlighting::SyntaxCache>,
     language_override: Option<Language>,
     line_endings: LineEndings,
@@ -125,18 +136,28 @@ pub(super) struct PaneDocument {
 impl PaneDocument {
     pub(super) fn new(path: PathBuf, document: Document) -> Self {
         let max_display_columns = max_display_columns(&document, TAB_WIDTH);
-        let highlighter = Self::highlighter_for(Language::detect(&path), &document);
         let line_endings = LineEndings::from_document(&document);
 
         Self {
             path,
+            editable: false,
+            saveable: false,
             max_display_columns,
             document,
-            highlighter,
+            highlighter: None,
+            highlight_generation: 0,
             syntax_cache: RefCell::default(),
             language_override: None,
             line_endings,
         }
+    }
+
+    #[cfg(test)]
+    fn new_highlighted(path: PathBuf, document: Document) -> Self {
+        let mut pane = Self::new(path, document);
+        pane.highlighter = Self::highlighter_for(pane.language(), &pane.document);
+
+        pane
     }
 
     fn language(&self) -> Language {
@@ -144,6 +165,7 @@ impl PaneDocument {
             .unwrap_or_else(|| Language::detect(&self.path))
     }
 
+    #[cfg(test)]
     fn highlighter_for(language: Language, document: &Document) -> Option<SyntaxHighlighter> {
         let grammar = highlighting::grammar_for(language)?;
         let mut highlighter = SyntaxHighlighter::new(grammar);
@@ -152,15 +174,24 @@ impl PaneDocument {
         Some(highlighter)
     }
 
-    fn set_language(&mut self, language: Option<Language>) {
+    fn change_language(&mut self, language: Option<Language>) -> bool {
         let previous = self.language();
         self.language_override = language;
         if self.language() == previous {
-            return;
+            return false;
         }
 
-        self.highlighter = Self::highlighter_for(self.language(), &self.document);
+        self.highlighter = None;
         self.syntax_cache.get_mut().clear();
+
+        true
+    }
+
+    #[cfg(test)]
+    fn set_language(&mut self, language: Option<Language>) {
+        if self.change_language(language) {
+            self.highlighter = Self::highlighter_for(self.language(), &self.document);
+        }
     }
 
     fn refresh_after_edit(&mut self, edit: &EditOutcome) {
@@ -221,6 +252,22 @@ impl DirtyState {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VimKeybindings {
+    Disabled,
+    Enabled,
+}
+
+impl From<bool> for VimKeybindings {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
 pub(super) struct AlignedEditor {
     left: PaneDocument,
     right: PaneDocument,
@@ -229,6 +276,7 @@ pub(super) struct AlignedEditor {
     history: EditHistory,
     merge: Option<merge::MergeState>,
     vim: yori::vim::Vim,
+    vim_keybindings: VimKeybindings,
     dirty: DirtyState,
     saving: bool,
     preferred_column: Option<usize>,
@@ -251,11 +299,53 @@ impl AlignedEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_diff(left, right, true, true, window, cx)
+    }
+
+    pub(super) fn new_diff(
+        left: PaneDocument,
+        right: PaneDocument,
+        editable: bool,
+        saveable: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_diff_with_activation(left, right, editable, saveable, true, window, cx)
+    }
+
+    pub(super) fn new_review_diff(
+        left: PaneDocument,
+        right: PaneDocument,
+        editable: bool,
+        saveable: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_diff_with_activation(left, right, editable, saveable, false, window, cx)
+    }
+
+    fn new_diff_with_activation(
+        mut left: PaneDocument,
+        mut right: PaneDocument,
+        editable: bool,
+        saveable: bool,
+        activate: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        left.editable = false;
+        left.saveable = false;
+        right.editable = editable;
+        right.saveable = editable && saveable;
+
         let alignment = Alignment::between(&left.document, &right.document);
         let dirty = DirtyState::new(right.document.text());
+        let config = crate::config::editor(cx);
 
         let focus = cx.focus_handle();
-        focus.focus(window, cx);
+        if activate {
+            focus.focus(window, cx);
+        }
         cx.on_blur(&focus, window, |this, _, cx| {
             this.cancel_vim();
             cx.notify();
@@ -270,13 +360,31 @@ impl AlignedEditor {
             }
         })
         .detach();
-        cx.observe_global::<vim::VimPreferences>(|this, cx| {
-            this.cancel_vim();
+        cx.observe_global::<crate::config::Configuration>(|this, cx| {
+            let config = crate::config::editor(cx);
+            if VimKeybindings::from(config.vim_keybindings) != this.vim_keybindings {
+                this.cancel_vim();
+                this.vim_keybindings = config.vim_keybindings.into();
+                if config.vim_keybindings && this.selection.is_none() {
+                    this.selection = Some(Selection {
+                        side: Side::Right,
+                        anchor: 0,
+                        head: 0,
+                    });
+                }
+            }
+            if this.show_whitespace && !config.show_whitespace {
+                this.horizontal_scroll = 0.0;
+            }
+
+            this.show_whitespace = config.show_whitespace;
+            this.show_connections = config.show_change_connections;
+            this.hovered_connection = None;
             cx.notify();
         })
         .detach();
 
-        Self {
+        let mut editor = Self {
             left,
             right,
             alignment,
@@ -284,6 +392,7 @@ impl AlignedEditor {
             history: EditHistory::default(),
             merge: None,
             vim: yori::vim::Vim::default(),
+            vim_keybindings: config.vim_keybindings.into(),
             dirty,
             saving: false,
             preferred_column: None,
@@ -291,14 +400,82 @@ impl AlignedEditor {
             selection: None,
             vertical_scroll: 0.0,
             horizontal_scroll: 0.0,
-            show_whitespace: false,
-            show_connections: false,
+            show_whitespace: config.show_whitespace,
+            show_connections: config.show_change_connections,
             hovered_connection: None,
             scrollbar_grab: None,
             content_bounds: Rc::new(Cell::new(Bounds::new(
                 point(px(0.0), px(0.0)),
                 window.viewport_size(),
             ))),
+        };
+        editor.schedule_highlighting(Side::Left, window, cx);
+        editor.schedule_highlighting(Side::Right, window, cx);
+
+        editor
+    }
+
+    fn schedule_highlighting(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.document_mut(side);
+        pane.highlight_generation = pane.highlight_generation.wrapping_add(1);
+        pane.highlighter = None;
+        pane.syntax_cache.get_mut().clear();
+
+        let generation = pane.highlight_generation;
+        let language = pane.language();
+        let Some(grammar) = highlighting::grammar_for(language) else {
+            return;
+        };
+        let text = pane.document.text().to_owned();
+        let build = cx.background_executor().spawn(async move {
+            let mut highlighter = SyntaxHighlighter::new(grammar);
+            highlighter.update(None, &Rope::from(text.as_str()), None);
+
+            (text, highlighter)
+        });
+
+        cx.spawn_in(window, async move |editor, cx| {
+            let (text, highlighter) = build.await;
+            let _ = editor.update_in(cx, |editor, _, cx| {
+                let pane = editor.document_mut(side);
+                if pane.highlight_generation != generation
+                    || pane.language() != language
+                    || pane.document.text() != text
+                {
+                    return;
+                }
+
+                pane.highlighter = Some(highlighter);
+                pane.syntax_cache.get_mut().clear();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn can_edit(&self) -> bool {
+        self.right.editable
+    }
+
+    pub(super) fn can_save(&self) -> bool {
+        self.right.saveable
+    }
+
+    #[cfg(test)]
+    pub(crate) fn highlighting_ready(&self) -> bool {
+        let ready = |pane: &PaneDocument| {
+            pane.highlighter.is_some() || highlighting::grammar_for(pane.language()).is_none()
+        };
+
+        ready(&self.left) && ready(&self.right)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn applied_preferences(&self) -> crate::config::EditorConfig {
+        crate::config::EditorConfig {
+            vim_keybindings: self.vim_keybindings == VimKeybindings::Enabled,
+            show_whitespace: self.show_whitespace,
+            show_change_connections: self.show_connections,
         }
     }
 
@@ -333,6 +510,68 @@ impl AlignedEditor {
         cx.notify();
     }
 
+    pub(crate) fn focus_leftmost_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_pane(Side::Left, window, cx);
+    }
+
+    fn active_side(&self) -> Side {
+        self.selection
+            .as_ref()
+            .map_or(Side::Right, |selection| selection.side)
+    }
+
+    fn focus_previous_pane(
+        &mut self,
+        _: &FocusPreviousPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match self.active_side() {
+            Side::Left => {
+                cx.emit(PaneFocusBoundary::Previous);
+                return;
+            }
+            Side::Right => Side::Left,
+            Side::Incoming => Side::Right,
+        };
+
+        self.focus_pane(target, window, cx);
+    }
+
+    fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
+        let target = match self.active_side() {
+            Side::Left => Side::Right,
+            Side::Right if self.merge.is_some() => Side::Incoming,
+            Side::Right | Side::Incoming => {
+                cx.emit(PaneFocusBoundary::Next);
+                return;
+            }
+        };
+
+        self.focus_pane(target, window, cx);
+    }
+
+    fn focus_pane(&mut self, target: Side, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.active_side();
+        let (row, x) = self.selection.as_ref().map_or((0, 0.0), |selection| {
+            self.source_position(current, selection.head, window, cx)
+        });
+        let offset = self.source_offset_for_x(target, row, x, window, cx);
+
+        self.cancel_vim();
+        self.finish_composition();
+        self.preferred_column = None;
+        self.selection = Some(Selection {
+            side: target,
+            anchor: offset,
+            head: offset,
+        });
+        self.sync_vim_selection(cx);
+        self.reveal_cursor(window, cx);
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
     fn document(&self, side: Side) -> &PaneDocument {
         match side {
             Side::Left => &self.left,
@@ -341,6 +580,20 @@ impl AlignedEditor {
                 &self
                     .merge
                     .as_ref()
+                    .expect("incoming pane requires merge mode")
+                    .incoming
+            }
+        }
+    }
+
+    fn document_mut(&mut self, side: Side) -> &mut PaneDocument {
+        match side {
+            Side::Left => &mut self.left,
+            Side::Right => &mut self.right,
+            Side::Incoming => {
+                &mut self
+                    .merge
+                    .as_mut()
                     .expect("incoming pane requires merge mode")
                     .incoming
             }
@@ -429,6 +682,47 @@ impl AlignedEditor {
             .map_or(document.text().len(), |line| {
                 document.lines()[line].content.start
             })
+    }
+
+    fn source_offset_for_x(
+        &self,
+        side: Side,
+        row: usize,
+        x: f32,
+        window: &mut Window,
+        cx: &App,
+    ) -> usize {
+        let Some(line) = self.line_for_row(side, row) else {
+            return self.source_offset_for(side, row, 0);
+        };
+        let document = &self.document(side).document;
+        let source_line = &document.lines()[line];
+        let display =
+            DisplayLine::from_source(document.content(line), source_line.content.start, TAB_WIDTH);
+        if x <= 0.0 || display.text.is_empty() {
+            return self.source_offset_for(side, row, 0);
+        }
+
+        let run = TextRun {
+            len: display.text.len(),
+            font: Font {
+                family: cx.theme().mono_font_family.clone(),
+                ..Font::default()
+            },
+            color: cx.theme().foreground,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let shaped = window.text_system().shape_line(
+            display.text.into(),
+            cx.theme().mono_font_size,
+            &[run],
+            None,
+        );
+        let display_offset = shaped.closest_index_for_x(px(x));
+
+        self.source_offset_for(side, row, display_offset)
     }
 
     fn geometry(&self) -> EditorGeometry {
@@ -861,6 +1155,18 @@ impl AlignedEditor {
 }
 
 impl gpui_kit::EventEmitter<DirtyChanged> for AlignedEditor {}
+impl gpui_kit::EventEmitter<PaneFocusBoundary> for AlignedEditor {}
+
+#[cfg(test)]
+impl AlignedEditor {
+    pub(crate) fn active_pane_index(&self) -> usize {
+        match self.active_side() {
+            Side::Left => 0,
+            Side::Right => 1,
+            Side::Incoming => 2,
+        }
+    }
+}
 
 impl Focusable for AlignedEditor {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -1100,6 +1406,8 @@ impl AlignedEditor {
             .capture_key_down(cx.listener(Self::vim_key))
             .on_action(cx.listener(Self::previous_change))
             .on_action(cx.listener(Self::next_change))
+            .on_action(cx.listener(Self::focus_previous_pane))
+            .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::restore_selected_lines))
             .on_action(cx.listener(Self::copy_selected))
             .on_action(cx.listener(Self::paste))
@@ -1210,6 +1518,7 @@ impl AlignedEditor {
 }
 
 pub(super) fn init(cx: &mut App) {
+    crate::config::init_transient(cx);
     vim::init(cx);
     input::bind_keys(cx);
 }
@@ -1217,14 +1526,71 @@ pub(super) fn init(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_kit::component::highlighter::HighlightTheme;
+    use gpui_kit::{AppContext, component::highlighter::HighlightTheme};
     use yori_document::editing::TextSelection;
 
     fn pane(text: &str) -> PaneDocument {
-        PaneDocument::new(
+        PaneDocument::new_highlighted(
             PathBuf::from("fixture.rs"),
             Document::from_bytes(text.as_bytes().to_vec()).unwrap(),
         )
+    }
+
+    #[gpui_kit::test]
+    fn background_highlighting_cannot_overwrite_a_replaced_pane(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::component::init(cx);
+            crate::appearance::init(cx);
+            crate::editor::init(cx);
+        });
+
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                AlignedEditor::new(
+                    PaneDocument::new(
+                        "baseline.rs".into(),
+                        Document::from_bytes(b"fn baseline() {}\n".to_vec()).unwrap(),
+                    ),
+                    PaneDocument::new(
+                        "current.rs".into(),
+                        Document::from_bytes(b"fn old() {}\n".to_vec()).unwrap(),
+                    ),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(view.clone());
+
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let editor = editor.unwrap();
+
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| {
+                editor.right = PaneDocument::new(
+                    "current.rs".into(),
+                    Document::from_bytes(b"fn replacement() {}\n".to_vec()).unwrap(),
+                );
+                editor.schedule_highlighting(Side::Right, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let editor = editor.read(cx);
+            assert_eq!(editor.right.document.text(), "fn replacement() {}\n");
+            assert_eq!(
+                editor
+                    .right
+                    .highlighter
+                    .as_ref()
+                    .unwrap()
+                    .text()
+                    .to_string(),
+                editor.right.document.text()
+            );
+        });
     }
 
     #[test]
@@ -1274,7 +1640,7 @@ mod tests {
             .unwrap();
         pane.refresh_after_edit(&edit);
 
-        let fresh = PaneDocument::new(pane.path.clone(), pane.document.clone());
+        let fresh = PaneDocument::new_highlighted(pane.path.clone(), pane.document.clone());
         let theme = HighlightTheme::default_dark();
         let range = 0..pane.document.text().len();
         let expected = fresh

@@ -11,7 +11,7 @@ use gpui_kit::component::{
 use gpui_kit::{Context, ParentElement, Window};
 
 use super::{Workspace, files::Role};
-use crate::{comparison::ComparisonPaths, storage::Snapshot};
+use crate::{comparison::Comparison, storage::Snapshot};
 
 #[derive(Clone)]
 pub(super) struct DiskNotice {
@@ -19,6 +19,7 @@ pub(super) struct DiskNotice {
     role: Role,
     path: PathBuf,
     observed: Result<Snapshot, String>,
+    reloadable: bool,
     merging: bool,
 }
 
@@ -26,8 +27,12 @@ impl Workspace {
     pub(super) fn schedule_disk_notices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(notice) = self.disk_notice.upgrade() {
             let mut notice = notice.borrow_mut();
-            if let Some(tab) = self.tabs.get(notice.tab) {
-                let current = &tab.content.files.file(notice.role).current;
+            if let Some(comparison) = self
+                .tabs
+                .get(notice.tab)
+                .and_then(|tab| tab.content.comparison())
+            {
+                let current = &comparison.files.tracked(notice.role, &notice.path).current;
                 notice.observed.clone_from(current);
             }
         }
@@ -36,11 +41,12 @@ impl Workspace {
             return;
         }
 
-        let pending =
-            self.watch_error.is_some()
-                || self.tabs.entries.iter().any(|tab| {
-                    tab.content.message.is_some() || tab.content.files.notice().is_some()
-                });
+        let pending = self.watch_error.is_some()
+            || self.tabs.entries.iter().any(|tab| {
+                tab.content.comparison().is_some_and(|comparison| {
+                    comparison.message.is_some() || comparison.files.notice().is_some()
+                })
+            });
         if !pending {
             return;
         }
@@ -68,26 +74,27 @@ impl Workspace {
                     .filter(|tab| Some(tab.id) != self.tabs.active),
             )
             .find_map(|tab| {
-                let file = tab.content.files.notice()?;
+                let comparison = tab.content.comparison()?;
+                let file = comparison.files.notice()?;
                 Some(DiskNotice {
                     tab: tab.id,
                     role: file.role,
                     path: file.path.clone(),
                     observed: file.current.clone(),
-                    merging: matches!(tab.paths, ComparisonPaths::Merge(_)),
+                    reloadable: file.reloadable(),
+                    merging: matches!(tab.identity.comparison(), Some(Comparison::Merge(_))),
                 })
             })
     }
 
-    fn present_disk_notice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.saving || self.picking_files || window.has_active_dialog(cx) {
-            return;
-        }
-
-        // Failures are overlay notifications too: no status row may move source
-        // text. Disk-version decisions below are the blocking part of this flow.
+    fn present_nonblocking_disk_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Failures are overlay notifications: no status row may move source text.
         for tab in &mut self.tabs.entries {
-            if let Some(message) = tab.content.message.take() {
+            if let Some(message) = tab
+                .content
+                .comparison_mut()
+                .and_then(|comparison| comparison.message.take())
+            {
                 window.push_notification(Notification::error(message), cx);
             }
         }
@@ -95,6 +102,14 @@ impl Workspace {
         if let Some(message) = self.watch_error.take() {
             window.push_notification(Notification::error(message), cx);
         }
+    }
+
+    fn present_disk_notice(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saving || self.picking_files || window.has_active_dialog(cx) {
+            return;
+        }
+
+        self.present_nonblocking_disk_messages(window, cx);
 
         let Some(notice) = self.next_disk_notice() else {
             return;
@@ -118,10 +133,9 @@ impl Workspace {
                 Ok(_) => "The file has changed outside this comparison.".to_owned(),
                 Err(error) => format!("The disk version cannot currently be read: {error}"),
             };
-            let reloadable =
-                notice.role != Role::Result && !matches!(notice.observed, Ok(Snapshot::Missing));
-            let policy = if notice.role == Role::Result {
-                "The merge result will not be reloaded automatically. \
+            let reloadable = notice.reloadable && !matches!(notice.observed, Ok(Snapshot::Missing));
+            let policy = if !notice.reloadable {
+                "The save destination will not be reloaded into this document. \
                  Keeping it does not authorize overwriting the disk version."
             } else if !reloadable {
                 "Keep the current document to continue. If the file returns, \
@@ -144,13 +158,18 @@ impl Workspace {
                         window.defer(cx, move |window, cx| {
                             window.close_dialog(cx);
                             let _ = view.update(cx, |this, cx| {
-                                if let Some(tab) = this
+                                if let Some(comparison) = this
                                     .tabs
                                     .entries
                                     .iter_mut()
                                     .find(|tab| tab.id == notice.tab)
+                                    .and_then(|tab| tab.content.comparison_mut())
                                 {
-                                    tab.content.files.dismiss(notice.role, notice.observed);
+                                    comparison.files.dismiss(
+                                        notice.role,
+                                        &notice.path,
+                                        notice.observed,
+                                    );
                                 }
 
                                 cx.notify();

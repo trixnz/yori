@@ -110,6 +110,24 @@ impl LineEndings {
     }
 }
 
+/// Splits a path into the file name that identifies it and the directory that
+/// contains it. A path with no meaningful parent reports `None` so callers can
+/// choose between omitting the directory and naming the current directory.
+#[must_use]
+pub fn path_labels(path: &Path) -> (String, Option<String>) {
+    let name = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned();
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.display().to_string());
+
+    (name, directory)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/yori-diff",
     "crates/yori-document",
+    "crates/yori-p4",
     "crates/yori",
 ]
 

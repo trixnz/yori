@@ -93,7 +93,7 @@ impl AlignedEditor {
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             }))
             .child(div().flex_1())
-            .children((side == Side::Right).then(|| {
+            .children((side == Side::Right && self.can_save()).then(|| {
                 Button::new("save-document")
                     .label("Save")
                     .small()
@@ -210,7 +210,7 @@ impl AlignedEditor {
             .small()
             .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
                 let whitespace_editor = editor.clone();
-                let whitespace_item = PopupMenuItem::new("Show whitespace (this comparison)")
+                let whitespace_item = PopupMenuItem::new("Show whitespace (all comparisons)")
                     .checked(whitespace)
                     .on_click(move |_, window, cx| {
                         let _ = whitespace_editor.update(cx, |editor, cx| {
@@ -220,7 +220,7 @@ impl AlignedEditor {
 
                 let connections_editor = editor.clone();
                 let connections_item =
-                    PopupMenuItem::new("Show change connections (this comparison)")
+                    PopupMenuItem::new("Show change connections (all comparisons)")
                         .checked(connections)
                         .on_click(move |_, window, cx| {
                             let _ = connections_editor.update(cx, |editor, cx| {
@@ -254,12 +254,9 @@ impl AlignedEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pane = match side {
-            Side::Left => &mut self.left,
-            Side::Right => &mut self.right,
-            Side::Incoming => &mut self.merge.as_mut().expect("incoming pane").incoming,
-        };
-        pane.set_language(language);
+        if self.document_mut(side).change_language(language) {
+            self.schedule_highlighting(side, window, cx);
+        }
 
         self.focus.focus(window, cx);
         cx.notify();

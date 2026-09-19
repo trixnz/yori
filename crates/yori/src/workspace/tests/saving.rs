@@ -15,12 +15,8 @@ fn open_diff(
     std::fs::write(&local, "local\r\n").unwrap();
     let id = cx.update(|window, cx| {
         workspace.update(cx, |view, cx| {
-            view.open_comparisons(
-                &[ComparisonPaths::diff(baseline, local.clone())],
-                window,
-                cx,
-            )
-            .unwrap();
+            view.open_comparisons(&[Comparison::diff(baseline, local.clone())], window, cx)
+                .unwrap();
         });
         window.render_frame(cx);
         workspace.read(cx).tabs.active.unwrap()
@@ -66,6 +62,8 @@ fn editor(workspace: &Entity<Workspace>, id: usize, cx: &App) -> Entity<AlignedE
         .get(id)
         .unwrap()
         .content
+        .comparison()
+        .unwrap()
         .editor
         .clone()
 }
@@ -146,6 +144,8 @@ fn disk_dialog_acknowledges_the_latest_displayed_version(cx: &mut TestAppContext
                 .get(id)
                 .unwrap()
                 .content
+                .comparison()
+                .unwrap()
                 .files
                 .notice()
                 .is_none()
@@ -181,6 +181,8 @@ fn watcher_bursts_do_not_publish_a_temporary_missing_file(cx: &mut TestAppContex
                 .get(id)
                 .unwrap()
                 .content
+                .comparison()
+                .unwrap()
                 .files
                 .notice()
                 .is_none()
@@ -326,6 +328,8 @@ fn keep_current_never_approves_overwrite_and_approval_is_for_one_disk_version(
                 .get(id)
                 .unwrap()
                 .content
+                .comparison()
+                .unwrap()
                 .files
                 .notice()
                 .unwrap()
@@ -378,6 +382,42 @@ fn reload_requires_discard_for_local_edits_and_resets_only_local_history(cx: &mu
         assert_eq!(copy_active_text(window, cx), "external\n");
         assert!(!editor(&workspace, id, cx).read(cx).needs_save());
     });
+}
+
+#[gpui_kit::test]
+fn preferences_shortcut_is_ignored_during_a_delayed_save_and_close(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let (id, local) = open_diff(&workspace, cx, directory.path());
+    let release = crate::storage::delay_next_save(&local);
+
+    cx.update(|window, cx| {
+        select_pane(window, cx, 0.75);
+        window.input("X", cx);
+        window.press("ctrl-w", cx);
+        window.click("save-and-close", cx);
+
+        assert!(workspace.read(cx).saving);
+        assert!(!window.has_active_dialog(cx));
+    });
+
+    cx.update(|window, cx| {
+        window.press(preferences_shortcut(), cx);
+
+        assert!(workspace.read(cx).saving);
+        assert!(workspace.read(cx).preferences.is_none());
+        assert!(!window.has_active_dialog(cx));
+        assert!(workspace.read(cx).tabs.get(id).is_some());
+    });
+
+    release.try_send(()).unwrap();
+    cx.run_until_parked();
+
+    cx.update(|_, cx| {
+        assert!(!workspace.read(cx).saving);
+        assert!(workspace.read(cx).tabs.get(id).is_none());
+    });
+    assert!(std::fs::read_to_string(local).unwrap().contains('X'));
 }
 
 #[gpui_kit::test]
@@ -476,11 +516,7 @@ fn a_save_in_another_tab_is_an_external_change_not_implicit_overwrite_approval(
     let second = cx.update(|window, cx| {
         workspace
             .update(cx, |view, cx| {
-                view.open_comparisons(
-                    &[ComparisonPaths::diff(baseline, local.clone())],
-                    window,
-                    cx,
-                )
+                view.open_comparisons(&[Comparison::diff(baseline, local.clone())], window, cx)
             })
             .unwrap();
         let second = workspace.read(cx).tabs.active.unwrap();
@@ -494,7 +530,15 @@ fn a_save_in_another_tab_is_an_external_change_not_implicit_overwrite_approval(
     scan(&workspace, cx);
 
     cx.update(|_, cx| {
-        let files = &workspace.read(cx).tabs.get(second).unwrap().content.files;
+        let files = &workspace
+            .read(cx)
+            .tabs
+            .get(second)
+            .unwrap()
+            .content
+            .comparison()
+            .unwrap()
+            .files;
         assert_eq!(files.notice().unwrap().role, Role::Local);
         assert_eq!(workspace.read(cx).tabs.active, Some(second));
     });
@@ -533,7 +577,7 @@ fn open_merge(
     let id = cx.update(|window, cx| {
         workspace
             .update(cx, |view, cx| {
-                view.open_comparisons(&[ComparisonPaths::Merge(paths.clone())], window, cx)
+                view.open_comparisons(&[Comparison::Merge(paths.clone())], window, cx)
             })
             .unwrap();
         window.render_frame(cx);
@@ -614,6 +658,8 @@ fn changed_merge_inputs_restart_explicitly_but_disappearing_inputs_keep_the_sess
                 .get(id)
                 .unwrap()
                 .content
+                .comparison()
+                .unwrap()
                 .files
                 .notice()
                 .is_none()

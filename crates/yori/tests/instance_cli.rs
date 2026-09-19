@@ -6,6 +6,8 @@
 )]
 #[path = "../src/comparison.rs"]
 mod comparison;
+#[path = "../src/invocation.rs"]
+mod invocation;
 #[expect(
     dead_code,
     reason = "the fake primary uses only the server half of the production protocol"
@@ -13,8 +15,9 @@ mod comparison;
 #[path = "../src/instance/protocol.rs"]
 mod protocol;
 
-use comparison::ComparisonPaths;
+use comparison::Comparison;
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, prelude::*};
+use invocation::InvocationRequest;
 use std::{
     ffi::OsString,
     io::Read,
@@ -28,7 +31,7 @@ use std::{
 };
 
 static NEXT_NAME: AtomicUsize = AtomicUsize::new(0);
-type Pending = (Vec<ComparisonPaths>, mpsc::SyncSender<Result<(), String>>);
+type Pending = (InvocationRequest, mpsc::SyncSender<Result<(), String>>);
 
 struct RunningCli(Child);
 
@@ -60,9 +63,9 @@ fn workspace_stub(
     let worker = thread::spawn(move || {
         for _ in 0..request_count {
             let mut stream = listener.accept().unwrap();
-            let comparisons = protocol::read_request(&mut stream).unwrap();
+            let invocation = protocol::read_request(&mut stream).unwrap();
             let (reply, response) = mpsc::sync_channel(1);
-            requests.send((comparisons, reply)).unwrap();
+            requests.send((invocation, reply)).unwrap();
             protocol::write_response(&mut stream, response.recv().unwrap()).unwrap();
         }
     });
@@ -116,31 +119,43 @@ fn paths() -> [OsString; 4] {
 }
 
 #[test]
-fn cli_forwards_diff_and_merge_roles_and_exits_only_after_the_reply() {
+fn cli_forwards_invocation_directories_and_file_roles_before_exiting() {
     let name = instance_name();
-    let directory = tempfile::tempdir().unwrap();
+    let repository_a = tempfile::tempdir().unwrap();
+    let repository_b = tempfile::tempdir().unwrap();
+    let repository_a_path = repository_a.path().canonicalize().unwrap();
+    let repository_b_path = repository_b.path().canonicalize().unwrap();
     let (incoming, worker) = workspace_stub(&name, 5);
     let paths = paths();
 
-    for (count, fail) in [(2, false), (0, false), (2, true), (4, false), (4, true)] {
-        let mut command = cli(&name, directory.path());
+    for (index, (count, fail)) in [(2, false), (0, false), (2, true), (4, false), (4, true)]
+        .into_iter()
+        .enumerate()
+    {
+        let directory = if index == 1 {
+            &repository_b_path
+        } else {
+            &repository_a_path
+        };
+        let mut command = cli(&name, directory);
         command.args(&paths[..count]);
         let mut child = RunningCli(command.spawn().unwrap());
-        let (comparisons, reply) = incoming.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (invocation, reply) = incoming.recv_timeout(Duration::from_secs(5)).unwrap();
         let expected = if count == 0 {
             Vec::new()
         } else {
             vec![
-                ComparisonPaths::from_paths(
+                Comparison::from_paths(
                     &paths[..count]
                         .iter()
-                        .map(|path| directory.path().join(path))
+                        .map(|path| directory.join(path))
                         .collect::<Vec<_>>(),
                 )
                 .unwrap(),
             ]
         };
-        assert_eq!(comparisons, expected);
+        assert_eq!(invocation.directory, directory.as_path());
+        assert_eq!(invocation.comparisons, expected);
         assert!(
             child.0.try_wait().unwrap().is_none(),
             "the CLI must wait until all inputs have been consumed"

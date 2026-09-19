@@ -27,9 +27,9 @@ use interprocess::{
     },
 };
 
-use crate::comparison::ComparisonPaths;
+use crate::invocation::InvocationRequest;
 
-const INSTANCE_NAME: &str = "io.github.trixnz.yori.instance.v1";
+const INSTANCE_NAME: &str = "io.github.trixnz.yori.instance.v2";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ELECTION_RETRY_INTERVAL: Duration = Duration::from_millis(10);
@@ -54,7 +54,7 @@ enum HandoffError {
 }
 
 pub(super) struct OpenRequest {
-    pub comparisons: Vec<ComparisonPaths>,
+    pub invocation: InvocationRequest,
     received: Instant,
     reply: mpsc::SyncSender<Result<(), String>>,
 }
@@ -101,23 +101,23 @@ impl Drop for ConnectionPermit {
 impl Instance {
     /// Return the primary instance, or `None` after a successful handoff. Failure
     /// never falls back to a second window: a timed-out request may have started.
-    pub fn start(comparisons: &[ComparisonPaths]) -> Result<Option<Self>, String> {
+    pub fn start(invocation: &InvocationRequest) -> Result<Option<Self>, String> {
         let name = std::env::var("YORI_INSTANCE_NAME").unwrap_or_else(|_| INSTANCE_NAME.into());
-        Self::establish(&name, comparisons)
+        Self::establish(&name, invocation)
     }
 
-    fn establish(name: &str, comparisons: &[ComparisonPaths]) -> Result<Option<Self>, String> {
-        Self::establish_with_before_handoff(name, comparisons, || {})
+    fn establish(name: &str, invocation: &InvocationRequest) -> Result<Option<Self>, String> {
+        Self::establish_with_before_handoff(name, invocation, || {})
     }
 
     fn establish_with_before_handoff(
         name: &str,
-        comparisons: &[ComparisonPaths],
+        invocation: &InvocationRequest,
         mut before_handoff: impl FnMut(),
     ) -> Result<Option<Self>, String> {
         let mut validation = Vec::new();
-        protocol::write_request(&mut validation, comparisons)
-            .map_err(|error| format!("invalid comparison request: {error}"))?;
+        protocol::write_request(&mut validation, invocation)
+            .map_err(|error| format!("invalid invocation request: {error}"))?;
         let election_started = Instant::now();
 
         loop {
@@ -132,7 +132,7 @@ impl Instance {
                 Ok(listener) => return Self::serve(listener),
                 Err(error) if socket_name_is_occupied(&error) => {
                     before_handoff();
-                    match Self::handoff(name, comparisons) {
+                    match Self::handoff(name, invocation) {
                         Ok(()) => return Ok(None),
                         Err(HandoffError::OwnerUnavailable(_))
                             if election_started.elapsed() < REQUEST_TIMEOUT =>
@@ -181,7 +181,7 @@ impl Instance {
         }))
     }
 
-    fn handoff(name: &str, comparisons: &[ComparisonPaths]) -> Result<(), HandoffError> {
+    fn handoff(name: &str, invocation: &InvocationRequest) -> Result<(), HandoffError> {
         let socket_name = name.to_ns_name::<GenericNamespaced>().map_err(|error| {
             HandoffError::Failed(format!("invalid yori instance name: {error}"))
         })?;
@@ -193,7 +193,7 @@ impl Instance {
         #[cfg(not(windows))]
         configure_timeouts(&stream).map_err(HandoffError::Failed)?;
 
-        protocol::write_request(&mut stream, comparisons).map_err(|error| {
+        protocol::write_request(&mut stream, invocation).map_err(|error| {
             HandoffError::Failed(format!("cannot send request to running yori: {error}"))
         })?;
         protocol::read_response(&mut stream).map_err(|error| {
@@ -257,8 +257,8 @@ fn handle_request(stream: &mut Stream, requests: &Sender<OpenRequest>) {
         return;
     }
 
-    let comparisons = match protocol::read_request(stream) {
-        Ok(comparisons) => comparisons,
+    let invocation = match protocol::read_request(stream) {
+        Ok(invocation) => invocation,
         Err(error) => {
             let _ = protocol::write_response(stream, Err(format!("invalid request: {error}")));
             return;
@@ -267,7 +267,7 @@ fn handle_request(stream: &mut Stream, requests: &Sender<OpenRequest>) {
     let (reply, response) = mpsc::sync_channel(1);
     if requests
         .try_send(OpenRequest {
-            comparisons,
+            invocation,
             received: Instant::now(),
             reply,
         })

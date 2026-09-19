@@ -19,7 +19,7 @@ use super::{AlignedEditor, LINE_HEIGHT, RESTORE_WIDTH, Side};
 
 impl AlignedEditor {
     pub(super) fn selection_restore(&self) -> Option<SelectionRestore> {
-        if self.merge.is_some() {
+        if self.merge.is_some() || !self.can_edit() {
             return None;
         }
 
@@ -52,6 +52,10 @@ impl AlignedEditor {
             .absolute()
             .size_full()
             .child(self.render_connections(geometry, cx));
+        if !self.can_edit() {
+            return controls;
+        }
+
         let first_row = whole_rows(self.vertical_scroll / LINE_HEIGHT);
         let viewport_end = self.vertical_scroll + geometry.rows_viewport_height();
         let button_top = |rows: &std::ops::Range<usize>| {

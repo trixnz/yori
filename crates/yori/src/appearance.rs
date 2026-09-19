@@ -140,10 +140,15 @@ mod tests {
             assert!(!bytes.is_empty(), "missing icon: {path}");
         }
 
-        let merge_icon = gpui_kit::assets::IconName::GitMerge;
-        let path = merge_icon.path();
-        let bytes = assets.load(path.as_ref()).unwrap().unwrap();
+        for icon in [
+            gpui_kit::assets::IconName::GitMerge,
+            gpui_kit::assets::IconName::GitPullRequest,
+            gpui_kit::assets::IconName::RefreshCw,
+        ] {
+            let path = icon.path();
+            let bytes = assets.load(path.as_ref()).unwrap().unwrap();
 
-        assert!(!bytes.is_empty(), "missing icon: {path}");
+            assert!(!bytes.is_empty(), "missing icon: {path}");
+        }
     }
 }

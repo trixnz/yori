@@ -145,6 +145,10 @@ impl AlignedEditor {
         }
         let dirty_changed = if let Some(edit) = &update.edit {
             self.right.refresh_after_edit(edit);
+            if self.right.highlighter.is_none() {
+                self.schedule_highlighting(Side::Right, window, cx);
+            }
+
             self.dirty.update(self.right.document.text())
         } else {
             false

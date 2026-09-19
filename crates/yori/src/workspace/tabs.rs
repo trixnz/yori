@@ -1,12 +1,54 @@
-//! Comparison identity and tab lifetime, independent of rendering.
+//! Workspace tab identity and lifetime, independent of rendering.
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
-use crate::comparison::ComparisonPaths;
+use crate::{comparison::Comparison, review::ReviewSourceIdentity};
+
+#[derive(Clone, Debug)]
+pub(super) enum TabIdentity {
+    Comparison(Comparison),
+    Review {
+        identity: ReviewSourceIdentity,
+        label: Arc<str>,
+    },
+}
+
+impl PartialEq for TabIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Comparison(left), Self::Comparison(right)) => left == right,
+            (
+                Self::Review { identity: left, .. },
+                Self::Review {
+                    identity: right, ..
+                },
+            ) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for TabIdentity {}
+
+impl TabIdentity {
+    pub(super) fn comparison(&self) -> Option<&Comparison> {
+        match self {
+            Self::Comparison(comparison) => Some(comparison),
+            Self::Review { .. } => None,
+        }
+    }
+
+    pub(super) fn description(&self) -> String {
+        match self {
+            Self::Comparison(comparison) => comparison.description(),
+            Self::Review { identity, .. } => identity.description(),
+        }
+    }
+}
 
 pub(super) struct Tab<T> {
     pub id: usize,
-    pub paths: ComparisonPaths,
+    pub identity: TabIdentity,
     pub content: T,
 }
 
@@ -27,10 +69,10 @@ impl<T> Default for Tabs<T> {
 }
 
 impl<T> Tabs<T> {
-    pub fn find(&self, paths: &ComparisonPaths) -> Option<usize> {
+    pub fn find(&self, identity: &TabIdentity) -> Option<usize> {
         self.entries
             .iter()
-            .find(|tab| &tab.paths == paths)
+            .find(|tab| &tab.identity == identity)
             .map(|tab| tab.id)
     }
 
@@ -45,15 +87,19 @@ impl<T> Tabs<T> {
     }
 
     /// Duplicate opens preserve the existing content rather than replacing it.
-    pub fn insert(&mut self, paths: ComparisonPaths, content: T) -> usize {
-        if let Some(id) = self.find(&paths) {
+    pub fn insert(&mut self, identity: TabIdentity, content: T) -> usize {
+        if let Some(id) = self.find(&identity) {
             self.activate(id);
             return id;
         }
 
         let id = self.next_id;
         self.next_id += 1;
-        self.entries.push(Tab { id, paths, content });
+        self.entries.push(Tab {
+            id,
+            identity,
+            content,
+        });
         self.active = Some(id);
 
         id
@@ -88,7 +134,13 @@ impl<T> Tabs<T> {
 
     pub fn label(&self, id: usize) -> String {
         let tab = self.get(id).expect("label requested for an existing tab");
-        let path = tab.paths.target();
+        let TabIdentity::Comparison(comparison) = &tab.identity else {
+            let TabIdentity::Review { label, .. } = &tab.identity else {
+                unreachable!();
+            };
+            return label.to_string();
+        };
+        let path = comparison.target();
         let name = path
             .file_name()
             .unwrap_or(path.as_os_str())
@@ -96,7 +148,8 @@ impl<T> Tabs<T> {
         let matching_names = self
             .entries
             .iter()
-            .filter(|other| other.paths.target().file_name() == path.file_name())
+            .filter_map(|other| other.identity.comparison())
+            .filter(|other| other.target().file_name() == path.file_name())
             .count();
         if matching_names == 1 {
             return name.into_owned();
@@ -107,10 +160,11 @@ impl<T> Tabs<T> {
         let matching_locals = self
             .entries
             .iter()
-            .filter(|other| other.paths.target() == path)
+            .filter_map(|other| other.identity.comparison())
+            .filter(|other| other.target() == path)
             .count();
         if matching_locals > 1 {
-            format!("{label} ← {}", tab.paths.qualifier())
+            format!("{label} ← {}", comparison.qualifier())
         } else {
             label
         }
@@ -121,8 +175,8 @@ impl<T> Tabs<T> {
 mod tests {
     use super::*;
 
-    fn pair(left: &str, right: &str) -> ComparisonPaths {
-        ComparisonPaths::diff(left.into(), right.into())
+    fn pair(left: &str, right: &str) -> TabIdentity {
+        TabIdentity::Comparison(Comparison::diff(left.into(), right.into()))
     }
 
     #[test]
@@ -162,7 +216,6 @@ mod tests {
         assert_eq!(tabs.entries.len(), 2);
         assert!(tabs.get(modified).unwrap().content);
 
-        // Only the confirmed close removes the specific tab, not the active one.
         tabs.remove(modified);
         assert_eq!(tabs.active, Some(clean));
         assert!(!tabs.requires_discard_confirmation(None, |dirty| *dirty));
@@ -187,6 +240,31 @@ mod tests {
     }
 
     #[test]
+    fn review_identity_deduplicates_independently_of_its_display_label() {
+        let mut tabs = Tabs::default();
+        let identity = ReviewSourceIdentity::new("test", "working");
+        let first = tabs.insert(
+            TabIdentity::Review {
+                identity: identity.clone(),
+                label: "Working changes".into(),
+            },
+            "first",
+        );
+        let duplicate = tabs.insert(
+            TabIdentity::Review {
+                identity,
+                label: "Changed label".into(),
+            },
+            "replacement",
+        );
+
+        assert_eq!(duplicate, first);
+        assert_eq!(tabs.entries.len(), 1);
+        assert_eq!(tabs.get(first).unwrap().content, "first");
+        assert_eq!(tabs.label(first), "Working changes");
+    }
+
+    #[test]
     fn merge_identity_includes_all_roles_and_preserves_independent_tabs() {
         let paths = crate::comparison::MergePaths {
             base: "/base.rs".into(),
@@ -194,7 +272,7 @@ mod tests {
             incoming: "/incoming.rs".into(),
             result: "/result.rs".into(),
         };
-        let original = ComparisonPaths::Merge(paths.clone());
+        let original = TabIdentity::Comparison(Comparison::Merge(paths.clone()));
         let mut tabs = Tabs::default();
         let first = tabs.insert(original.clone(), "edited first");
         let diff = tabs.insert(pair("/base.rs", "/result.rs"), "edited diff");
@@ -218,7 +296,10 @@ mod tests {
                 ..paths.clone()
             },
         ] {
-            let id = tabs.insert(ComparisonPaths::Merge(variant), "another merge");
+            let id = tabs.insert(
+                TabIdentity::Comparison(Comparison::Merge(variant)),
+                "another merge",
+            );
             assert_ne!(id, first);
             assert_ne!(id, diff);
         }
