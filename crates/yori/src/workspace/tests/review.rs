@@ -1133,6 +1133,7 @@ fn invocation_routes_git_chooser_and_deduplication_to_the_invoking_repository(
         let workspace = workspace.read(cx);
         assert_eq!(workspace.tabs.entries.len(), before + 1);
         let active = workspace.tabs.active.unwrap();
+        let repository_b = repository_b.path().canonicalize().unwrap();
         assert!(
             workspace
                 .tabs
@@ -1140,7 +1141,7 @@ fn invocation_routes_git_chooser_and_deduplication_to_the_invoking_repository(
                 .unwrap()
                 .identity
                 .description()
-                .contains(repository_b.path().to_str().unwrap())
+                .contains(repository_b.to_str().unwrap())
         );
     });
 

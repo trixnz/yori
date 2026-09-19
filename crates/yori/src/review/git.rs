@@ -1150,9 +1150,10 @@ mod tests {
         let Comparison::Diff(diff) = comparison.comparison() else {
             unreachable!()
         };
+        let expected_destination = fixture.root.join("mixed.txt").canonicalize().unwrap();
         assert_eq!(
             diff.local.save_destination(),
-            Some(fixture.root.join("mixed.txt").as_path())
+            Some(expected_destination.as_path())
         );
     }
 
