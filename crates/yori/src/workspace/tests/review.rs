@@ -904,6 +904,33 @@ pub(super) fn perforce_context() -> Arc<PerforceContext> {
 }
 
 #[gpui_kit::test]
+fn clicking_a_perforce_changelist_opens_its_review(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    cx.update(|window, cx| {
+        workspace.update(cx, |_, cx| {
+            Workspace::open_perforce_chooser(perforce_context(), window, cx);
+        });
+        window.render_frame(cx);
+
+        window.click(("perforce-source", 1usize), cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(!window.has_active_dialog(cx));
+
+        let active = workspace.read(cx).tabs.active.unwrap();
+        let tab = workspace.read(cx).tabs.get(active).unwrap();
+        assert!(matches!(tab.content, OpenTab::Review { .. }));
+        assert_eq!(
+            tab.identity.description(),
+            "Perforce: ssl:perforce.example:1666 | robin-yori | pending 42"
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn perforce_source_chooser_is_keyboard_first_without_stealing_input_keys(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
     let chooser = cx.update(|window, cx| {

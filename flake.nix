@@ -13,14 +13,14 @@
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      p4apiSha256 = "466352f49f585f514bfee13efcb927e93ea567bcc2dde200ef2c750d8555a0dc";
+      p4apiSha256 = "b3840d7e4b889e480929134703d2215409f8a86e8e206158fb6651734086805d";
       p4apiFor = system:
         let pkgs = import nixpkgs { inherit system; };
         in
         pkgs.fetchzip {
-          name = "p4api-glibc2.3-openssl3.5.tgz";
-          hash = "sha256-F/9Qhf5cAiiDcy0RhhGNc2mT7LlB8VKpVxDL+SY6zcg=";
-          url = "https://ftp.perforce.com/perforce/r25.1/bin.linux26x86_64/p4api-glibc2.3-openssl3.5.tgz";
+          name = "p4api-glibc2.12-openssl3.5.tgz";
+          hash = "sha256-hi6AzKkvHr+wYKCcas4pRr0orlzChsC60t1064pTV3o=";
+          url = "https://ftp.perforce.com/perforce/r25.1/bin.linux26x86_64/p4api-glibc2.12-openssl3.5.tgz";
         };
       p4apiCacheFor = system:
         let

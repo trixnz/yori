@@ -68,6 +68,7 @@ fn main() {
         println!("cargo:rustc-link-lib=static=client");
         println!("cargo:rustc-link-lib=static=rpc");
         println!("cargo:rustc-link-lib=static=supp");
+        println!("cargo:rustc-link-lib=static=p4script_cstub");
 
         link_openssl();
 
@@ -81,8 +82,8 @@ fn distribution(target: &str) -> Distribution {
     match target {
         "x86_64-unknown-linux-gnu" => Distribution {
             platform: "bin.linux26x86_64",
-            archive: "p4api-glibc2.3-openssl3.5.tgz",
-            sha256: "466352f49f585f514bfee13efcb927e93ea567bcc2dde200ef2c750d8555a0dc",
+            archive: "p4api-glibc2.12-openssl3.5.tgz",
+            sha256: "b3840d7e4b889e480929134703d2215409f8a86e8e206158fb6651734086805d",
         },
         "x86_64-pc-windows-msvc" => Distribution {
             platform: "bin.ntx64",

@@ -190,8 +190,8 @@ impl PerforceSourceChooser {
     }
 
     fn complete(source: ReviewSource, window: &mut Window, cx: &mut Context<Self>) {
-        window.close_dialog(cx);
         cx.emit(SourceChosen(source));
+        window.defer(cx, Window::close_dialog);
     }
 
     fn mode_button(
