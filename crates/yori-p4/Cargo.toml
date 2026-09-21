@@ -23,5 +23,5 @@ cxx = "=1.0.194"
 
 [build-dependencies]
 cxx-build = "=1.0.194"
-openssl-src = "=300.5.5"
+openssl-src = "=400.0.1"
 sha2 = "=0.10.9"
