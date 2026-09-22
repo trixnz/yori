@@ -1,8 +1,4 @@
-use std::{
-    borrow::Cow,
-    fmt::{self, Write as _},
-    path::Path,
-};
+use std::{borrow::Cow, fmt, process::ExitStatus};
 
 use crate::RawMessage;
 
@@ -22,7 +18,6 @@ pub enum ErrorKind {
     Cancelled,
     WorkerStopped,
     InvalidResponse,
-    Lifecycle,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,12 +70,36 @@ impl Error {
         }
     }
 
-    pub(crate) fn invalid_working_directory(path: &Path) -> Self {
+    pub(crate) fn process_start_failed(executable: &str, error: &std::io::Error) -> Self {
         Self {
             kind: ErrorKind::Configuration,
-            message: format!("working directory is not valid UTF-8: {}", path.display()),
-            remedy: Some("choose a workspace path that can be represented as UTF-8"),
+            message: format!("cannot run Perforce command-line client {executable}: {error}"),
+            remedy: Some("install P4 CLI and ensure p4 is on PATH"),
         }
+    }
+
+    pub(crate) fn process_io_failed(operation: &'static str) -> Self {
+        Self {
+            kind: ErrorKind::Command,
+            message: format!("cannot {operation}"),
+            remedy: Some("check the Perforce command details and retry"),
+        }
+    }
+
+    pub(crate) fn process_failed(command: &str, status: ExitStatus) -> Self {
+        Self {
+            kind: ErrorKind::Command,
+            message: format!("p4 {command} failed with {status}"),
+            remedy: Some("check the Perforce command details and retry"),
+        }
+    }
+
+    pub(crate) fn from_command_output(output: &[u8]) -> Self {
+        Self::from_message(&RawMessage {
+            severity: 3,
+            generic: 0,
+            text: output.to_vec(),
+        })
     }
 
     pub(crate) fn no_effective_mapping() -> Self {
@@ -93,26 +112,21 @@ impl Error {
         }
     }
 
-    pub(crate) fn lifecycle(phase: &str, messages: &[RawMessage]) -> Self {
-        let detail = messages
+    pub(crate) fn from_messages(messages: &[RawMessage]) -> Option<Self> {
+        messages
             .iter()
             .find(|message| message.severity >= 3)
-            .map_or(Cow::Borrowed("P4API returned no diagnostic"), message_text);
-
-        Self {
-            kind: ErrorKind::Lifecycle,
-            message: format!("Perforce native {phase} failed: {}", detail.trim()),
-            remedy: Some("restart yori; if the failure persists, reinstall the application"),
-        }
+            .map(Self::from_message)
     }
 
-    pub(crate) fn with_cleanup_failure(mut self, cleanup: &Self) -> Self {
-        let _ = write!(self.message, "; cleanup also failed: {}", cleanup.message);
-        self
+    pub(crate) fn from_command_messages(messages: &[RawMessage]) -> Option<Self> {
+        messages
+            .iter()
+            .find(|message| message.severity >= 2)
+            .map(Self::from_message)
     }
 
-    pub(crate) fn from_messages(messages: &[RawMessage]) -> Option<Self> {
-        let message = messages.iter().find(|message| message.severity >= 3)?;
+    fn from_message(message: &RawMessage) -> Self {
         let text = message_text(message);
         let normalized = text.to_ascii_lowercase();
         let (kind, remedy) = if normalized.contains("ssl")
@@ -131,7 +145,11 @@ impl Error {
                 ErrorKind::Authentication,
                 Some("log in with an existing Perforce client, then retry"),
             )
-        } else if message.generic == EV_COMM {
+        } else if message.generic == EV_COMM
+            || normalized.contains("connect to server failed")
+            || normalized.contains("tcp connect")
+            || normalized.contains("connection refused")
+        {
             (
                 ErrorKind::Connectivity,
                 Some("check P4PORT, network access, and the Perforce server status"),
@@ -161,11 +179,11 @@ impl Error {
             )
         };
 
-        Some(Self {
+        Self {
             kind,
             message: text.trim().to_owned(),
             remedy,
-        })
+        }
     }
 }
 

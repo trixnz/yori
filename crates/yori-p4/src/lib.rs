@@ -1,8 +1,7 @@
-//! Typed asynchronous access to Perforce review data through the official native P4API.
+//! Typed asynchronous access to Perforce review data through the `p4` command-line client.
 //!
-//! [`P4Client`] owns no native state itself. A dedicated worker thread creates, uses, and
-//! destroys the thread-affine C++ client. Connection setup reads ambient Perforce settings,
-//! including `P4CONFIG`, tickets, and trust files, from the supplied working directory.
+//! [`P4Client`] runs commands from the supplied working directory so `p4` discovers the same
+//! ambient `P4CONFIG`, ticket, trust, and Windows registry settings as an interactive invocation.
 
 mod client;
 mod error;
@@ -42,89 +41,36 @@ fn cancellation_requested(state: &CancellationState) -> bool {
         || state.parent.as_deref().is_some_and(cancellation_requested)
 }
 
-#[expect(
-    unsafe_code,
-    reason = "cxx generates the unsafe FFI implementation behind this safe, audited bridge"
-)]
-mod bridge {
-    pub(super) use super::{CancellationState, cancellation_requested};
-
-    #[cxx::bridge(namespace = "yori::p4")]
-    pub(crate) mod ffi {
-        #[derive(Clone, Debug, Default)]
-        struct RawField {
-            name: String,
-            value: Vec<u8>,
-        }
-
-        #[derive(Clone, Debug, Default)]
-        struct RawRecord {
-            fields: Vec<RawField>,
-        }
-
-        #[derive(Clone, Debug, Default)]
-        struct RawMessage {
-            severity: i32,
-            generic: i32,
-            text: Vec<u8>,
-        }
-
-        #[derive(Clone, Debug, Default)]
-        struct RawResult {
-            records: Vec<RawRecord>,
-            messages: Vec<RawMessage>,
-            output: Vec<u8>,
-        }
-
-        extern "Rust" {
-            type CancellationState;
-
-            fn cancellation_requested(state: &CancellationState) -> bool;
-        }
-
-        unsafe extern "C++" {
-            include!("p4_bridge.h");
-
-            type NativeThread;
-
-            fn start_thread(result: &mut RawResult) -> UniquePtr<NativeThread>;
-            fn ready(self: &NativeThread) -> bool;
-            fn shutdown(self: Pin<&mut NativeThread>, result: &mut RawResult);
-
-            type NativeClient;
-
-            fn connect(
-                cwd: &str,
-                port_override: &str,
-                result: &mut RawResult,
-            ) -> UniquePtr<NativeClient>;
-            fn connected(self: &NativeClient) -> bool;
-            fn close(self: Pin<&mut NativeClient>, result: &mut RawResult);
-            fn run(
-                self: Pin<&mut NativeClient>,
-                command: &str,
-                arguments: &[String],
-                cancellation: &CancellationState,
-                result: &mut RawResult,
-            );
-
-            fn capture_diagnostic(diagnostic: &[u8], result: &mut RawResult);
-        }
-    }
+#[derive(Clone, Debug, Default)]
+struct RawField {
+    name: String,
+    value: Vec<u8>,
 }
 
-use bridge::ffi;
-#[cfg(test)]
-use ffi::RawField;
-use ffi::{RawMessage, RawRecord, RawResult};
+#[derive(Clone, Debug, Default)]
+struct RawRecord {
+    fields: Vec<RawField>,
+}
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "this wrapper exists only for the native invalid-UTF-8 regression"
-    )
-)]
-fn capture_diagnostic_for_test(diagnostic: &[u8], result: &mut RawResult) {
-    ffi::capture_diagnostic(diagnostic, result);
+#[derive(Clone, Debug, Default)]
+struct RawMessage {
+    severity: i32,
+    generic: i32,
+    text: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RawPrintedFile {
+    depot_path: String,
+    revision: u32,
+    file_type: Option<String>,
+    contents: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RawResult {
+    records: Vec<RawRecord>,
+    messages: Vec<RawMessage>,
+    output: Vec<u8>,
+    printed_files: Vec<RawPrintedFile>,
 }

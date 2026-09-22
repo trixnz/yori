@@ -1,9 +1,12 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+};
 
 use crate::{
     ChangedFile, ChangelistDescription, ChangelistId, ChangelistStatus, ChangelistSummary,
-    ClientInfo, Error, FileAction, HaveRevision, OpenedFile, PendingChangelists, RawRecord,
-    RawResult, Result, WorkspaceMapping,
+    ClientInfo, DepotRevision, Error, ErrorKind, FileAction, HaveRevision, OpenedFile,
+    PendingChangelists, RawRecord, RawResult, Result, WorkspaceMapping,
 };
 
 struct Record<'a> {
@@ -77,14 +80,6 @@ impl<'a> Record<'a> {
 
 pub(crate) fn check_result(result: &RawResult) -> Result<()> {
     Error::from_messages(&result.messages).map_or(Ok(()), Err)
-}
-
-pub(crate) fn lifecycle_result(result: &RawResult, phase: &str) -> Result<()> {
-    if result.messages.iter().any(|message| message.severity >= 3) {
-        Err(Error::lifecycle(phase, &result.messages))
-    } else {
-        Ok(())
-    }
 }
 
 pub(crate) fn client_info(result: &RawResult) -> Result<ClientInfo> {
@@ -255,7 +250,14 @@ pub(crate) fn have_revisions(result: &RawResult) -> Result<Vec<HaveRevision>> {
 }
 
 pub(crate) fn workspace_mappings(result: &RawResult) -> Result<Vec<WorkspaceMapping>> {
-    check_result(result)?;
+    let command_error = Error::from_messages(&result.messages);
+    if command_error
+        .as_ref()
+        .is_some_and(|error| error.kind() != ErrorKind::Mapping)
+    {
+        return Err(command_error.expect("checked as present"));
+    }
+
     let mappings = result
         .records
         .iter()
@@ -272,15 +274,37 @@ pub(crate) fn workspace_mappings(result: &RawResult) -> Result<Vec<WorkspaceMapp
         .collect::<Result<Vec<_>>>()?;
 
     if mappings.iter().all(|mapping| mapping.is_exclusion) {
-        return Err(Error::no_effective_mapping());
+        return Err(command_error.unwrap_or_else(Error::no_effective_mapping));
     }
 
     Ok(mappings)
 }
 
-pub(crate) fn depot_content(result: &RawResult) -> Result<Vec<u8>> {
+pub(crate) fn depot_contents(
+    result: &RawResult,
+    expected: &[DepotRevision],
+) -> Result<HashMap<DepotRevision, Vec<u8>>> {
     check_result(result)?;
-    Ok(result.output.clone())
+
+    let mut contents = HashMap::with_capacity(result.printed_files.len());
+    for file in &result.printed_files {
+        let revision = DepotRevision::new(file.depot_path.clone(), file.revision)?;
+        contents.insert(revision, file.contents.clone());
+    }
+
+    for revision in expected {
+        if !contents.contains_key(revision) {
+            if let Some(error) = Error::from_command_messages(&result.messages) {
+                return Err(error);
+            }
+
+            return Err(Error::invalid_response(format!(
+                "p4 print omitted {revision}"
+            )));
+        }
+    }
+
+    Ok(contents)
 }
 
 fn parse_status(value: Option<&str>) -> Option<ChangelistStatus> {
@@ -311,8 +335,7 @@ mod tests {
     fn result(records: Vec<RawRecord>) -> RawResult {
         RawResult {
             records,
-            messages: Vec::new(),
-            output: Vec::new(),
+            ..RawResult::default()
         }
     }
 
@@ -479,11 +502,23 @@ mod tests {
     }
 
     #[test]
-    fn depot_content_preserves_arbitrary_bytes() {
+    fn depot_contents_preserve_framed_file_bytes() {
+        let revision = DepotRevision {
+            depot_path: "//depot/file.txt".into(),
+            revision: std::num::NonZeroU32::new(3).unwrap(),
+        };
         let mut result = result(Vec::new());
-        result.output = vec![0x00, 0x7f, 0x80, 0xff];
+        result.printed_files.push(crate::RawPrintedFile {
+            depot_path: revision.depot_path.clone(),
+            revision: revision.revision.get(),
+            file_type: Some("text".into()),
+            contents: vec![0x00, 0x7f, 0x80, 0xff],
+        });
 
-        assert_eq!(depot_content(&result).unwrap(), result.output);
+        assert_eq!(
+            depot_contents(&result, std::slice::from_ref(&revision)).unwrap()[&revision],
+            vec![0x00, 0x7f, 0x80, 0xff]
+        );
     }
 
     #[test]
@@ -495,13 +530,12 @@ mod tests {
         );
 
         let failed = RawResult {
-            records: Vec::new(),
             messages: vec![RawMessage {
                 severity: 3,
                 generic: 0x26,
                 text: b"Connect to server failed".to_vec(),
             }],
-            output: Vec::new(),
+            ..RawResult::default()
         };
         assert_eq!(
             opened_files(&failed).unwrap_err().kind(),

@@ -9,9 +9,6 @@ fn main() {
         return;
     }
 
-    // openssl-src's static objects reference a build-only PDB which is not shipped.
-    println!("cargo:rustc-link-arg=/IGNORE:4099");
-
     winresource::WindowsResource::new()
         .set_icon(&icon.to_string_lossy())
         .compile()

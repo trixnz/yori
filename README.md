@@ -29,8 +29,7 @@ restoration, conflict resolution, and multiple open files in a tabbed workspace.
 
 - Multi-file review of any Git revision: a commit, branch, tag, or other revision
 - Review of uncommitted working changes, including untracked files
-- Perforce pending and submitted changelists through the native P4API, without the
-  `p4` executable
+- Perforce pending and submitted changelists through the user-installed `p4` CLI
 - Keyboard-first file navigator with per-file change counts
 - Local files stay editable in working-change and pending-changelist reviews;
   historical revisions open read-only
@@ -93,23 +92,14 @@ extra-trusted-public-keys = trixnz-yori.cachix.org-1:v0OV3ETheOdXTYZRhtaDUeO5dEt
 
 ## Building from source
 
-Perforce review links Perforce's official C++ P4API rather than shelling out to the
-`p4` executable. Cargo downloads the pinned P4API for the build target on first use,
-verifies its SHA-256, and reuses the extracted files from the platform cache.
-That cache lives under `%LOCALAPPDATA%\yori\p4api` on Windows and
-`$XDG_CACHE_HOME/yori/p4api` or `~/.cache/yori/p4api` on Linux:
+Build yori with Cargo:
 
 ```sh
 cargo build --release -p yori
 ```
 
-P4API and the pinned OpenSSL 3.5 source are statically linked. Building requires
-`curl`, `tar`, Perl, and the platform C/C++ build toolchain, including `make` on
-Unix, but no system OpenSSL development package. Windows 10 and later include
-`curl` and `tar`; Nix provisions all required build tools and the P4API cache.
-
-The resulting binary carries P4API with it. Running yori needs no Perforce
-installation, though Perforce review still needs a reachable server and the client
+Perforce support adds no native build dependencies. At runtime, Perforce review
+requires the official `p4` executable on `PATH`, a reachable server, and the client
 configuration described under [Usage](#reviewing-changes).
 
 ### Nix
@@ -172,9 +162,10 @@ its change counts. Working changes and Perforce pending changelists leave the lo
 file editable and saveable; committed and submitted revisions open read-only on both
 sides.
 
-Perforce review reads the ambient configuration of the launch directory, including
-`P4CONFIG`, ticket, and trust files, and offers the pending and submitted changelists
-of that client.
+Perforce review invokes `p4` from the launch directory and reads its ambient
+configuration, including `P4CONFIG`, ticket, and trust files. The `p4` executable
+must be available on `PATH`. yori offers the pending and submitted changelists of
+that client.
 
 ## Keyboard shortcuts
 
@@ -218,7 +209,7 @@ change made through the dialog.
 
 - `crates/yori-document` owns source text, line endings, edits, and history.
 - `crates/yori-diff` owns comparison, alignment, restoration, and merge behavior.
-- `crates/yori-p4` owns asynchronous access to the native Perforce P4API.
+- `crates/yori-p4` owns asynchronous access to the Perforce `p4` CLI.
 - `crates/yori` owns the application and native interface.
 
 The document and diff crates remain independent of the UI framework and can be
@@ -237,6 +228,4 @@ This checks formatting, Clippy, tests, and the native build.
 
 ## License
 
-yori is available under the [MIT License](LICENSE). Binary distributions also
-include the applicable [third-party notices](THIRD_PARTY_NOTICES.md) for P4API,
-OpenSSL, and bundled components.
+yori is available under the [MIT License](LICENSE).

@@ -19,21 +19,12 @@ jobs:
     name: Linux
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    env:
-      P4API_CACHE_DIR: ${{ github.workspace }}/.cache/p4api
 
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Restore P4API cache
-        id: restore-p4api
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: .cache/p4api
-          key: p4api-x86_64-unknown-linux-gnu-${{ hashFiles('crates/yori-p4/build.rs') }}
 
       - name: Install system dependencies
         run: |
@@ -66,32 +57,16 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace --locked
 
-      - name: Save P4API cache
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.restore-p4api.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: .cache/p4api
-          key: ${{ steps.restore-p4api.outputs.cache-primary-key }}
-
   windows:
     name: Windows
     runs-on: windows-2025
     timeout-minutes: 45
-    env:
-      P4API_CACHE_DIR: ${{ github.workspace }}\.cache\p4api
 
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Restore P4API cache
-        id: restore-p4api
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: .cache/p4api
-          key: p4api-x86_64-pc-windows-msvc-${{ hashFiles('crates/yori-p4/build.rs') }}
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
@@ -110,13 +85,6 @@ jobs:
 
       - name: Build workspace
         run: cargo build --workspace --locked
-
-      - name: Save P4API cache
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.restore-p4api.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: .cache/p4api
-          key: ${{ steps.restore-p4api.outputs.cache-primary-key }}
 
   nix:
     name: Nix

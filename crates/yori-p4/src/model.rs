@@ -157,10 +157,22 @@ pub struct WorkspaceMapping {
     pub is_exclusion: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DepotRevision {
     pub depot_path: String,
     pub revision: NonZeroU32,
+}
+
+impl DepotRevision {
+    pub(crate) fn new(depot_path: String, revision: u32) -> crate::Result<Self> {
+        let revision = NonZeroU32::new(revision)
+            .ok_or_else(|| crate::Error::invalid_response("p4 print returned revision zero"))?;
+
+        Ok(Self {
+            depot_path,
+            revision,
+        })
+    }
 }
 
 impl fmt::Display for DepotRevision {

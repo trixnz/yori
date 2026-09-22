@@ -70,14 +70,17 @@ trait PerforceConnection: Send + Sync {
         &self,
         file_specifications: &[String],
     ) -> MappingResult<Vec<WorkspaceMapping>>;
-    fn depot_content(&self, revision: &DepotRevision) -> ProviderResult<Vec<u8>>;
+    fn depot_contents(
+        &self,
+        revisions: &[DepotRevision],
+    ) -> ProviderResult<HashMap<DepotRevision, Vec<u8>>>;
 }
 
-struct NativePerforceConnection {
+struct CliPerforceConnection {
     client: P4Client,
 }
 
-impl NativePerforceConnection {
+impl CliPerforceConnection {
     fn connect(directory: &Path) -> ProviderResult<Arc<dyn PerforceConnection>> {
         let client = block_on(P4Client::connect(directory)).map_err(|error| error.to_string())?;
 
@@ -85,7 +88,7 @@ impl NativePerforceConnection {
     }
 }
 
-impl PerforceConnection for NativePerforceConnection {
+impl PerforceConnection for CliPerforceConnection {
     fn client_info(&self) -> ProviderResult<ClientInfo> {
         block_on(self.client.client_info(&yori_p4::CancellationToken::new()))
             .map_err(|error| error.to_string())
@@ -150,10 +153,13 @@ impl PerforceConnection for NativePerforceConnection {
         .map_err(ConnectionFailure::from)
     }
 
-    fn depot_content(&self, revision: &DepotRevision) -> ProviderResult<Vec<u8>> {
+    fn depot_contents(
+        &self,
+        revisions: &[DepotRevision],
+    ) -> ProviderResult<HashMap<DepotRevision, Vec<u8>>> {
         block_on(
             self.client
-                .depot_content(revision, &yori_p4::CancellationToken::new()),
+                .depot_contents(revisions, &yori_p4::CancellationToken::new()),
         )
         .map_err(|error| error.to_string())
     }
@@ -199,7 +205,7 @@ pub(crate) struct PerforceContext {
 
 impl PerforceContext {
     pub(crate) fn discover(directory: &Path) -> ProviderResult<Self> {
-        let connection = NativePerforceConnection::connect(directory)?;
+        let connection = CliPerforceConnection::connect(directory)?;
         Self::discover_with(connection)
     }
 
@@ -372,7 +378,14 @@ impl PerforceConnection for StaticTestConnection {
         Ok(Vec::new())
     }
 
-    fn depot_content(&self, revision: &DepotRevision) -> ProviderResult<Vec<u8>> {
+    fn depot_contents(
+        &self,
+        revisions: &[DepotRevision],
+    ) -> ProviderResult<HashMap<DepotRevision, Vec<u8>>> {
+        let Some(revision) = revisions.first() else {
+            return Ok(HashMap::new());
+        };
+
         Err(format!("missing test content for {revision}"))
     }
 }
@@ -427,6 +440,16 @@ impl PerforceReviewProvider {
             .into_iter()
             .map(|revision| (revision.depot_path.clone(), revision))
             .collect::<HashMap<_, _>>();
+        let mapping_specs = opened
+            .iter()
+            .filter(|file| file.local_path.is_none())
+            .map(|file| file.depot_path.clone())
+            .collect::<Vec<_>>();
+        let mappings = self
+            .mappings_for(&mapping_specs)
+            .map_err(|error| error.to_string())?;
+        let baseline_revisions = pending_baseline_revisions(&opened, &have)?;
+        let contents = self.connection.depot_contents(&baseline_revisions)?;
         let paired_move_deletes = paired_move_deletes_opened(&opened);
         let mut files = Vec::with_capacity(opened.len());
 
@@ -437,7 +460,7 @@ impl PerforceReviewProvider {
                 continue;
             }
 
-            files.push(self.pending_file(file, &opened, &have)?);
+            files.push(self.pending_file(file, &opened, &have, &mappings, &contents)?);
         }
 
         ReviewManifest::new(files)
@@ -448,8 +471,10 @@ impl PerforceReviewProvider {
         file: &OpenedFile,
         opened: &[OpenedFile],
         have: &HashMap<String, HaveRevision>,
+        mappings: &HashMap<String, WorkspaceMapping>,
+        contents: &HashMap<DepotRevision, Vec<u8>>,
     ) -> ProviderResult<ReviewFile> {
-        let local_path = self.pending_local_path(file)?;
+        let local_path = self.pending_local_path(file, mappings)?;
         let logical_path = self.logical_path(&local_path);
         let identity = ReviewFileIdentity::new(file.depot_path.clone());
         let rename_source = move_source_opened(file, opened);
@@ -488,7 +513,7 @@ impl PerforceReviewProvider {
                     });
                 };
 
-                let baseline = self.pending_baseline(source, have)?;
+                let baseline = pending_baseline(source, have, contents)?;
 
                 TextComparison::new(
                     ComparisonDocument::read_only_memory(
@@ -508,7 +533,7 @@ impl PerforceReviewProvider {
                 logical_path.clone(),
                 ComparisonDocument::read_only_memory(
                     logical_path.clone(),
-                    self.pending_baseline(file, have)?,
+                    pending_baseline(file, have, contents)?,
                 ),
             )?,
             FileAction::Branch
@@ -518,7 +543,7 @@ impl PerforceReviewProvider {
             | FileAction::Unknown(_) => TextComparison::new(
                 ComparisonDocument::read_only_memory(
                     logical_path.clone(),
-                    self.pending_baseline(file, have)?,
+                    pending_baseline(file, have, contents)?,
                 ),
                 ComparisonDocument::editable_file(local_path),
             )?,
@@ -527,37 +552,18 @@ impl PerforceReviewProvider {
         Ok(ReviewFile::text(identity, logical_path, status, comparison))
     }
 
-    fn pending_baseline(
+    fn pending_local_path(
         &self,
         file: &OpenedFile,
-        have: &HashMap<String, HaveRevision>,
-    ) -> ProviderResult<Vec<u8>> {
-        let revision = have
-            .get(&file.depot_path)
-            .map(|revision| revision.revision)
-            .or(file.have_revision)
-            .and_then(NonZeroU32::new)
-            .ok_or_else(|| {
-                format!(
-                    "{} has no HAVE revision; sync the workspace file or reopen it for add",
-                    file.depot_path
-                )
-            })?;
-
-        self.connection.depot_content(&DepotRevision {
-            depot_path: file.depot_path.clone(),
-            revision,
-        })
-    }
-
-    fn pending_local_path(&self, file: &OpenedFile) -> ProviderResult<PathBuf> {
+        mappings: &HashMap<String, WorkspaceMapping>,
+    ) -> ProviderResult<PathBuf> {
         if let Some(path) = &file.local_path {
             return Ok(path.clone());
         }
 
-        self.effective_mapping(&file.depot_path)
-            .map_err(|error| error.to_string())?
-            .map(|mapping| mapping.local_path)
+        mappings
+            .get(&file.depot_path)
+            .map(|mapping| mapping.local_path.clone())
             .ok_or_else(|| {
                 format!(
                     "{} is not mapped by the active Perforce client {}; check P4CLIENT and its view",
@@ -572,17 +578,18 @@ impl PerforceReviewProvider {
             return Err(format!("changelist {changelist} is not submitted"));
         }
 
-        let mut mappings = HashMap::new();
-        for file in &description.files {
-            if let Some(mapping) = self
-                .effective_mapping(&file.depot_path)
-                .map_err(|error| error.to_string())?
-            {
-                mappings.insert(file.depot_path.clone(), mapping);
-            }
-        }
-
+        let mapping_specs = description
+            .files
+            .iter()
+            .map(|file| file.depot_path.clone())
+            .collect::<Vec<_>>();
+        let mappings = self
+            .mappings_for(&mapping_specs)
+            .map_err(|error| error.to_string())?;
         let represented_move_deletes = represented_move_deletes(&description.files, &mappings);
+        let content_revisions =
+            submitted_content_revisions(&description.files, &mappings, &represented_move_deletes)?;
+        let contents = self.connection.depot_contents(&content_revisions)?;
         let mut files = Vec::with_capacity(mappings.len());
 
         for file in &description.files {
@@ -597,7 +604,7 @@ impl PerforceReviewProvider {
             }
 
             let rename_source = move_source_changed(file, &description.files);
-            files.push(self.submitted_file(file, rename_source, mapping)?);
+            files.push(self.submitted_file(file, rename_source, mapping, &contents)?);
         }
 
         if files.is_empty() && !description.files.is_empty() {
@@ -615,6 +622,7 @@ impl PerforceReviewProvider {
         file: &ChangedFile,
         rename_source: Option<&ChangedFile>,
         mapping: &WorkspaceMapping,
+        contents: &HashMap<DepotRevision, Vec<u8>>,
     ) -> ProviderResult<ReviewFile> {
         let logical_path = self.logical_path(&mapping.local_path);
         let identity = ReviewFileIdentity::new(file.depot_path.clone());
@@ -638,13 +646,13 @@ impl PerforceReviewProvider {
                 logical_path.clone(),
                 ComparisonDocument::read_only_memory(
                     logical_path.clone(),
-                    self.submitted_content(file)?,
+                    submitted_content(file, contents)?,
                 ),
             )?,
             FileAction::MoveAdd => {
                 let baseline = rename_source.map_or_else(
                     || Ok(Vec::new()),
-                    |source| self.submitted_previous_content(source),
+                    |source| submitted_previous_content(source, contents),
                 )?;
                 let baseline_path = rename_source.map_or_else(
                     || logical_path.clone(),
@@ -655,7 +663,7 @@ impl PerforceReviewProvider {
                     ComparisonDocument::read_only_memory(baseline_path, baseline),
                     ComparisonDocument::read_only_memory(
                         logical_path.clone(),
-                        self.submitted_content(file)?,
+                        submitted_content(file, contents)?,
                     ),
                 )?
             }
@@ -666,7 +674,7 @@ impl PerforceReviewProvider {
                 logical_path.clone(),
                 ComparisonDocument::read_only_memory(
                     logical_path.clone(),
-                    self.submitted_previous_content(file)?,
+                    submitted_previous_content(file, contents)?,
                 ),
             )?,
             FileAction::Branch
@@ -676,11 +684,11 @@ impl PerforceReviewProvider {
             | FileAction::Unknown(_) => TextComparison::new(
                 ComparisonDocument::read_only_memory(
                     logical_path.clone(),
-                    self.submitted_previous_content(file)?,
+                    submitted_previous_content(file, contents)?,
                 ),
                 ComparisonDocument::read_only_memory(
                     logical_path.clone(),
-                    self.submitted_content(file)?,
+                    submitted_content(file, contents)?,
                 ),
             )?,
         };
@@ -688,42 +696,28 @@ impl PerforceReviewProvider {
         Ok(ReviewFile::text(identity, logical_path, status, comparison))
     }
 
-    fn submitted_content(&self, file: &ChangedFile) -> ProviderResult<Vec<u8>> {
-        let revision = NonZeroU32::new(file.revision).ok_or_else(|| {
-            format!(
-                "Perforce returned revision zero for submitted file {}",
-                file.depot_path
-            )
-        })?;
+    fn mappings_for(
+        &self,
+        depot_paths: &[String],
+    ) -> MappingResult<HashMap<String, WorkspaceMapping>> {
+        if depot_paths.is_empty() {
+            return Ok(HashMap::new());
+        }
 
-        self.connection.depot_content(&DepotRevision {
-            depot_path: file.depot_path.clone(),
-            revision,
-        })
-    }
-
-    fn submitted_previous_content(&self, file: &ChangedFile) -> ProviderResult<Vec<u8>> {
-        let Some(revision) = file.revision.checked_sub(1).and_then(NonZeroU32::new) else {
-            return Ok(Vec::new());
-        };
-
-        self.connection.depot_content(&DepotRevision {
-            depot_path: file.depot_path.clone(),
-            revision,
-        })
-    }
-
-    fn effective_mapping(&self, depot_path: &str) -> MappingResult<Option<WorkspaceMapping>> {
-        let mappings = match self.connection.workspace_mappings(&[depot_path.to_owned()]) {
+        let mappings = match self.connection.workspace_mappings(depot_paths) {
             Ok(mappings) => mappings,
-            Err(error) if error.kind == ErrorKind::Mapping => return Ok(None),
+            Err(error) if error.kind == ErrorKind::Mapping => return Ok(HashMap::new()),
             Err(error) => return Err(error),
         };
+        let mut effective = HashMap::new();
 
-        Ok(mappings
-            .into_iter()
-            .rev()
-            .find(|mapping| !mapping.is_exclusion))
+        for mapping in mappings {
+            if !mapping.is_exclusion {
+                effective.insert(mapping.depot_path.clone(), mapping);
+            }
+        }
+
+        Ok(effective)
     }
 
     fn logical_path(&self, local_path: &Path) -> PathBuf {
@@ -743,6 +737,177 @@ impl PerforceReviewProvider {
             || PathBuf::from(depot_path.trim_start_matches("//")),
             |path| self.logical_path(path),
         )
+    }
+}
+
+fn pending_baseline_revisions(
+    opened: &[OpenedFile],
+    have: &HashMap<String, HaveRevision>,
+) -> ProviderResult<Vec<DepotRevision>> {
+    let mut revisions = Vec::new();
+
+    for file in opened {
+        if is_binary(file.file_type.as_deref()) {
+            continue;
+        }
+
+        let baseline = match file.action {
+            FileAction::Add => None,
+            FileAction::MoveAdd => move_source_opened(file, opened),
+            FileAction::Archive
+            | FileAction::Branch
+            | FileAction::Delete
+            | FileAction::Edit
+            | FileAction::Import
+            | FileAction::Integrate
+            | FileAction::MoveDelete
+            | FileAction::Purge
+            | FileAction::Unknown(_) => Some(file),
+        };
+
+        if let Some(baseline) = baseline {
+            push_unique_revision(&mut revisions, pending_baseline_revision(baseline, have)?);
+        }
+    }
+
+    Ok(revisions)
+}
+
+fn pending_baseline_revision(
+    file: &OpenedFile,
+    have: &HashMap<String, HaveRevision>,
+) -> ProviderResult<DepotRevision> {
+    let revision = have
+        .get(&file.depot_path)
+        .map(|revision| revision.revision)
+        .or(file.have_revision)
+        .and_then(NonZeroU32::new)
+        .ok_or_else(|| {
+            format!(
+                "{} has no HAVE revision; sync the workspace file or reopen it for add",
+                file.depot_path
+            )
+        })?;
+
+    Ok(DepotRevision {
+        depot_path: file.depot_path.clone(),
+        revision,
+    })
+}
+
+fn pending_baseline(
+    file: &OpenedFile,
+    have: &HashMap<String, HaveRevision>,
+    contents: &HashMap<DepotRevision, Vec<u8>>,
+) -> ProviderResult<Vec<u8>> {
+    content_for(contents, &pending_baseline_revision(file, have)?)
+}
+
+fn submitted_content_revisions(
+    files: &[ChangedFile],
+    mappings: &HashMap<String, WorkspaceMapping>,
+    represented_move_deletes: &HashSet<String>,
+) -> ProviderResult<Vec<DepotRevision>> {
+    let mut revisions = Vec::new();
+
+    for file in files {
+        if !mappings.contains_key(&file.depot_path)
+            || is_binary(file.file_type.as_deref())
+            || (matches!(file.action, FileAction::MoveDelete)
+                && represented_move_deletes.contains(&file.depot_path))
+        {
+            continue;
+        }
+
+        match file.action {
+            FileAction::Add => {
+                push_unique_revision(&mut revisions, submitted_revision(file)?);
+            }
+            FileAction::MoveAdd => {
+                if let Some(source) = move_source_changed(file, files)
+                    && let Some(revision) = submitted_previous_revision(source)
+                {
+                    push_unique_revision(&mut revisions, revision);
+                }
+                push_unique_revision(&mut revisions, submitted_revision(file)?);
+            }
+            FileAction::Delete
+            | FileAction::MoveDelete
+            | FileAction::Archive
+            | FileAction::Purge => {
+                if let Some(revision) = submitted_previous_revision(file) {
+                    push_unique_revision(&mut revisions, revision);
+                }
+            }
+            FileAction::Branch
+            | FileAction::Edit
+            | FileAction::Import
+            | FileAction::Integrate
+            | FileAction::Unknown(_) => {
+                if let Some(revision) = submitted_previous_revision(file) {
+                    push_unique_revision(&mut revisions, revision);
+                }
+                push_unique_revision(&mut revisions, submitted_revision(file)?);
+            }
+        }
+    }
+
+    Ok(revisions)
+}
+
+fn submitted_revision(file: &ChangedFile) -> ProviderResult<DepotRevision> {
+    let revision = NonZeroU32::new(file.revision).ok_or_else(|| {
+        format!(
+            "Perforce returned revision zero for submitted file {}",
+            file.depot_path
+        )
+    })?;
+
+    Ok(DepotRevision {
+        depot_path: file.depot_path.clone(),
+        revision,
+    })
+}
+
+fn submitted_previous_revision(file: &ChangedFile) -> Option<DepotRevision> {
+    let revision = file.revision.checked_sub(1).and_then(NonZeroU32::new)?;
+
+    Some(DepotRevision {
+        depot_path: file.depot_path.clone(),
+        revision,
+    })
+}
+
+fn submitted_content(
+    file: &ChangedFile,
+    contents: &HashMap<DepotRevision, Vec<u8>>,
+) -> ProviderResult<Vec<u8>> {
+    content_for(contents, &submitted_revision(file)?)
+}
+
+fn submitted_previous_content(
+    file: &ChangedFile,
+    contents: &HashMap<DepotRevision, Vec<u8>>,
+) -> ProviderResult<Vec<u8>> {
+    submitted_previous_revision(file).map_or_else(
+        || Ok(Vec::new()),
+        |revision| content_for(contents, &revision),
+    )
+}
+
+fn content_for(
+    contents: &HashMap<DepotRevision, Vec<u8>>,
+    revision: &DepotRevision,
+) -> ProviderResult<Vec<u8>> {
+    contents
+        .get(revision)
+        .cloned()
+        .ok_or_else(|| format!("Perforce omitted content for {revision}"))
+}
+
+fn push_unique_revision(revisions: &mut Vec<DepotRevision>, revision: DepotRevision) {
+    if !revisions.contains(&revision) {
+        revisions.push(revision);
     }
 }
 
@@ -932,26 +1097,51 @@ mod tests {
             &self,
             file_specifications: &[String],
         ) -> MappingResult<Vec<WorkspaceMapping>> {
-            let Some(path) = file_specifications.first() else {
-                return Err(ConnectionFailure {
-                    kind: ErrorKind::InvalidResponse,
-                    message: "missing file specification".into(),
-                });
-            };
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("where:{}", file_specifications.join(",")));
+            let mut mappings = Vec::new();
 
-            self.calls.lock().unwrap().push(format!("where:{path}"));
-            self.mappings
-                .get(path)
-                .cloned()
-                .unwrap_or_else(|| Ok(Vec::new()))
+            for path in file_specifications {
+                match self
+                    .mappings
+                    .get(path)
+                    .cloned()
+                    .unwrap_or_else(|| Ok(Vec::new()))
+                {
+                    Ok(found) => mappings.extend(found),
+                    Err(error) if error.kind == ErrorKind::Mapping => {}
+                    Err(error) => return Err(error),
+                }
+            }
+
+            Ok(mappings)
         }
 
-        fn depot_content(&self, revision: &DepotRevision) -> ProviderResult<Vec<u8>> {
-            self.calls.lock().unwrap().push(format!("print:{revision}"));
-            self.contents
-                .get(&revision.to_string())
-                .cloned()
-                .ok_or_else(|| format!("missing content for {revision}"))
+        fn depot_contents(
+            &self,
+            revisions: &[DepotRevision],
+        ) -> ProviderResult<HashMap<DepotRevision, Vec<u8>>> {
+            self.calls.lock().unwrap().push(format!(
+                "print:{}",
+                revisions
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+
+            revisions
+                .iter()
+                .map(|revision| {
+                    self.contents
+                        .get(&revision.to_string())
+                        .cloned()
+                        .map(|content| (revision.clone(), content))
+                        .ok_or_else(|| format!("missing content for {revision}"))
+                })
+                .collect()
         }
     }
 
@@ -1326,12 +1516,22 @@ mod tests {
         fake.contents
             .insert("//depot/old.txt#5".into(), b"before move\n".to_vec());
         let fake = Arc::new(fake);
-        let context = PerforceContext::discover_with(fake).unwrap();
+        let context = PerforceContext::discover_with(fake.clone()).unwrap();
         let source = context.pending_source(&context.pending.default);
 
         let manifest = source.provider.load_manifest(&source.identity).unwrap();
 
         assert_pending_action_manifest(&manifest, &paths);
+        assert_eq!(
+            fake.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| call.starts_with("print:"))
+                .count(),
+            1,
+            "a pending review must batch all depot content into one command"
+        );
     }
 
     #[test]
@@ -1421,12 +1621,30 @@ mod tests {
         fake.contents
             .insert("//depot/deleted.txt#2".into(), b"before delete\n".to_vec());
         let fake = Arc::new(fake);
-        let context = PerforceContext::discover_with(fake).unwrap();
+        let context = PerforceContext::discover_with(fake.clone()).unwrap();
         let source = context.submitted_source(&context.recent[0]).unwrap();
 
         let manifest = source.provider.load_manifest(&source.identity).unwrap();
 
         assert_eq!(manifest.files.len(), 3);
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("where:"))
+                .count(),
+            1,
+            "a submitted review must batch all workspace mappings into one command"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("print:"))
+                .count(),
+            1,
+            "a submitted review must batch all depot content into one command"
+        );
+        drop(calls);
 
         let renamed = &manifest.files[0];
         let renamed_text = text_details(renamed);

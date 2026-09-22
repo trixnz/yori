@@ -17,31 +17,9 @@
     let
       systems = [ "x86_64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-      p4apiSha256 = "b3840d7e4b889e480929134703d2215409f8a86e8e206158fb6651734086805d";
-      p4apiFor = system:
-        let pkgs = import nixpkgs { inherit system; };
-        in
-        pkgs.fetchzip {
-          name = "p4api-glibc2.12-openssl3.5.tgz";
-          hash = "sha256-hi6AzKkvHr+wYKCcas4pRr0orlzChsC60t1064pTV3o=";
-          url = "https://ftp.perforce.com/perforce/r25.1/bin.linux26x86_64/p4api-glibc2.12-openssl3.5.tgz";
-        };
-      p4apiCacheFor = system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-          p4api = p4apiFor system;
-          target = "x86_64-unknown-linux-gnu";
-        in
-        pkgs.runCommand "yori-p4api-cache" { } ''
-          cache="$out/${target}/${p4apiSha256}"
-          mkdir -p "$cache"
-          ln -s "${p4api}" "$cache/root"
-          printf '%s\n' '${p4apiSha256}' > "$cache/complete"
-        '';
       packageFor = system:
         let
           pkgs = import nixpkgs { inherit system; };
-          p4apiCache = p4apiCacheFor system;
           runtimeLibraries = with pkgs; [
             fontconfig
             freetype
@@ -61,7 +39,6 @@
               ./Cargo.lock
               ./Cargo.toml
               ./LICENSE
-              ./THIRD_PARTY_NOTICES.md
               ./assets
               ./crates
             ];
@@ -76,10 +53,9 @@
             pkg-config
           ];
           buildInputs = runtimeLibraries;
-          P4API_CACHE_DIR = p4apiCache;
 
-          # CI runs the complete suite. The package repeats only the native
-          # provider tests so the pinned P4API and OpenSSL linkage is verified.
+          # CI runs the complete suite. The package repeats the Perforce
+          # provider tests without requiring a live server or installed CLI.
           doCheck = true;
           cargoTestFlags = [ "-p" "yori-p4" ];
 
@@ -87,7 +63,6 @@
             wrapProgram "$out/bin/yori" \
               --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath runtimeLibraries}"
             install -Dm644 LICENSE "$out/share/doc/yori/LICENSE"
-            install -Dm644 THIRD_PARTY_NOTICES.md "$out/share/doc/yori/THIRD_PARTY_NOTICES.md"
             install -Dm644 assets/platform/linux/io.github.trixnz.yori.desktop \
               "$out/share/applications/io.github.trixnz.yori.desktop"
             install -Dm644 assets/app-icon.png \
@@ -135,7 +110,6 @@
             overlays = [ rust-overlay.overlays.default ];
           };
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-          p4apiCache = p4apiCacheFor system;
           runtimeLibraries = with pkgs; [
             fontconfig
             freetype
@@ -153,7 +127,6 @@
             ];
             buildInputs = runtimeLibraries;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibraries;
-            P4API_CACHE_DIR = p4apiCache;
           };
           kachePackage = kache.packages.${system}.kache;
         in {
