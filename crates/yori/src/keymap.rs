@@ -175,6 +175,13 @@ action_catalog!(
         editor::FocusNextPane
     ),
     (
+        toggle_word_wrap,
+        "toggle_word_wrap",
+        [],
+        Some(editor::KEY_CONTEXT),
+        editor::ToggleWordWrap
+    ),
+    (
         copy,
         "copy",
         ["primary-c"],

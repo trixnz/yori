@@ -717,6 +717,27 @@ fn tab_word_wrap_override_is_local_and_global_preference_clears_all_overrides(
 }
 
 #[gpui_kit::test]
+fn configured_word_wrap_shortcut_dispatches_and_an_empty_array_disables_it(
+    cx: &mut TestAppContext,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("yori").join("config.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "[keybindings]\ntoggle_word_wrap = [\"alt-z\"]\n").unwrap();
+    let (workspace, cx) = harness_with_config(cx, Some(path.clone()));
+    let editor = cx.update(|_, cx| active_editor(&workspace, cx));
+
+    cx.update(|_, cx| assert!(!editor.read(cx).word_wrap_enabled()));
+    cx.simulate_keystrokes("alt-z");
+    cx.update(|_, cx| assert!(editor.read(cx).word_wrap_enabled()));
+
+    std::fs::write(&path, "[keybindings]\ntoggle_word_wrap = []\n").unwrap();
+    cx.update(|_, cx| assert!(crate::config::reload(cx).is_none()));
+    cx.simulate_keystrokes("alt-z");
+    cx.update(|_, cx| assert!(editor.read(cx).word_wrap_enabled()));
+}
+
+#[gpui_kit::test]
 fn save_failure_keeps_dialog_selections_and_reports_an_accessible_error(cx: &mut TestAppContext) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("yori").join("config.toml");

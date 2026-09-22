@@ -200,11 +200,13 @@ Preferences live in `config.toml` under the platform configuration directory —
 vim_keybindings = false
 show_whitespace = false
 show_change_connections = false
+word_wrap = false
 
 [keybindings]
 save = ["primary-s", "primary-shift-s"]
 redo = []
 next_change = ["alt-down", "primary-j"]
+toggle_word_wrap = ["alt-z"]
 ```
 
 Each key under `[keybindings]` is a stable action name whose array replaces all
@@ -231,6 +233,7 @@ string, for example `"primary-k primary-s"`.
 | `restore_selected_lines` | `alt-enter` |
 | `focus_previous_pane` | `ctrl-h` |
 | `focus_next_pane` | `ctrl-l` |
+| `toggle_word_wrap` | None |
 | `copy` | `primary-c` |
 | `paste` | `primary-v` |
 | `cut` | `primary-x` |
