@@ -529,6 +529,7 @@ impl AlignedEditor {
 
     pub(super) fn deactivate(&mut self, cx: &mut Context<Self>) {
         self.scrollbar_grab = None;
+        self.horizontal_scrollbar_grab = None;
         self.hovered_connection = None;
         self.cancel_vim();
         self.finish_composition();

@@ -118,6 +118,73 @@ fn track_jump_and_drag_outside_the_rail_preserve_selection_and_source(cx: &mut T
 }
 
 #[gpui_kit::test]
+fn editor_deactivation_clears_both_drag_states_before_later_selection(cx: &mut TestAppContext) {
+    let source = format!("{}\n", "0123456789".repeat(100)).repeat(100);
+    let (editor, cx) = harness_with_text(cx, String::new(), source);
+    let (vertical_grab, horizontal_grab, selection_start, selection_end) =
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let view = editor.read(cx);
+            let vertical = window.find("diff-scrollbar").bounds();
+            let vertical_thumb = view.scroll_track().thumb(view.vertical_scroll);
+            let horizontal = window.find("horizontal-scrollbar").bounds();
+            let max_horizontal = view.max_horizontal_scroll(window, cx);
+            let horizontal_thumb = view
+                .horizontal_scroll_track(max_horizontal)
+                .thumb(view.horizontal_scroll);
+            let rows = window.find("rows-viewport").bounds();
+            let selection_start = point(
+                rows.left() + rows.size.width / 2.0 + px(GUTTER_WIDTH + 10.0),
+                rows.top() + px(11.0),
+            );
+
+            (
+                point(
+                    vertical.center().x,
+                    vertical.top() + px(vertical_thumb.start.midpoint(vertical_thumb.end)),
+                ),
+                point(
+                    horizontal.left() + px(horizontal_thumb.start.midpoint(horizontal_thumb.end)),
+                    horizontal.center().y,
+                ),
+                selection_start,
+                point(selection_start.x + px(60.0), selection_start.y),
+            )
+        });
+
+    cx.simulate_mouse_down(vertical_grab, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_down(horizontal_grab, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        let view = editor.read(cx);
+        assert!(view.scrollbar_grab.is_some());
+        assert!(view.horizontal_scrollbar_grab.is_some());
+
+        editor.update(cx, AlignedEditor::deactivate);
+
+        let view = editor.read(cx);
+        assert!(view.scrollbar_grab.is_none());
+        assert!(view.horizontal_scrollbar_grab.is_none());
+    });
+
+    cx.simulate_mouse_down(selection_start, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(selection_end, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(selection_end, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+
+    cx.update(|_, cx| {
+        let view = editor.read(cx);
+        let selection = view.right_selection().expect("right pane selection");
+
+        assert!(!selection.range().is_empty());
+        assert!(view.vertical_scroll.abs() < f32::EPSILON);
+        assert!(view.horizontal_scroll.abs() < f32::EPSILON);
+        assert!(view.scrollbar_grab.is_none());
+        assert!(view.horizontal_scrollbar_grab.is_none());
+    });
+}
+
+#[gpui_kit::test]
 fn resize_and_edit_keep_the_track_aligned_and_clamp_short_documents(cx: &mut TestAppContext) {
     let (editor, cx) = harness(cx);
 
