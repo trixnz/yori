@@ -156,6 +156,7 @@ impl Workspace {
                     return false;
                 }
                 if !this.has_modified_tabs(cx) {
+                    crate::window_placement::persist(window, cx);
                     return true;
                 }
 
@@ -164,6 +165,7 @@ impl Workspace {
             })
             .unwrap_or(true)
         });
+        crate::window_placement::track(window, cx);
 
         let focus = cx.focus_handle();
         let home = cx.new(Home::new);
@@ -907,6 +909,7 @@ impl Workspace {
 
     fn close(&mut self, target: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = target else {
+            crate::window_placement::persist(window, cx);
             window.defer(cx, |window, _| window.remove_window());
             return;
         };

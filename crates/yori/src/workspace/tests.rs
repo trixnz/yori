@@ -9,7 +9,7 @@ use crate::comparison::ComparisonDocument;
 use crate::review::GitCommitSummary;
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Modifiers, TestAppContext, VisualTestContext, point};
+use gpui_kit::{Modifiers, TestAppContext, VisualTestContext, point, size};
 use std::path::Path;
 
 fn merge_paths(result: &str) -> Comparison {
@@ -121,6 +121,26 @@ fn active_editor(workspace: &Entity<Workspace>, cx: &App) -> Entity<AlignedEdito
         .expect("active test tab is a comparison")
         .editor
         .clone()
+}
+
+#[gpui_kit::test]
+fn forwarded_invocation_activates_the_existing_window_without_resizing_it(cx: &mut TestAppContext) {
+    let (workspace, cx) = empty_harness(cx);
+    let directory = tempfile::tempdir().unwrap();
+    cx.simulate_resize(size(px(913.0), px(677.0)));
+    let before = cx.update(|window, _| window.window_bounds());
+    let invocation = InvocationRequest::new(directory.path().to_path_buf(), Vec::new());
+
+    cx.update(|window, cx| {
+        workspace
+            .update(cx, |workspace, cx| {
+                workspace.handle_invocation(&invocation, window, cx)
+            })
+            .unwrap();
+    });
+
+    let after = cx.update(|window, _| window.window_bounds());
+    assert_eq!(after, before);
 }
 
 #[gpui_kit::test]

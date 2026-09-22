@@ -8,10 +8,11 @@ mod instance;
 mod invocation;
 mod review;
 mod storage;
+mod window_placement;
 mod workspace;
 use comparison::Comparison;
 use gpui_kit::component::{Root, WindowExt, notification::Notification};
-use gpui_kit::{AppContext, AssetSource, SharedString, WindowOptions};
+use gpui_kit::{AppContext, AssetSource, SharedString, WindowBounds, WindowOptions};
 use invocation::InvocationRequest;
 use std::{borrow::Cow, env, path::PathBuf, process};
 use workspace::Workspace;
@@ -111,12 +112,13 @@ fn dispatch_invocation<C: AppContext>(
 }
 
 #[cfg(target_os = "linux")]
-fn main_window_options() -> WindowOptions {
+fn main_window_options(window_bounds: Option<WindowBounds>) -> WindowOptions {
     let icon = image::load_from_memory(APP_ICON)
         .expect("embedded yori application icon must be a valid PNG")
         .into_rgba8();
 
     WindowOptions {
+        window_bounds,
         app_id: Some(APP_ID.to_owned()),
         icon: Some(std::sync::Arc::new(icon)),
         ..WindowOptions::default()
@@ -124,8 +126,11 @@ fn main_window_options() -> WindowOptions {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn main_window_options() -> WindowOptions {
-    WindowOptions::default()
+fn main_window_options(window_bounds: Option<WindowBounds>) -> WindowOptions {
+    WindowOptions {
+        window_bounds,
+        ..WindowOptions::default()
+    }
 }
 
 fn main() {
@@ -147,6 +152,7 @@ fn main() {
             gpui_kit::init(cx);
             appearance::init(cx);
             config::init(cx);
+            window_placement::init(cx);
             editor::init(cx);
             review::init(cx);
             workspace::init(cx);
@@ -157,10 +163,11 @@ fn main() {
             })
             .detach();
 
+            let window_options = main_window_options(window_placement::saved(cx));
             cx.spawn(async move |cx| {
                 let mut workspace = None;
                 let window = cx
-                    .open_window(main_window_options(), |window, cx| {
+                    .open_window(window_options, |window, cx| {
                         let view = cx.new(|cx| Workspace::new(window, cx));
                         workspace = Some(view.clone());
                         window.set_window_title("yori");
@@ -201,8 +208,8 @@ fn main() {
 mod tests {
     use super::*;
     use gpui_kit::{
-        Context, IntoElement, ParentElement, Render, TestAppContext, VisualContext, Window, div,
-        test::TestWindowExt,
+        Bounds, Context, IntoElement, ParentElement, Render, TestAppContext, VisualContext, Window,
+        div, point, px, size, test::TestWindowExt,
     };
 
     struct TestView;
@@ -239,6 +246,27 @@ mod tests {
             window.render_frame(cx);
             let _ = window.find("notification");
         });
+    }
+
+    #[test]
+    fn saved_placement_is_used_only_to_construct_initial_window_options() {
+        let bounds = Bounds {
+            origin: point(px(-240.0), px(80.0)),
+            size: size(px(1280.0), px(720.0)),
+        };
+
+        for expected in [
+            WindowBounds::Windowed(bounds),
+            WindowBounds::Maximized(bounds),
+            WindowBounds::Fullscreen(bounds),
+        ] {
+            assert_eq!(
+                main_window_options(Some(expected)).window_bounds,
+                Some(expected)
+            );
+        }
+
+        assert!(main_window_options(None).window_bounds.is_none());
     }
 
     #[gpui_kit::test]
