@@ -1,6 +1,11 @@
 //! Presentation-only expansion of aligned rows into wrapped continuations.
 
-use std::ops::Range;
+use std::{
+    borrow::Cow,
+    cell::{Cell, RefCell},
+    ops::Range,
+    rc::Rc,
+};
 
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{App, Font, TextRun, Window};
@@ -38,12 +43,19 @@ impl ProjectedRow {
 
 #[derive(Clone, Debug)]
 pub(super) struct WrapProjection {
-    rows: Vec<ProjectedRow>,
+    identity: u64,
+    rows: Option<Vec<ProjectedRow>>,
+    logical_rows: usize,
     visual_rows: usize,
 }
 
 impl WrapProjection {
+    #[cfg(test)]
     pub fn build(editor: &AlignedEditor, columns: usize) -> Self {
+        Self::build_with_identity(editor, columns, 0)
+    }
+
+    fn build_with_identity(editor: &AlignedEditor, columns: usize, identity: u64) -> Self {
         let mut rows = Vec::with_capacity(editor.alignment.rows().len());
         let mut visual_rows = 0;
 
@@ -70,15 +82,47 @@ impl WrapProjection {
             visual_rows += height;
         }
 
-        Self { rows, visual_rows }
+        Self {
+            identity,
+            rows: Some(rows),
+            logical_rows: editor.alignment.rows().len(),
+            visual_rows,
+        }
     }
 
-    pub fn rows(&self) -> &[ProjectedRow] {
-        &self.rows
+    fn unwrapped(logical_rows: usize) -> Self {
+        Self {
+            identity: 0,
+            rows: None,
+            logical_rows,
+            visual_rows: logical_rows,
+        }
     }
 
-    pub fn row(&self, logical: usize) -> Option<&ProjectedRow> {
-        self.rows.get(logical)
+    pub fn identity(&self) -> u64 {
+        self.identity
+    }
+
+    pub fn row<'a>(
+        &'a self,
+        editor: &AlignedEditor,
+        logical: usize,
+    ) -> Option<Cow<'a, ProjectedRow>> {
+        if logical >= self.logical_rows {
+            return None;
+        }
+        if let Some(rows) = &self.rows {
+            return rows.get(logical).map(Cow::Borrowed);
+        }
+
+        Some(Cow::Owned(ProjectedRow {
+            visual_start: logical,
+            height: 1,
+            left: editor.wrapped_segments(Side::Left, logical, usize::MAX),
+            right: editor.wrapped_segments(Side::Right, logical, usize::MAX),
+            incoming: editor.wrapped_segments(Side::Incoming, logical, usize::MAX),
+            base: editor.wrapped_base_segments(logical, usize::MAX),
+        }))
     }
 
     pub fn visual_rows(&self) -> usize {
@@ -86,9 +130,12 @@ impl WrapProjection {
     }
 
     pub fn visual_location(&self, visual: usize) -> (usize, usize) {
-        let logical = self.rows.partition_point(|row| row.visual_end() <= visual);
-        let continuation = self
-            .rows
+        let Some(rows) = &self.rows else {
+            return (visual.min(self.logical_rows), 0);
+        };
+
+        let logical = rows.partition_point(|row| row.visual_end() <= visual);
+        let continuation = rows
             .get(logical)
             .map_or(0, |row| visual.saturating_sub(row.visual_start));
 
@@ -96,12 +143,14 @@ impl WrapProjection {
     }
 
     pub fn visual_range(&self, logical: Range<usize>) -> Range<usize> {
-        let start = self
-            .rows
+        let Some(rows) = &self.rows else {
+            return logical.start.min(self.logical_rows)..logical.end.min(self.logical_rows);
+        };
+
+        let start = rows
             .get(logical.start)
             .map_or(self.visual_rows, |row| row.visual_start);
-        let end = self
-            .rows
+        let end = rows
             .get(logical.end)
             .map_or(self.visual_rows, |row| row.visual_start);
 
@@ -111,24 +160,90 @@ impl WrapProjection {
     pub fn visible_logical_rows(&self, visual: Range<usize>) -> Range<usize> {
         let (start, _) = self.visual_location(visual.start);
         let (mut end, continuation) = self.visual_location(visual.end);
-        if continuation > 0 || end < self.rows.len() {
+        if continuation > 0 || end < self.logical_rows {
             end += 1;
         }
 
-        start.min(self.rows.len())..end.min(self.rows.len())
+        start.min(self.logical_rows)..end.min(self.logical_rows)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectionKey {
+    revision: u64,
+    columns: usize,
+    viewport_width: u32,
+    cell_width: u32,
+    font_size: u32,
+    font_family: String,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ProjectionCache {
+    revision: u64,
+    next_identity: Cell<u64>,
+    cached: RefCell<Option<(ProjectionKey, Rc<WrapProjection>)>>,
+    #[cfg(test)]
+    builds: Cell<usize>,
+}
+
+impl Default for ProjectionCache {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            next_identity: Cell::new(1),
+            cached: RefCell::new(None),
+            #[cfg(test)]
+            builds: Cell::new(0),
+        }
+    }
+}
+
+impl ProjectionCache {
+    fn invalidate(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.cached.get_mut().take();
     }
 }
 
 impl AlignedEditor {
-    pub(super) fn wrap_projection(&self, window: &mut Window, cx: &App) -> WrapProjection {
-        WrapProjection::build(self, self.wrap_columns(window, cx))
-    }
-
-    fn wrap_columns(&self, window: &mut Window, cx: &App) -> usize {
+    pub(super) fn wrap_projection(&self, window: &mut Window, cx: &App) -> Rc<WrapProjection> {
         if !self.word_wrap.enabled() {
-            return usize::MAX;
+            return Rc::new(WrapProjection::unwrapped(self.alignment.rows().len()));
         }
 
+        let (key, columns) = self.wrap_projection_key(window, cx);
+        if let Some((cached_key, projection)) = self.wrap_projection_cache.cached.borrow().as_ref()
+            && cached_key == &key
+        {
+            return Rc::clone(projection);
+        }
+
+        let identity = self.wrap_projection_cache.next_identity.get();
+        self.wrap_projection_cache
+            .next_identity
+            .set(identity.wrapping_add(1));
+        let projection = Rc::new(WrapProjection::build_with_identity(self, columns, identity));
+        #[cfg(test)]
+        self.wrap_projection_cache
+            .builds
+            .set(self.wrap_projection_cache.builds.get() + 1);
+        *self.wrap_projection_cache.cached.borrow_mut() = Some((key, Rc::clone(&projection)));
+
+        projection
+    }
+
+    pub(super) fn invalidate_wrap_projection(&mut self) {
+        self.wrap_projection_cache.invalidate();
+        self.visual_affinity = None;
+    }
+
+    #[cfg(test)]
+    fn wrap_projection_build_count(&self) -> usize {
+        self.wrap_projection_cache.builds.get()
+    }
+
+    fn wrap_projection_key(&self, window: &mut Window, cx: &App) -> (ProjectionKey, usize) {
         let theme = cx.theme();
         let run = TextRun {
             len: 1,
@@ -156,8 +271,17 @@ impl AlignedEditor {
             reason = "the positive pane width is intentionally floored to a whole display-column count"
         )]
         let columns = (width / cell_width).floor() as usize;
+        let columns = columns.max(1);
+        let key = ProjectionKey {
+            revision: self.wrap_projection_cache.revision,
+            columns,
+            viewport_width: width.to_bits(),
+            cell_width: cell_width.to_bits(),
+            font_size: f32::from(theme.mono_font_size).to_bits(),
+            font_family: theme.mono_font_family.to_string(),
+        };
 
-        columns.max(1)
+        (key, columns)
     }
 
     fn wrapped_segments(&self, side: Side, row: usize, columns: usize) -> Vec<Range<usize>> {
@@ -202,13 +326,16 @@ impl AlignedEditor {
 mod tests {
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
-    use gpui_kit::{AppContext, TestAppContext, point, px};
+    use gpui_kit::{AppContext, Bounds, EntityInputHandler, TestAppContext, point, px, size};
     use yori::geometry::display_units;
     use yori_diff::merge::MergeSession;
-    use yori_document::{Document, editing::Motion};
+    use yori_document::{
+        Document,
+        editing::{self, Motion},
+    };
 
     use super::*;
-    use crate::editor::{GUTTER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PaneDocument};
+    use crate::editor::{GUTTER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PaneDocument, VisualAffinity};
 
     fn document(text: &str) -> Document {
         Document::from_bytes(text.as_bytes().to_vec()).unwrap()
@@ -223,6 +350,37 @@ mod tests {
             gpui_kit::init(cx);
             crate::appearance::init(cx);
             crate::editor::init(cx);
+        });
+    }
+
+    fn caret_visual_row(
+        editor: &gpui_kit::Entity<AlignedEditor>,
+        side: Side,
+        window: &mut Window,
+        cx: &App,
+    ) -> usize {
+        let view = editor.read(cx);
+        let offset = view.selection.as_ref().unwrap().head;
+
+        view.source_position(side, offset, window, cx).0
+    }
+
+    fn click(
+        editor: &gpui_kit::Entity<AlignedEditor>,
+        position: gpui_kit::Point<gpui_kit::Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        editor.update(cx, |editor, cx| {
+            editor.mouse_down(
+                &gpui_kit::MouseDownEvent {
+                    button: gpui_kit::MouseButton::Left,
+                    position,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
         });
     }
 
@@ -250,8 +408,8 @@ mod tests {
         cx.update(|window, cx| {
             let view = editor.read(cx);
             let projection = WrapProjection::build(view, 6);
-            let first = projection.row(0).unwrap();
-            let second = projection.row(1).unwrap();
+            let first = projection.row(view, 0).unwrap();
+            let second = projection.row(view, 1).unwrap();
 
             assert_eq!(first.segments(Side::Left).len(), 1);
             assert_eq!(first.segments(Side::Right).len(), 4);
@@ -296,11 +454,213 @@ mod tests {
             assert_eq!(view.row_for_source(Side::Left, 0), row);
             assert_eq!(view.row_for_source(Side::Incoming, 0), row);
 
-            let projected = projection.row(row).unwrap();
+            let projected = projection.row(view, row).unwrap();
             let counts = [Side::Left, Side::Right, Side::Incoming]
                 .map(|side| projected.segments(side).len());
             assert!(counts.iter().all(|count| *count > 1));
             assert_eq!(projected.height, *counts.iter().max().unwrap());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn wrap_boundaries_keep_their_visual_row_through_hit_testing_and_navigation(
+        cx: &mut TestAppContext,
+    ) {
+        initialize(cx);
+
+        let left = format!("{}\nnext\n", "left words ".repeat(15));
+        let right = format!("{}\nnext\n", "right words ".repeat(40));
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                AlignedEditor::new(
+                    pane("left.txt", &left),
+                    pane("right.txt", &right),
+                    window,
+                    cx,
+                )
+            });
+            view.update(cx, |editor, cx| editor.set_word_wrap(true, cx));
+            editor = Some(view.clone());
+
+            Root::new(view, window, cx)
+        });
+        let editor = editor.unwrap();
+        cx.update(TestWindowExt::render_frame);
+
+        cx.update(|window, cx| {
+            let view = editor.read(cx);
+            let projection = view.wrap_projection(window, cx);
+            let first = projection.row(view, 0).unwrap();
+            let left_continuations = first.segments(Side::Left).len();
+            let row_height = first.height;
+            assert!(left_continuations >= 2);
+            assert!(first.segments(Side::Right).len() > left_continuations);
+
+            let origin = view.content_bounds.get().origin;
+            let text_edge = view.geometry().text_viewport_width() - 1.0;
+            let left_edge_position = point(
+                origin.x + px(GUTTER_WIDTH + text_edge),
+                origin.y + px(HEADER_HEIGHT + 1.0),
+            );
+            let right_edge_position = point(
+                origin.x + px(view.geometry().right_pane_left() + GUTTER_WIDTH + text_edge),
+                origin.y + px(HEADER_HEIGHT + 1.0),
+            );
+            let first_visual = first.visual_start;
+            let _ = view;
+
+            click(&editor, right_edge_position, window, cx);
+            editor.update(cx, |editor, cx| {
+                editor.move_cursor(Motion::End, false, window, cx);
+            });
+            let right_end = editor.read(cx).selection.as_ref().unwrap().head;
+            assert_eq!(
+                caret_visual_row(&editor, Side::Right, window, cx),
+                first_visual
+            );
+
+            let utf16 = editing::to_utf16(&right, right_end);
+            let ime_bounds = editor
+                .update(cx, |editor, cx| {
+                    editor.bounds_for_range(
+                        utf16..utf16,
+                        Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(0.0))),
+                        window,
+                        cx,
+                    )
+                })
+                .unwrap();
+            assert_eq!(ime_bounds.origin.y, origin.y + px(HEADER_HEIGHT));
+
+            click(&editor, left_edge_position, window, cx);
+            editor.update(cx, |editor, cx| {
+                editor.move_cursor(Motion::End, false, window, cx);
+            });
+            assert_eq!(
+                caret_visual_row(&editor, Side::Left, window, cx),
+                first_visual
+            );
+
+            editor.update(cx, |editor, cx| {
+                editor.move_cursor(Motion::Down, false, window, cx);
+                editor.move_cursor(Motion::Home, false, window, cx);
+            });
+            assert_eq!(
+                caret_visual_row(&editor, Side::Left, window, cx),
+                first_visual + 1
+            );
+
+            editor.update(cx, |editor, cx| {
+                editor.move_cursor(Motion::Up, false, window, cx);
+                for _ in 1..left_continuations {
+                    editor.move_cursor(Motion::Down, false, window, cx);
+                }
+            });
+            assert_eq!(
+                caret_visual_row(&editor, Side::Left, window, cx),
+                first_visual + left_continuations - 1
+            );
+
+            editor.update(cx, |editor, cx| {
+                editor.move_cursor(Motion::Down, false, window, cx);
+            });
+            assert_eq!(
+                caret_visual_row(&editor, Side::Left, window, cx),
+                first_visual + row_height
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn expanded_tab_boundaries_keep_exact_continuation_affinity(cx: &mut TestAppContext) {
+        initialize(cx);
+
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                AlignedEditor::new(
+                    pane("left.txt", "\tword\n"),
+                    pane("right.txt", "\tword\n"),
+                    window,
+                    cx,
+                )
+            });
+            view.update(cx, |editor, cx| editor.set_word_wrap(true, cx));
+            editor = Some(view.clone());
+
+            Root::new(view, window, cx)
+        });
+        let editor = editor.unwrap();
+
+        cx.update(|window, cx| {
+            let projection = WrapProjection::build(editor.read(cx), 1);
+            editor.update(cx, |editor, _| {
+                editor.visual_affinity = Some(VisualAffinity {
+                    projection: projection.identity(),
+                    side: Side::Right,
+                    offset: 0,
+                    logical_row: 0,
+                    continuation: 1,
+                });
+            });
+
+            assert_eq!(
+                editor
+                    .read(cx)
+                    .source_position_in(Side::Right, 0, &projection, window, cx,),
+                (1, 0.0)
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn unchanged_coordinate_queries_reuse_wrapped_projection_and_skip_it_unwrapped(
+        cx: &mut TestAppContext,
+    ) {
+        initialize(cx);
+
+        let source = format!("{}\n", "alpha beta gamma ".repeat(20));
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                AlignedEditor::new(
+                    pane("left.txt", "old\n"),
+                    pane("right.txt", &source),
+                    window,
+                    cx,
+                )
+            });
+            editor = Some(view.clone());
+
+            Root::new(view, window, cx)
+        });
+        let editor = editor.unwrap();
+
+        cx.update(|window, cx| {
+            let view = editor.read(cx);
+            let _ = view.source_position(Side::Right, 0, window, cx);
+            let _ = view.source_position(Side::Right, 0, window, cx);
+            assert_eq!(view.wrap_projection_build_count(), 0);
+            let _ = view;
+
+            editor.update(cx, |editor, cx| editor.set_word_wrap(true, cx));
+            let view = editor.read(cx);
+            let _ = view.source_position(Side::Right, 0, window, cx);
+            let builds = view.wrap_projection_build_count();
+            assert_eq!(builds, 1);
+
+            for _ in 0..4 {
+                let _ = view.source_position(Side::Right, 0, window, cx);
+            }
+            assert_eq!(view.wrap_projection_build_count(), builds);
+            let _ = view;
+
+            window.input("Z", cx);
+            let view = editor.read(cx);
+            assert!(view.right.document.text().contains('Z'));
+            let _ = view.source_position(Side::Right, 0, window, cx);
+            assert!(view.wrap_projection_build_count() > builds);
         });
     }
 
@@ -340,7 +700,7 @@ mod tests {
             let logical = view.row_for_source(Side::Right, offset);
             let projection = view.wrap_projection(window, cx);
             let (visual, x) = view.source_position(Side::Right, offset, window, cx);
-            assert!(visual > projection.row(logical).unwrap().visual_start);
+            assert!(visual > projection.row(view, logical).unwrap().visual_start);
 
             let origin = view.content_bounds.get().origin;
             let position = point(

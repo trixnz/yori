@@ -116,6 +116,36 @@ impl Selection {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisualAffinity {
+    projection: u64,
+    side: Side,
+    offset: usize,
+    logical_row: usize,
+    continuation: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceLocation {
+    projection: u64,
+    side: Side,
+    offset: usize,
+    logical_row: usize,
+    continuation: usize,
+}
+
+impl SourceLocation {
+    fn affinity(self) -> VisualAffinity {
+        VisualAffinity {
+            projection: self.projection,
+            side: self.side,
+            offset: self.offset,
+            logical_row: self.logical_row,
+            continuation: self.continuation,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct RowHighlighting<'a> {
     syntax: &'a highlighting::VisibleSyntax,
@@ -351,6 +381,7 @@ pub(super) struct AlignedEditor {
     saving: bool,
     preferred_column: Option<usize>,
     preferred_visual_x: Option<f32>,
+    visual_affinity: Option<VisualAffinity>,
     focus: FocusHandle,
     selection: Option<Selection>,
     vertical_scroll: f32,
@@ -359,6 +390,7 @@ pub(super) struct AlignedEditor {
     show_whitespace: bool,
     show_connections: bool,
     word_wrap: WordWrap,
+    wrap_projection_cache: wrapping::ProjectionCache,
     hovered_connection: Option<Range<usize>>,
     scrollbar_grab: Option<f32>,
     horizontal_scrollbar_grab: Option<f32>,
@@ -524,6 +556,7 @@ impl AlignedEditor {
             saving: false,
             preferred_column: None,
             preferred_visual_x: None,
+            visual_affinity: None,
             focus,
             selection: None,
             vertical_scroll: 0.0,
@@ -532,6 +565,7 @@ impl AlignedEditor {
             show_whitespace: config.show_whitespace,
             show_connections: config.show_change_connections,
             word_wrap: config.word_wrap.into(),
+            wrap_projection_cache: wrapping::ProjectionCache::default(),
             hovered_connection: None,
             scrollbar_grab: None,
             horizontal_scrollbar_grab: None,
@@ -649,6 +683,7 @@ impl AlignedEditor {
         }
 
         self.word_wrap = enabled.into();
+        self.invalidate_wrap_projection();
         self.horizontal_scroll = 0.0;
         self.horizontal_scrollbar_grab = None;
         self.horizontal_scrollbar_visibility = HorizontalScrollbarVisibility::Hidden;
@@ -712,20 +747,22 @@ impl AlignedEditor {
     }
 
     fn focus_pane(&mut self, target: Side, window: &mut Window, cx: &mut Context<Self>) {
+        let projection = self.wrap_projection(window, cx);
         let current = self.active_side();
         let (row, x) = self.selection.as_ref().map_or((0, 0.0), |selection| {
-            self.source_position(current, selection.head, window, cx)
+            self.source_position_in(current, selection.head, &projection, window, cx)
         });
-        let offset = self.source_offset_for_x(target, row, x, window, cx);
+        let location = self.source_location_for_x_in(target, row, x, &projection, window, cx);
 
         self.cancel_vim();
         self.finish_composition();
         self.preferred_column = None;
         self.preferred_visual_x = None;
+        self.visual_affinity = Some(location.affinity());
         self.selection = Some(Selection {
             side: target,
-            anchor: offset,
-            head: offset,
+            anchor: location.offset,
+            head: location.offset,
         });
         self.sync_vim_selection(cx);
         self.reveal_cursor(window, cx);
@@ -845,54 +882,112 @@ impl AlignedEditor {
             })
     }
 
-    fn source_offset_for_x(
+    fn source_location_for_x_in(
         &self,
         side: Side,
         visual_row: usize,
         x: f32,
+        projection: &wrapping::WrapProjection,
         window: &mut Window,
         cx: &App,
-    ) -> usize {
-        let projection = self.wrap_projection(window, cx);
+    ) -> SourceLocation {
         let (row, continuation) = projection.visual_location(visual_row);
         let Some(line) = self.line_for_row(side, row) else {
-            return self.source_offset_for(side, row, 0);
+            return SourceLocation {
+                projection: projection.identity(),
+                side,
+                offset: self.source_offset_for(side, row, 0),
+                logical_row: row,
+                continuation: 0,
+            };
         };
         let document = &self.document(side).document;
         let source_line = &document.lines()[line];
         let display =
             DisplayLine::from_source(document.content(line), source_line.content.start, TAB_WIDTH);
-        let Some(segment) = projection
-            .row(row)
-            .and_then(|row| row.segments(side).get(continuation))
-        else {
-            return self.source_offset_for(side, row, display.text.len());
+        let projected = projection.row(self, row);
+        let segments = projected
+            .as_deref()
+            .map_or(&[][..], |row| row.segments(side));
+        let Some(segment) = segments.get(continuation) else {
+            let continuation = segments.len().saturating_sub(1);
+            return SourceLocation {
+                projection: projection.identity(),
+                side,
+                offset: self.source_offset_for(side, row, display.text.len()),
+                logical_row: row,
+                continuation,
+            };
         };
-        if x <= 0.0 || segment.is_empty() {
-            return self.source_offset_for(side, row, segment.start);
+        let display_offset = if x <= 0.0 || segment.is_empty() {
+            segment.start
+        } else {
+            let text = &display.text[segment.clone()];
+            let run = TextRun {
+                len: text.len(),
+                font: Font {
+                    family: cx.theme().mono_font_family.clone(),
+                    ..Font::default()
+                },
+                color: cx.theme().foreground,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let shaped = window.text_system().shape_line(
+                text.to_owned().into(),
+                cx.theme().mono_font_size,
+                &[run],
+                None,
+            );
+
+            segment.start + shaped.closest_index_for_x(px(x))
+        };
+
+        SourceLocation {
+            projection: projection.identity(),
+            side,
+            offset: self.source_offset_for(side, row, display_offset),
+            logical_row: row,
+            continuation,
         }
+    }
 
-        let text = &display.text[segment.clone()];
-        let run = TextRun {
-            len: text.len(),
-            font: Font {
-                family: cx.theme().mono_font_family.clone(),
-                ..Font::default()
-            },
-            color: cx.theme().foreground,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let shaped = window.text_system().shape_line(
-            text.to_owned().into(),
-            cx.theme().mono_font_size,
-            &[run],
-            None,
-        );
-        let display_offset = segment.start + shaped.closest_index_for_x(px(x));
+    fn visual_affinity_for_offset(
+        &self,
+        side: Side,
+        offset: usize,
+        prefer_previous: bool,
+        projection: &wrapping::WrapProjection,
+    ) -> Option<VisualAffinity> {
+        let row = self.row_for_source(side, offset);
+        let line = self.line_for_row(side, row)?;
+        let document = &self.document(side).document;
+        let source_line = &document.lines()[line];
+        let display =
+            DisplayLine::from_source(document.content(line), source_line.content.start, TAB_WIDTH);
+        let display_offset = display.display_offset(offset);
+        let projected = projection.row(self, row)?;
+        let matching = projected
+            .segments(side)
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| {
+                segment.start <= display_offset && display_offset <= segment.end
+            });
+        let continuation = if prefer_previous {
+            matching.map(|(index, _)| index).next()
+        } else {
+            matching.map(|(index, _)| index).next_back()
+        }?;
 
-        self.source_offset_for(side, row, display_offset)
+        Some(VisualAffinity {
+            projection: projection.identity(),
+            side,
+            offset,
+            logical_row: row,
+            continuation,
+        })
     }
 
     fn geometry(&self) -> EditorGeometry {
@@ -916,20 +1011,18 @@ impl AlignedEditor {
         })
     }
 
-    fn source_offset_at(
+    fn source_location_at(
         &self,
         position: gpui_kit::Point<Pixels>,
         window: &mut Window,
         cx: &App,
-    ) -> (Side, usize) {
+    ) -> SourceLocation {
         let hit = self.geometry().hit(
             f32::from(position.x),
             f32::from(position.y),
             self.vertical_scroll,
             self.horizontal_scroll,
         );
-        let projection = self.wrap_projection(window, cx);
-        let (row, continuation) = projection.visual_location(hit.row);
         let side = if hit.left_side {
             Side::Left
         } else if hit.incoming_side {
@@ -937,50 +1030,21 @@ impl AlignedEditor {
         } else {
             Side::Right
         };
-        let pane = self.document(side);
-        let Some(line_index) = self.line_for_row(side, row) else {
-            return (side, self.source_offset_for(side, row, 0));
-        };
+        let projection = self.wrap_projection(window, cx);
 
-        let source_line = &pane.document.lines()[line_index];
-        let display = DisplayLine::from_source(
-            pane.document.content(line_index),
-            source_line.content.start,
-            TAB_WIDTH,
-        );
-        let Some(segment) = projection
-            .row(row)
-            .and_then(|row| row.segments(side).get(continuation))
-        else {
-            return (side, self.source_offset_for(side, row, display.text.len()));
-        };
+        self.source_location_for_x_in(side, hit.row, hit.text_x, &projection, window, cx)
+    }
 
-        if hit.text_x <= 0.0 || segment.is_empty() {
-            return (side, self.source_offset_for(side, row, segment.start));
-        }
+    #[cfg(test)]
+    fn source_offset_at(
+        &self,
+        position: gpui_kit::Point<Pixels>,
+        window: &mut Window,
+        cx: &App,
+    ) -> (Side, usize) {
+        let location = self.source_location_at(position, window, cx);
 
-        let theme = cx.theme();
-        let text = &display.text[segment.clone()];
-        let run = TextRun {
-            len: text.len(),
-            font: Font {
-                family: theme.mono_font_family.clone(),
-                ..Font::default()
-            },
-            color: theme.foreground,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let shaped = window.text_system().shape_line(
-            text.to_owned().into(),
-            theme.mono_font_size,
-            &[run],
-            None,
-        );
-        let display_offset = segment.start + shaped.closest_index_for_x(px(hit.text_x));
-
-        (side, self.source_offset_for(side, row, display_offset))
+        (location.side, location.offset)
     }
 
     fn max_horizontal_scroll(&self, window: &mut Window, cx: &App) -> f32 {
@@ -1038,10 +1102,12 @@ impl AlignedEditor {
             self.vertical_scroll,
             self.horizontal_scroll,
         );
+        let projection = self.wrap_projection(window, cx);
+        let (logical_row, _) = projection.visual_location(hit.row);
         if self
             .merge
             .as_ref()
-            .and_then(|merge| merge.display.rows().get(hit.row))
+            .and_then(|merge| merge.display.rows().get(logical_row))
             .is_some_and(|row| !matches!(row.kind, merge::RowKind::Aligned))
         {
             return;
@@ -1054,7 +1120,10 @@ impl AlignedEditor {
 
         self.focus.focus(window, cx);
 
-        let (side, offset) = self.source_offset_at(event.position, window, cx);
+        let location = self.source_location_at(event.position, window, cx);
+        let side = location.side;
+        let offset = location.offset;
+        self.visual_affinity = Some(location.affinity());
         if side != Side::Right {
             self.cancel_vim();
         }
@@ -1081,11 +1150,12 @@ impl AlignedEditor {
             return;
         }
 
-        let (side, offset) = self.source_offset_at(event.position, window, cx);
+        let location = self.source_location_at(event.position, window, cx);
         if let Some(selection) = &mut self.selection
-            && selection.side == side
+            && selection.side == location.side
         {
-            selection.head = offset;
+            selection.head = location.offset;
+            self.visual_affinity = Some(location.affinity());
             self.sync_vim_selection(cx);
             self.locate_pointer_change(event.position, window, cx);
 
@@ -1485,7 +1555,9 @@ impl AlignedEditor {
             .on_mouse_move(cx.listener(Self::mouse_move));
 
         for row_index in visible_rows.clone() {
-            let projected = &projection.rows()[row_index];
+            let projected = projection
+                .row(self, row_index)
+                .expect("visible projection row");
             let top = display_units(projected.visual_start) * LINE_HEIGHT - self.vertical_scroll;
             match self
                 .merge
@@ -1498,7 +1570,7 @@ impl AlignedEditor {
                 }
                 Some(merge::RowKind::Base(base)) => {
                     rows = rows
-                        .child(self.render_base_preview_row(base, projected, top, geometry, cx));
+                        .child(self.render_base_preview_row(base, &projected, top, geometry, cx));
                     continue;
                 }
                 Some(merge::RowKind::Aligned) | None => {}
@@ -1513,7 +1585,7 @@ impl AlignedEditor {
                 .child(self.render_pane_row(
                     Side::Left,
                     row_index,
-                    projected,
+                    &projected,
                     geometry,
                     RowHighlighting {
                         syntax: &left_syntax,
@@ -1524,7 +1596,7 @@ impl AlignedEditor {
                 .child(self.render_pane_row(
                     Side::Right,
                     row_index,
-                    projected,
+                    &projected,
                     geometry,
                     RowHighlighting {
                         syntax: &right_syntax,
@@ -1545,7 +1617,7 @@ impl AlignedEditor {
                 rows = rows.child(self.render_pane_row(
                     Side::Incoming,
                     row_index,
-                    projected,
+                    &projected,
                     geometry,
                     RowHighlighting {
                         syntax: &incoming_syntax,
@@ -1567,14 +1639,15 @@ impl AlignedEditor {
             } else {
                 selection.head
             };
-            let (row, x) = self.cursor_position(cursor, window, cx);
+            let (row, x) = self.source_position_in(selection.side, cursor, &projection, window, cx);
             let modal_cursor = Self::vim_enabled(cx) && self.vim.mode() != yori::vim::Mode::Insert;
             let caret_width = if modal_cursor {
                 let next = yori_document::editing::next_grapheme(
                     self.document(selection.side).document.text(),
                     cursor,
                 );
-                let (next_row, next_x) = self.cursor_position(next, window, cx);
+                let (next_row, next_x) =
+                    self.source_position_in(selection.side, next, &projection, window, cx);
                 if row == next_row {
                     (next_x - x).max(8.0)
                 } else {

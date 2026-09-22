@@ -141,6 +141,7 @@ impl AlignedEditor {
                 .iter()
                 .map(|row| (row.sources.local, row.sources.result)),
         );
+        self.invalidate_wrap_projection();
     }
 
     pub(super) fn merge_take(

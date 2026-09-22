@@ -185,6 +185,7 @@ impl DisplayLine {
             let mut columns = 0;
             let mut fitting_end = start;
             let mut whitespace_end = None;
+            let mut overflowed = false;
 
             for (relative, grapheme) in self.text[start..].grapheme_indices(true) {
                 let grapheme_start = start + relative;
@@ -192,6 +193,7 @@ impl DisplayLine {
                 let width = UnicodeWidthStr::width(grapheme);
 
                 if fitting_end > start && columns + width > max_columns {
+                    overflowed = true;
                     break;
                 }
 
@@ -200,15 +202,15 @@ impl DisplayLine {
                 if grapheme.chars().all(char::is_whitespace) {
                     whitespace_end = Some(grapheme_end);
                 }
-
-                if columns >= max_columns {
-                    break;
-                }
             }
 
-            let end = whitespace_end
-                .filter(|end| *end > start)
-                .unwrap_or(fitting_end);
+            let end = if overflowed {
+                whitespace_end
+                    .filter(|end| *end > start)
+                    .unwrap_or(fitting_end)
+            } else {
+                fitting_end
+            };
             ranges.push(start..end);
             start = end;
         }
@@ -254,6 +256,29 @@ mod tests {
 
         assert_eq!(pieces, ["alpha ", "beta ", "gamma"]);
         assert_eq!(pieces.concat(), display.text);
+    }
+
+    #[test]
+    fn wrapping_keeps_short_indented_and_exact_fit_lines_whole() {
+        for (text, columns) in [("short line", 20), ("    indented", 20), ("exact fit", 9)] {
+            let display = DisplayLine::from_source(text, 0, 4);
+
+            assert_eq!(
+                display.wrapped_ranges(columns),
+                std::iter::once(0..display.text.len()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn wrapping_only_prefers_whitespace_after_overflow() {
+        let display = DisplayLine::from_source("alpha beta", 0, 4);
+        let ranges = display.wrapped_ranges(10);
+
+        assert_eq!(
+            ranges,
+            std::iter::once(0..display.text.len()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

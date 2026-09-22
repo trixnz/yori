@@ -126,6 +126,7 @@ impl AlignedEditor {
             anchor: target.right_offset,
             head: target.right_offset,
         });
+        self.visual_affinity = None;
         self.preferred_column = None;
         self.preferred_visual_x = None;
         self.horizontal_scroll = 0.0;

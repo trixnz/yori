@@ -44,8 +44,8 @@ impl AlignedEditor {
             Side::Right
         };
         let display_byte = projection
-            .row(row)
-            .and_then(|row| row.segments(side).get(continuation))
+            .row(self, row)
+            .and_then(|row| row.segments(side).get(continuation).cloned())
             .map_or(0, |segment| segment.start);
 
         ViewAnchor {
@@ -155,6 +155,7 @@ impl AlignedEditor {
             anchor: update.selection.anchor,
             head: update.selection.head,
         }));
+        self.visual_affinity = None;
         if input_selection.is_none() && (has_text_edit || modal) {
             self.preferred_column = None;
             self.preferred_visual_x = None;
@@ -168,6 +169,7 @@ impl AlignedEditor {
                 self.refresh_merge_projection();
             } else {
                 self.alignment = Alignment::between(&self.left.document, &self.right.document);
+                self.invalidate_wrap_projection();
             }
             self.hovered_connection = None;
         }

@@ -117,6 +117,7 @@ impl AlignedEditor {
         }
 
         self.alignment = Alignment::between(&self.left.document, &self.right.document);
+        self.invalidate_wrap_projection();
         self.navigation = ChangeNavigation::default();
         self.schedule_highlighting(super::Side::Left, window, cx);
         if replace_local {
@@ -159,6 +160,7 @@ impl AlignedEditor {
         }
 
         self.alignment = Alignment::between(&self.left.document, &self.right.document);
+        self.invalidate_wrap_projection();
         self.navigation = ChangeNavigation::default();
         self.schedule_highlighting(
             if baseline {
