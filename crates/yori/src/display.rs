@@ -1,6 +1,8 @@
 //! Presentation-only tab expansion and aligned hit mapping.
 
 use std::ops::Range;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use yori_diff::Alignment;
 use yori_document::Document;
 
@@ -166,6 +168,53 @@ impl DisplayLine {
 
         range
     }
+
+    /// Split presentation text into byte ranges that fit the requested columns.
+    /// Whitespace is preferred as a boundary; a single grapheme is the indivisible fallback.
+    #[must_use]
+    pub fn wrapped_ranges(&self, max_columns: usize) -> Vec<Range<usize>> {
+        if self.text.is_empty() {
+            return std::iter::once(0..0).collect();
+        }
+
+        let max_columns = max_columns.max(1);
+        let mut ranges = Vec::new();
+        let mut start = 0;
+
+        while start < self.text.len() {
+            let mut columns = 0;
+            let mut fitting_end = start;
+            let mut whitespace_end = None;
+
+            for (relative, grapheme) in self.text[start..].grapheme_indices(true) {
+                let grapheme_start = start + relative;
+                let grapheme_end = grapheme_start + grapheme.len();
+                let width = UnicodeWidthStr::width(grapheme);
+
+                if fitting_end > start && columns + width > max_columns {
+                    break;
+                }
+
+                fitting_end = grapheme_end;
+                columns += width;
+                if grapheme.chars().all(char::is_whitespace) {
+                    whitespace_end = Some(grapheme_end);
+                }
+
+                if columns >= max_columns {
+                    break;
+                }
+            }
+
+            let end = whitespace_end
+                .filter(|end| *end > start)
+                .unwrap_or(fitting_end);
+            ranges.push(start..end);
+            start = end;
+        }
+
+        ranges
+    }
 }
 
 #[must_use]
@@ -188,4 +237,51 @@ pub fn max_display_columns(document: &Document, tab_width: usize) -> usize {
         })
         .max()
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DisplayLine;
+
+    #[test]
+    fn wrapping_prefers_whitespace_without_changing_display_bytes() {
+        let display = DisplayLine::from_source("alpha beta gamma", 0, 4);
+        let ranges = display.wrapped_ranges(7);
+        let pieces = ranges
+            .iter()
+            .map(|range| &display.text[range.clone()])
+            .collect::<Vec<_>>();
+
+        assert_eq!(pieces, ["alpha ", "beta ", "gamma"]);
+        assert_eq!(pieces.concat(), display.text);
+    }
+
+    #[test]
+    fn wrapping_falls_back_to_graphemes_and_keeps_tabs_expanded() {
+        let display = DisplayLine::from_source("\t界e\u{301}abcdef", 20, 4);
+        let ranges = display.wrapped_ranges(4);
+        let pieces = ranges
+            .iter()
+            .map(|range| &display.text[range.clone()])
+            .collect::<Vec<_>>();
+
+        assert_eq!(pieces, ["    ", "界e\u{301}a", "bcde", "f"]);
+        assert_eq!(pieces.concat(), display.text);
+        assert!(
+            ranges
+                .iter()
+                .all(|range| display.text.is_char_boundary(range.start)
+                    && display.text.is_char_boundary(range.end))
+        );
+        assert_eq!(display.source_offset(ranges[1].start), 21);
+    }
+
+    #[test]
+    fn wrapping_never_splits_a_wide_grapheme_even_below_its_width() {
+        let display = DisplayLine::from_source("👨‍👩‍👧‍👦x", 0, 4);
+        let ranges = display.wrapped_ranges(1);
+
+        assert_eq!(&display.text[ranges[0].clone()], "👨‍👩‍👧‍👦");
+        assert_eq!(&display.text[ranges[1].clone()], "x");
+    }
 }

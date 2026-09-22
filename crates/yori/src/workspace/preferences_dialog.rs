@@ -100,6 +100,14 @@ impl Render for PreferencesDialog {
                 |this, checked| this.editor.show_change_connections = checked,
                 cx,
             ))
+            .child(Self::setting(
+                "word-wrap",
+                "Word wrap",
+                "Applies immediately to every open tab and clears tab overrides.",
+                self.editor.word_wrap,
+                |this, checked| this.editor.word_wrap = checked,
+                cx,
+            ))
             .children(self.error.as_ref().map(|error| {
                 div()
                     .id("preferences-error")

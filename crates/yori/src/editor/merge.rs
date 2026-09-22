@@ -154,7 +154,7 @@ impl AlignedEditor {
         self.finish_composition();
 
         let selection = self.conflict_action_selection(id);
-        let anchor = self.view_anchor();
+        let anchor = self.view_anchor(window, cx);
         let merge = self.merge.as_mut().expect("merge mode");
         let update = merge.session.take(id, take, selection);
 
@@ -171,7 +171,7 @@ impl AlignedEditor {
         self.finish_composition();
 
         let selection = self.conflict_action_selection(id);
-        let anchor = self.view_anchor();
+        let anchor = self.view_anchor(window, cx);
         let merge = self.merge.as_mut().expect("merge mode");
         let update = merge.session.reset(id, selection);
 
@@ -216,7 +216,7 @@ impl AlignedEditor {
         self.cancel_vim();
         self.finish_composition();
         let selection = self.right_selection().unwrap_or(TextSelection::caret(0));
-        let anchor = self.view_anchor();
+        let anchor = self.view_anchor(window, cx);
         let merge = self.merge.as_mut().expect("merge mode");
         let update = merge.session.set_resolved(id, resolved, selection);
 
@@ -268,18 +268,25 @@ impl AlignedEditor {
         });
         self.refresh_merge_projection();
 
-        self.reveal_merge_conflict(id);
+        self.reveal_merge_conflict(id, window, cx);
         self.horizontal_scroll = 0.0;
 
         self.focus.focus(window, cx);
         cx.notify();
     }
 
-    pub(super) fn reveal_merge_conflict(&mut self, id: ConflictId) {
+    pub(super) fn reveal_merge_conflict(
+        &mut self,
+        id: ConflictId,
+        window: &mut Window,
+        cx: &gpui_kit::App,
+    ) {
         let row = self.merge.as_ref().expect("merge mode").display.conflicts()[id.0].header_row;
+        let projection = self.wrap_projection(window, cx);
+        let visual_row = projection.visual_range(row..row + 1).start;
         self.vertical_scroll = self
             .geometry()
-            .change_scroll_top(row, self.alignment.rows().len());
+            .change_scroll_top(visual_row, projection.visual_rows());
     }
 
     pub(super) fn locate_merge_row(&mut self, row: usize) {
@@ -314,9 +321,11 @@ impl AlignedEditor {
             let merge = self.merge.as_ref().expect("merge mode");
             let conflict = &merge.display.conflicts()[id.0];
             let top = conflict.base_caption.unwrap_or(conflict.source_span.start);
-            self.vertical_scroll = (display_units(top) * LINE_HEIGHT).min(
+            let projection = self.wrap_projection(window, cx);
+            let visual_top = projection.visual_range(top..top + 1).start;
+            self.vertical_scroll = (display_units(visual_top) * LINE_HEIGHT).min(
                 self.geometry()
-                    .vertical_scroll_limit(self.alignment.rows().len()),
+                    .vertical_scroll_limit(projection.visual_rows()),
             );
         }
 

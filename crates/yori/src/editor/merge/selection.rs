@@ -13,7 +13,7 @@ use yori_diff::{SelectionRestore, merge::MergeInput};
 use yori_document::{Document, editing::TextSelection};
 
 use super::{AlignedEditor, LINE_HEIGHT, controls::outline_bounds};
-use crate::editor::{RESTORE_WIDTH, Side, completion::Placement};
+use crate::editor::{RESTORE_WIDTH, Side, completion::Placement, wrapping::WrapProjection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LineTake {
@@ -77,7 +77,7 @@ impl AlignedEditor {
         let selection = self
             .right_selection()
             .unwrap_or(TextSelection::caret(expected.plan.local.start));
-        let anchor = self.view_anchor();
+        let anchor = self.view_anchor(window, cx);
         let update = self.merge.as_mut().expect("merge mode").session.take_lines(
             expected.input,
             selection,
@@ -97,6 +97,7 @@ impl AlignedEditor {
     pub(super) fn render_merge_line_controls(
         &self,
         geometry: EditorGeometry,
+        projection: &WrapProjection,
         cx: &mut Context<Self>,
     ) -> Div {
         let hovered = self.merge.as_ref().expect("merge mode").hovered_lines;
@@ -106,8 +107,9 @@ impl AlignedEditor {
                 continue;
             };
 
-            let top = display_units(take.plan.rows.start) * LINE_HEIGHT - self.vertical_scroll;
-            let end = display_units(take.plan.rows.end) * LINE_HEIGHT - self.vertical_scroll;
+            let visual = projection.visual_range(take.plan.rows.clone());
+            let top = display_units(visual.start) * LINE_HEIGHT - self.vertical_scroll;
+            let end = display_units(visual.end) * LINE_HEIGHT - self.vertical_scroll;
             if end <= 0.0 || top >= geometry.rows_viewport_height() {
                 continue;
             }

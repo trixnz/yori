@@ -1,5 +1,7 @@
 //! Paint-only whitespace hints over the unchanged shaped source text.
 
+use std::ops::Range;
+
 use gpui_kit::component::{ActiveTheme, WindowExt, notification::Notification};
 use gpui_kit::{
     AnyElement, Bounds, Context, Font, Hsla, IntoElement, PathBuilder, Pixels, Point, SharedString,
@@ -47,10 +49,27 @@ impl AlignedEditor {
         display: &DisplayLine,
         source: &str,
         ending: LineEnding,
+        segment: Range<usize>,
+        top: f32,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let markers = display.whitespace_marks(source);
-        let text = SharedString::from(display.text.clone());
+        let markers = display
+            .whitespace_marks(source)
+            .into_iter()
+            .filter_map(|marker| {
+                let start = marker.display.start.max(segment.start);
+                let end = marker.display.end.min(segment.end);
+                (start < end).then(|| {
+                    (
+                        start - segment.start..end - segment.start,
+                        marker.kind,
+                        marker.trailing,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let text = SharedString::from(display.text[segment.clone()].to_owned());
+        let last_segment = segment.end == display.text.len();
         let label = SharedString::from(match ending {
             LineEnding::Lf => "LF",
             LineEnding::CrLf => "CRLF",
@@ -97,34 +116,37 @@ impl AlignedEditor {
                 let origin = point(bounds.origin.x - px(scroll), bounds.origin.y);
                 let center_y = origin.y + px(LINE_HEIGHT / 2.0);
 
-                for marker in &markers {
-                    let start = origin.x + source.x_for_index(marker.display.start);
-                    let end = origin.x + source.x_for_index(marker.display.end);
+                for (range, kind, is_trailing) in &markers {
+                    let start = origin.x + source.x_for_index(range.start);
+                    let end = origin.x + source.x_for_index(range.end);
                     if end < bounds.left() || start > bounds.right() {
                         continue;
                     }
 
-                    let color = if marker.trailing { trailing } else { muted };
-                    paint_mark(marker.kind, start, end, center_y, color, window);
+                    let color = if *is_trailing { trailing } else { muted };
+                    paint_mark(*kind, start, end, center_y, color, window);
                 }
 
-                let label_origin = point(origin.x + source.width() + px(8.0), origin.y);
-                if let Err(error) = label.paint(
-                    label_origin,
-                    px(LINE_HEIGHT),
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                ) {
-                    eprintln!("whitespace label paint failed: {error}");
+                if last_segment {
+                    let label_origin = point(origin.x + source.width() + px(8.0), origin.y);
+                    if let Err(error) = label.paint(
+                        label_origin,
+                        px(LINE_HEIGHT),
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    ) {
+                        eprintln!("whitespace label paint failed: {error}");
+                    }
                 }
             },
         )
         .absolute()
-        .top_0()
+        .top(px(top))
         .left_0()
-        .size_full()
+        .w_full()
+        .h(px(LINE_HEIGHT))
         .into_any_element()
     }
 }

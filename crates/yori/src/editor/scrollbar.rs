@@ -11,16 +11,16 @@ use gpui_kit::{
 use yori::scrollbar::{HorizontalScrollTrack, OverviewBand, ScrollTrack};
 
 use super::merge::MergeState;
-use super::{AlignedEditor, HEADER_HEIGHT, LINE_HEIGHT};
+use super::{AlignedEditor, HEADER_HEIGHT, LINE_HEIGHT, wrapping::WrapProjection};
 use crate::appearance;
 
 pub(super) const WIDTH: f32 = 18.0;
 pub(super) const HEIGHT: f32 = 14.0;
 
 impl AlignedEditor {
-    fn scroll_track(&self) -> ScrollTrack {
+    fn scroll_track(&self, projection: &WrapProjection) -> ScrollTrack {
         ScrollTrack::new(
-            self.alignment.rows().len(),
+            projection.visual_rows(),
             LINE_HEIGHT,
             self.geometry().rows_viewport_height(),
         )
@@ -44,8 +44,14 @@ impl AlignedEditor {
         f32::from(x - self.content_bounds.get().origin.x)
     }
 
-    fn scrollbar_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let track = self.scroll_track();
+    fn scrollbar_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let projection = self.wrap_projection(window, cx);
+        let track = self.scroll_track(&projection);
         let y = self.scrollbar_y(event.position.y);
         let thumb = track.thumb(self.vertical_scroll);
         let grab = if thumb.contains(&y) {
@@ -62,13 +68,19 @@ impl AlignedEditor {
         cx.notify();
     }
 
-    fn scrollbar_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+    fn scrollbar_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(grab) = self.scrollbar_grab else {
             return;
         };
 
         if event.pressed_button == Some(MouseButton::Left) {
-            let track = self.scroll_track();
+            let projection = self.wrap_projection(window, cx);
+            let track = self.scroll_track(&projection);
             let thumb = track.thumb(self.vertical_scroll);
             let top = self.scrollbar_y(event.position.y) - grab.min(thumb.end - thumb.start);
             self.vertical_scroll = track.scroll_for_thumb(top);
@@ -129,27 +141,42 @@ impl AlignedEditor {
         cx.notify();
     }
 
-    pub(super) fn render_scrollbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let track = self.scroll_track();
+    pub(super) fn render_scrollbar(
+        &self,
+        projection: &WrapProjection,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let track = self.scroll_track(projection);
         let thumb = track.thumb(self.vertical_scroll);
         let bands = if self.merge.is_none() {
-            track.bands(&self.alignment, LINE_HEIGHT)
+            track.bands_for(
+                self.alignment.blocks().iter().map(|block| {
+                    (
+                        projection.visual_range(block.rows.clone()),
+                        !block.left.is_empty(),
+                        !block.right.is_empty(),
+                    )
+                }),
+                LINE_HEIGHT,
+            )
         } else {
             Vec::new()
         };
-        let merge_marks = self
-            .merge
-            .as_ref()
-            .map_or_else(Vec::new, |merge| merge_scrollbar_marks(merge, track));
+        let merge_marks = self.merge.as_ref().map_or_else(Vec::new, |merge| {
+            merge_scrollbar_marks(merge, projection, track)
+        });
         let current = if self.merge.is_some() {
             merge_marks
                 .iter()
                 .find(|mark| mark.current)
                 .map(|mark| mark.range.clone())
         } else {
-            self.navigation
-                .current(&self.alignment)
-                .map(|index| track.marker(self.alignment.blocks()[index].rows.clone(), LINE_HEIGHT))
+            self.navigation.current(&self.alignment).map(|index| {
+                track.marker(
+                    projection.visual_range(self.alignment.blocks()[index].rows.clone()),
+                    LINE_HEIGHT,
+                )
+            })
         };
         let foreground = cx.theme().foreground;
         let resolved_color = cx.theme().muted_foreground;
@@ -284,13 +311,20 @@ struct MergeScrollbarMark {
     current: bool,
 }
 
-fn merge_scrollbar_marks(merge: &MergeState, track: ScrollTrack) -> Vec<MergeScrollbarMark> {
+fn merge_scrollbar_marks(
+    merge: &MergeState,
+    projection: &WrapProjection,
+    track: ScrollTrack,
+) -> Vec<MergeScrollbarMark> {
     merge
         .display
         .conflicts()
         .iter()
         .map(|conflict| MergeScrollbarMark {
-            range: track.marker(conflict.source_span.clone(), LINE_HEIGHT),
+            range: track.marker(
+                projection.visual_range(conflict.source_span.clone()),
+                LINE_HEIGHT,
+            ),
             resolved: merge
                 .session
                 .state(conflict.id)
@@ -353,10 +387,10 @@ fn capture_vertical_drag(editor: WeakEntity<AlignedEditor>, window: &mut Window)
     // Capture window-wide movement so dragging outside the rail never turns
     // into text selection. These handlers exist only for this frame.
     let dragging_editor = editor.clone();
-    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
         if phase == DispatchPhase::Capture {
             let _ = dragging_editor.update(cx, |editor, cx| {
-                editor.scrollbar_move(event, cx);
+                editor.scrollbar_move(event, window, cx);
             });
         }
     });

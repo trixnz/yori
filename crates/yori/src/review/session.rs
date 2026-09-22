@@ -25,7 +25,10 @@ use yori::document_info::path_labels;
 
 use crate::{
     comparison::Comparison,
-    editor::{AlignedEditor, DirtyChanged, PaneDocument, PaneFocusBoundary},
+    editor::{
+        AlignedEditor, DirtyChanged, PaneDocument, PaneFocusBoundary, ToggleWordWrap, WordWrap,
+        WordWrapChanged,
+    },
     storage::SaveError,
     workspace::files::{Files, Role as DocumentRole},
 };
@@ -52,6 +55,7 @@ pub(crate) enum ReviewChanged {
     State,
     RefreshCompleted { activate: bool },
     ActiveEditorChanged { transfer_focus: bool },
+    WordWrapChanged { enabled: bool },
 }
 
 impl EventEmitter<ReviewChanged> for ReviewSession {}
@@ -104,6 +108,7 @@ struct ReviewEditor {
     editor: Entity<AlignedEditor>,
     _dirty_subscription: Subscription,
     _pane_subscription: Subscription,
+    _word_wrap_subscription: Subscription,
     files: Files,
 }
 
@@ -376,10 +381,11 @@ pub(crate) struct ReviewSession {
     refreshing: bool,
     saving: bool,
     message: Option<String>,
+    word_wrap: WordWrap,
 }
 
 impl ReviewSession {
-    pub(crate) fn new(source: ReviewSource, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(source: ReviewSource, word_wrap: bool, cx: &mut Context<Self>) -> Self {
         Self {
             source,
             entries: Vec::new(),
@@ -392,7 +398,25 @@ impl ReviewSession {
             refreshing: false,
             saving: false,
             message: None,
+            word_wrap: word_wrap.into(),
         }
+    }
+
+    pub(crate) fn set_word_wrap(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.word_wrap = enabled.into();
+        for state in self.editors.values() {
+            state
+                .editor
+                .update(cx, |editor, cx| editor.set_word_wrap(enabled, cx));
+        }
+
+        cx.notify();
+    }
+
+    fn toggle_word_wrap(&mut self, _: &ToggleWordWrap, _: &mut Window, cx: &mut Context<Self>) {
+        let enabled = !self.word_wrap.enabled();
+        self.set_word_wrap(enabled, cx);
+        cx.emit(ReviewChanged::WordWrapChanged { enabled });
     }
 
     pub(crate) fn needs_save(&self, cx: &App) -> bool {
@@ -659,12 +683,14 @@ impl ReviewSession {
         };
 
         let loaded = LoadedText::load(comparison)?;
+        let word_wrap = self.word_wrap.enabled();
         let editor = cx.new(|cx| {
             AlignedEditor::new_review_diff(
                 loaded.left,
                 loaded.right,
                 loaded.editable,
                 loaded.saveable,
+                word_wrap,
                 window,
                 cx,
             )
@@ -697,6 +723,13 @@ impl ReviewSession {
                 }
             },
         );
+        let word_wrap_subscription =
+            cx.subscribe(&editor, |this, _, event: &WordWrapChanged, cx| {
+                this.set_word_wrap(event.enabled, cx);
+                cx.emit(ReviewChanged::WordWrapChanged {
+                    enabled: event.enabled,
+                });
+            });
 
         self.editors.insert(
             identity.clone(),
@@ -704,6 +737,7 @@ impl ReviewSession {
                 editor,
                 _dirty_subscription: dirty_subscription,
                 _pane_subscription: pane_subscription,
+                _word_wrap_subscription: word_wrap_subscription,
                 files: loaded.files,
             },
         );
@@ -1365,6 +1399,7 @@ impl Render for ReviewSession {
             .size_full()
             .flex()
             .overflow_hidden()
+            .on_action(cx.listener(Self::toggle_word_wrap))
             .child(self.render_navigator(window, cx))
             .child(
                 div()

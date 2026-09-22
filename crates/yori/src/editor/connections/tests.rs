@@ -120,7 +120,8 @@ fn opting_in_preserves_selection_and_narrows_the_same_undoable_restore(cx: &mut 
         assert_eq!((after.vertical_scroll, after.horizontal_scroll), scroll);
         assert_eq!(after.navigation.current(&after.alignment), current);
         assert!(!after.is_dirty());
-        let connections = after.visible_connections(after.geometry());
+        let projection = after.wrap_projection(window, cx);
+        let connections = after.visible_connections(after.geometry(), &projection);
         assert_eq!(connections.len(), 1);
         assert_eq!(connections[0].left, 2..3);
         assert_eq!(connections[0].right, 2..3);

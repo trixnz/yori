@@ -580,6 +580,7 @@ fn apply_updates_every_open_editor_and_future_editor(cx: &mut TestAppContext) {
         vim_keybindings: true,
         show_whitespace: true,
         show_change_connections: true,
+        word_wrap: false,
     };
     cx.update(|window, cx| {
         assert!(!window.has_active_dialog(cx));
@@ -649,6 +650,70 @@ fn apply_reports_new_invalid_external_keybindings_after_saving_valid_editor_pref
     assert!(saved.contains("# external edit"));
     assert!(saved.contains("show_whitespace = true"));
     assert!(saved.contains("save = [\"broken-key\"]"));
+}
+
+#[gpui_kit::test]
+fn tab_word_wrap_override_is_local_and_global_preference_clears_all_overrides(
+    cx: &mut TestAppContext,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("yori").join("config.toml");
+    let (workspace, cx) = harness_with_config(cx, Some(config_path.clone()));
+    let files = tempfile::tempdir().unwrap();
+    let second_left = files.path().join("second-left.txt");
+    let second_right = files.path().join("second-right.txt");
+    let third_left = files.path().join("third-left.txt");
+    let third_right = files.path().join("third-right.txt");
+    for file in [&second_left, &second_right, &third_left, &third_right] {
+        std::fs::write(file, "a line long enough to wrap when requested\n").unwrap();
+    }
+
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_paths(&second_left, &second_right, window, cx);
+        });
+        window.render_frame(cx);
+        window.dispatch_action(Box::new(crate::editor::ToggleWordWrap), cx);
+    });
+
+    cx.update(|_, cx| {
+        let workspace = workspace.read(cx);
+        assert_eq!(workspace.tabs.entries.len(), 2);
+        let first = workspace.tabs.entries[0].content.comparison().unwrap();
+        let second = workspace.tabs.entries[1].content.comparison().unwrap();
+
+        assert!(!first.editor.read(cx).word_wrap_enabled());
+        assert!(second.editor.read(cx).word_wrap_enabled());
+        assert_eq!(first.word_wrap.override_value, None);
+        assert_eq!(second.word_wrap.override_value, Some(true));
+        assert!(!crate::config::editor(cx).word_wrap);
+    });
+
+    show_preferences(cx);
+    cx.update(|window, cx| {
+        window.click("word-wrap", cx);
+        window.click("preferences-apply", cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        assert!(crate::config::editor(cx).word_wrap);
+        for tab in &workspace.read(cx).tabs.entries {
+            let comparison = tab.content.comparison().unwrap();
+            assert!(comparison.editor.read(cx).word_wrap_enabled());
+            assert_eq!(comparison.word_wrap.override_value, None);
+            assert!(comparison.word_wrap.effective());
+        }
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.open_paths(&third_left, &third_right, window, cx);
+        });
+        let future = active_editor(&workspace, cx);
+        assert!(future.read(cx).word_wrap_enabled());
+    });
+
+    let saved = std::fs::read_to_string(config_path).unwrap();
+    assert!(saved.contains("word_wrap = true"));
 }
 
 #[gpui_kit::test]

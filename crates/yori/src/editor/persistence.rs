@@ -129,6 +129,7 @@ impl AlignedEditor {
             selection
         });
         self.preferred_column = None;
+        self.preferred_visual_x = None;
         self.hovered_connection = None;
         self.sync_vim_selection(cx);
 
@@ -170,6 +171,7 @@ impl AlignedEditor {
         );
         self.selection = None;
         self.preferred_column = None;
+        self.preferred_visual_x = None;
         self.hovered_connection = None;
         self.sync_vim_selection(cx);
 

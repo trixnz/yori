@@ -79,7 +79,8 @@ fn track_jump_and_drag_outside_the_rail_preserve_selection_and_source(cx: &mut T
     let grab = cx.update(|window, cx| {
         window.render_frame(cx);
         let view = editor.read(cx);
-        let track = view.scroll_track();
+        let projection = view.wrap_projection(window, cx);
+        let track = view.scroll_track(&projection);
         assert!(view.vertical_scroll > track.max_scroll() * 0.4);
         assert!(view.vertical_scroll < track.max_scroll() * 0.6);
         assert_eq!(view.right_selection(), selection);
@@ -102,7 +103,11 @@ fn track_jump_and_drag_outside_the_rail_preserve_selection_and_source(cx: &mut T
 
     cx.update(|window, cx| {
         let view = editor.read(cx);
-        assert!((view.vertical_scroll - view.scroll_track().max_scroll()).abs() < f32::EPSILON);
+        let projection = view.wrap_projection(window, cx);
+        assert!(
+            (view.vertical_scroll - view.scroll_track(&projection).max_scroll()).abs()
+                < f32::EPSILON
+        );
         assert_eq!(view.right_selection(), selection);
         assert_eq!(view.right.document.text(), source);
         assert_eq!(view.navigation.current(&view.alignment), current);
@@ -126,7 +131,8 @@ fn editor_deactivation_clears_both_drag_states_before_later_selection(cx: &mut T
             window.render_frame(cx);
             let view = editor.read(cx);
             let vertical = window.find("diff-scrollbar").bounds();
-            let vertical_thumb = view.scroll_track().thumb(view.vertical_scroll);
+            let projection = view.wrap_projection(window, cx);
+            let vertical_thumb = view.scroll_track(&projection).thumb(view.vertical_scroll);
             let horizontal = window.find("horizontal-scrollbar").bounds();
             let max_horizontal = view.max_horizontal_scroll(window, cx);
             let horizontal_thumb = view
@@ -222,7 +228,8 @@ fn resize_and_edit_keep_the_track_aligned_and_clamp_short_documents(cx: &mut Tes
         window.render_frame(cx);
 
         let view = editor.read(cx);
-        let track = view.scroll_track();
+        let projection = view.wrap_projection(window, cx);
+        let track = view.scroll_track(&projection);
         assert!(view.vertical_scroll.abs() < f32::EPSILON);
         assert!(track.max_scroll().abs() < f32::EPSILON);
         assert!(track.bands(&view.alignment, LINE_HEIGHT).is_empty());
@@ -474,9 +481,10 @@ fn merge_marks_use_projected_spans_not_header_inclusive_controls(cx: &mut TestAp
             .unwrap();
             *editor = AlignedEditor::from_merge_session(session, window, cx);
             // A large viewport keeps the expected marker positions in row units.
-            let track = ScrollTrack::new(0, LINE_HEIGHT, 1000.0);
+            let projection = editor.wrap_projection(window, cx);
+            let track = ScrollTrack::new(projection.visual_rows(), LINE_HEIGHT, 1000.0);
             let merge = editor.merge.as_ref().unwrap();
-            let marks = merge_scrollbar_marks(merge, track);
+            let marks = merge_scrollbar_marks(merge, &projection, track);
 
             assert_eq!(marks.len(), 2);
             assert_eq!(marks[0].range, LINE_HEIGHT..2.0 * LINE_HEIGHT);
@@ -487,8 +495,9 @@ fn merge_marks_use_projected_spans_not_header_inclusive_controls(cx: &mut TestAp
 
             editor.toggle_merge_base(window, cx);
             editor.merge_mark(yori_diff::merge::ConflictId(0), true, window, cx);
+            let projection = editor.wrap_projection(window, cx);
             let merge = editor.merge.as_ref().unwrap();
-            let marks = merge_scrollbar_marks(merge, track);
+            let marks = merge_scrollbar_marks(merge, &projection, track);
 
             assert_eq!(marks[0].range, 3.0 * LINE_HEIGHT..4.0 * LINE_HEIGHT);
             assert_eq!(marks[1].range, 6.0 * LINE_HEIGHT..7.0 * LINE_HEIGHT);

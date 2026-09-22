@@ -20,6 +20,7 @@ mod restoration;
 mod scrollbar;
 mod vim;
 mod whitespace;
+mod wrapping;
 
 use crate::appearance;
 use yori_document::editing::{EditHistory, EditOutcome, Motion};
@@ -85,6 +86,7 @@ gpui_kit::actions!(
         NextChange,
         FocusPreviousPane,
         FocusNextPane,
+        ToggleWordWrap,
     ]
 );
 
@@ -226,6 +228,11 @@ impl PaneDocument {
 
 pub(super) struct DirtyChanged;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WordWrapChanged {
+    pub enabled: bool,
+}
+
 struct DirtyState {
     original: String,
     modified: bool,
@@ -256,6 +263,29 @@ impl DirtyState {
 enum VimKeybindings {
     Disabled,
     Enabled,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WordWrap {
+    #[default]
+    Disabled,
+    Enabled,
+}
+
+impl WordWrap {
+    pub(crate) fn enabled(self) -> bool {
+        self == Self::Enabled
+    }
+}
+
+impl From<bool> for WordWrap {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -320,6 +350,7 @@ pub(super) struct AlignedEditor {
     dirty: DirtyState,
     saving: bool,
     preferred_column: Option<usize>,
+    preferred_visual_x: Option<f32>,
     focus: FocusHandle,
     selection: Option<Selection>,
     vertical_scroll: f32,
@@ -327,6 +358,7 @@ pub(super) struct AlignedEditor {
     pending_initial_change_row: Option<usize>,
     show_whitespace: bool,
     show_connections: bool,
+    word_wrap: WordWrap,
     hovered_connection: Option<Range<usize>>,
     scrollbar_grab: Option<f32>,
     horizontal_scrollbar_grab: Option<f32>,
@@ -362,10 +394,15 @@ impl AlignedEditor {
         right: PaneDocument,
         editable: bool,
         saveable: bool,
+        word_wrap: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_diff_with_activation(left, right, editable, saveable, false, window, cx)
+        let mut editor =
+            Self::new_diff_with_activation(left, right, editable, saveable, false, window, cx);
+        editor.word_wrap = word_wrap.into();
+
+        editor
     }
 
     pub(super) fn new_merge_base(
@@ -486,6 +523,7 @@ impl AlignedEditor {
             dirty,
             saving: false,
             preferred_column: None,
+            preferred_visual_x: None,
             focus,
             selection: None,
             vertical_scroll: 0.0,
@@ -493,6 +531,7 @@ impl AlignedEditor {
             pending_initial_change_row: None,
             show_whitespace: config.show_whitespace,
             show_connections: config.show_change_connections,
+            word_wrap: config.word_wrap.into(),
             hovered_connection: None,
             scrollbar_grab: None,
             horizontal_scrollbar_grab: None,
@@ -503,7 +542,7 @@ impl AlignedEditor {
             ))),
         };
         if matches!(options.initial_change, InitialChange::First) {
-            editor.initialize_change_navigation();
+            editor.initialize_change_navigation(window, cx);
         }
         editor.schedule_highlighting(Side::Left, window, cx);
         editor.schedule_highlighting(Side::Right, window, cx);
@@ -567,11 +606,17 @@ impl AlignedEditor {
     }
 
     #[cfg(test)]
+    pub(crate) fn word_wrap_enabled(&self) -> bool {
+        self.word_wrap.enabled()
+    }
+
+    #[cfg(test)]
     pub(crate) fn applied_preferences(&self) -> crate::config::EditorConfig {
         crate::config::EditorConfig {
             vim_keybindings: self.vim_keybindings == VimKeybindings::Enabled,
             show_whitespace: self.show_whitespace,
             show_change_connections: self.show_connections,
+            word_wrap: self.word_wrap.enabled(),
         }
     }
 
@@ -596,6 +641,24 @@ impl AlignedEditor {
                                 .unwrap_or(false)
                     })
             })
+    }
+
+    pub(super) fn set_word_wrap(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.word_wrap.enabled() == enabled {
+            return;
+        }
+
+        self.word_wrap = enabled.into();
+        self.horizontal_scroll = 0.0;
+        self.horizontal_scrollbar_grab = None;
+        self.horizontal_scrollbar_visibility = HorizontalScrollbarVisibility::Hidden;
+        cx.notify();
+    }
+
+    fn toggle_word_wrap(&mut self, _: &ToggleWordWrap, _: &mut Window, cx: &mut Context<Self>) {
+        let enabled = !self.word_wrap.enabled();
+        self.set_word_wrap(enabled, cx);
+        cx.emit(WordWrapChanged { enabled });
     }
 
     pub(super) fn deactivate(&mut self, cx: &mut Context<Self>) {
@@ -658,6 +721,7 @@ impl AlignedEditor {
         self.cancel_vim();
         self.finish_composition();
         self.preferred_column = None;
+        self.preferred_visual_x = None;
         self.selection = Some(Selection {
             side: target,
             anchor: offset,
@@ -784,11 +848,13 @@ impl AlignedEditor {
     fn source_offset_for_x(
         &self,
         side: Side,
-        row: usize,
+        visual_row: usize,
         x: f32,
         window: &mut Window,
         cx: &App,
     ) -> usize {
+        let projection = self.wrap_projection(window, cx);
+        let (row, continuation) = projection.visual_location(visual_row);
         let Some(line) = self.line_for_row(side, row) else {
             return self.source_offset_for(side, row, 0);
         };
@@ -796,12 +862,19 @@ impl AlignedEditor {
         let source_line = &document.lines()[line];
         let display =
             DisplayLine::from_source(document.content(line), source_line.content.start, TAB_WIDTH);
-        if x <= 0.0 || display.text.is_empty() {
-            return self.source_offset_for(side, row, 0);
+        let Some(segment) = projection
+            .row(row)
+            .and_then(|row| row.segments(side).get(continuation))
+        else {
+            return self.source_offset_for(side, row, display.text.len());
+        };
+        if x <= 0.0 || segment.is_empty() {
+            return self.source_offset_for(side, row, segment.start);
         }
 
+        let text = &display.text[segment.clone()];
         let run = TextRun {
-            len: display.text.len(),
+            len: text.len(),
             font: Font {
                 family: cx.theme().mono_font_family.clone(),
                 ..Font::default()
@@ -812,12 +885,12 @@ impl AlignedEditor {
             strikethrough: None,
         };
         let shaped = window.text_system().shape_line(
-            display.text.into(),
+            text.to_owned().into(),
             cx.theme().mono_font_size,
             &[run],
             None,
         );
-        let display_offset = shaped.closest_index_for_x(px(x));
+        let display_offset = segment.start + shaped.closest_index_for_x(px(x));
 
         self.source_offset_for(side, row, display_offset)
     }
@@ -855,6 +928,8 @@ impl AlignedEditor {
             self.vertical_scroll,
             self.horizontal_scroll,
         );
+        let projection = self.wrap_projection(window, cx);
+        let (row, continuation) = projection.visual_location(hit.row);
         let side = if hit.left_side {
             Side::Left
         } else if hit.incoming_side {
@@ -863,7 +938,6 @@ impl AlignedEditor {
             Side::Right
         };
         let pane = self.document(side);
-        let row = hit.row;
         let Some(line_index) = self.line_for_row(side, row) else {
             return (side, self.source_offset_for(side, row, 0));
         };
@@ -874,14 +948,21 @@ impl AlignedEditor {
             source_line.content.start,
             TAB_WIDTH,
         );
+        let Some(segment) = projection
+            .row(row)
+            .and_then(|row| row.segments(side).get(continuation))
+        else {
+            return (side, self.source_offset_for(side, row, display.text.len()));
+        };
 
-        if hit.text_x <= 0.0 || display.text.is_empty() {
-            return (side, self.source_offset_for(side, row, 0));
+        if hit.text_x <= 0.0 || segment.is_empty() {
+            return (side, self.source_offset_for(side, row, segment.start));
         }
 
         let theme = cx.theme();
+        let text = &display.text[segment.clone()];
         let run = TextRun {
-            len: display.text.len(),
+            len: text.len(),
             font: Font {
                 family: theme.mono_font_family.clone(),
                 ..Font::default()
@@ -892,17 +973,21 @@ impl AlignedEditor {
             strikethrough: None,
         };
         let shaped = window.text_system().shape_line(
-            display.text.clone().into(),
+            text.to_owned().into(),
             theme.mono_font_size,
             &[run],
             None,
         );
-        let display_offset = shaped.closest_index_for_x(px(hit.text_x));
+        let display_offset = segment.start + shaped.closest_index_for_x(px(hit.text_x));
 
         (side, self.source_offset_for(side, row, display_offset))
     }
 
     fn max_horizontal_scroll(&self, window: &mut Window, cx: &App) -> f32 {
+        if self.word_wrap.enabled() {
+            return 0.0;
+        }
+
         let theme = cx.theme();
         let run = TextRun {
             len: 1,
@@ -965,6 +1050,7 @@ impl AlignedEditor {
         self.reposition_vim();
         self.finish_composition();
         self.preferred_column = None;
+        self.preferred_visual_x = None;
 
         self.focus.focus(window, cx);
 
@@ -985,7 +1071,7 @@ impl AlignedEditor {
             head: offset,
         });
         self.sync_vim_selection(cx);
-        self.locate_pointer_change(event.position);
+        self.locate_pointer_change(event.position, window, cx);
 
         cx.notify();
     }
@@ -1001,7 +1087,7 @@ impl AlignedEditor {
         {
             selection.head = offset;
             self.sync_vim_selection(cx);
-            self.locate_pointer_change(event.position);
+            self.locate_pointer_change(event.position, window, cx);
 
             cx.notify();
         }
@@ -1019,13 +1105,18 @@ impl AlignedEditor {
         };
         let vertical = if event.shift { 0.0 } else { delta.1 };
 
+        let projection = self.wrap_projection(window, cx);
         let max_vertical = self
             .geometry()
-            .vertical_scroll_limit(self.alignment.rows().len());
+            .vertical_scroll_limit(projection.visual_rows());
         self.vertical_scroll = (self.vertical_scroll - vertical).clamp(0.0, max_vertical);
 
         let max_horizontal = self.max_horizontal_scroll(window, cx);
-        self.horizontal_scroll = (self.horizontal_scroll - horizontal).clamp(0.0, max_horizontal);
+        self.horizontal_scroll = if self.word_wrap.enabled() {
+            0.0
+        } else {
+            (self.horizontal_scroll - horizontal).clamp(0.0, max_horizontal)
+        };
 
         cx.notify();
         cx.stop_propagation();
@@ -1115,6 +1206,20 @@ impl AlignedEditor {
         )
     }
 
+    fn segment_highlights(
+        highlights: &[(Range<usize>, HighlightStyle)],
+        segment: &Range<usize>,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
+        highlights
+            .iter()
+            .filter_map(|(range, style)| {
+                let start = range.start.max(segment.start);
+                let end = range.end.min(segment.end);
+                (start < end).then(|| (start - segment.start..end - segment.start, *style))
+            })
+            .collect()
+    }
+
     fn row_colors(kind: DiffKind, side: Side) -> Option<appearance::DiffColors> {
         match (kind, side) {
             (DiffKind::Removed | DiffKind::Modified, Side::Left) => Some(appearance::removed()),
@@ -1138,15 +1243,20 @@ impl AlignedEditor {
             .child((line_index + 1).to_string())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one pane-row widget keeps aligned backgrounds, wrapped text, gutters, and markers together"
+    )]
     fn render_pane_row(
         &self,
         side: Side,
         row_index: usize,
-        top: f32,
+        projected: &wrapping::ProjectedRow,
         geometry: EditorGeometry,
         highlighting: RowHighlighting<'_>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let top = display_units(projected.visual_start) * LINE_HEIGHT - self.vertical_scroll;
         let pane_width = geometry.pane_width();
         let text_viewport_width = geometry.text_viewport_width();
 
@@ -1178,7 +1288,7 @@ impl AlignedEditor {
             .top(px(top))
             .left(px(self.pane_left(side)))
             .w(px(pane_width))
-            .h(px(LINE_HEIGHT))
+            .h(px(display_units(projected.height) * LINE_HEIGHT))
             .overflow_hidden()
             .bg(background);
 
@@ -1191,16 +1301,41 @@ impl AlignedEditor {
             );
             let highlights =
                 self.text_highlights(side, pane, line_index, &display, highlighting, cx);
-            let whitespace = self.show_whitespace.then(|| {
-                self.render_whitespace(
-                    &display,
-                    pane.document.content(line_index),
-                    source_line.ending,
-                    cx,
-                )
-            });
-            let text =
-                StyledText::new(SharedString::from(display.text)).with_highlights(highlights);
+            let mut text_area = div()
+                .absolute()
+                .left(px(GUTTER_WIDTH))
+                .w(px(text_viewport_width))
+                .h(px(display_units(projected.height) * LINE_HEIGHT))
+                .overflow_hidden();
+
+            for (continuation, segment) in projected.segments(side).iter().enumerate() {
+                let text =
+                    StyledText::new(SharedString::from(display.text[segment.clone()].to_owned()))
+                        .with_highlights(Self::segment_highlights(&highlights, segment));
+                let top = display_units(continuation) * LINE_HEIGHT;
+                let whitespace = self.show_whitespace.then(|| {
+                    self.render_whitespace(
+                        &display,
+                        pane.document.content(line_index),
+                        source_line.ending,
+                        segment.clone(),
+                        top,
+                        cx,
+                    )
+                });
+
+                text_area = text_area
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(top))
+                            .left(px(-self.horizontal_scroll))
+                            .h(px(LINE_HEIGHT))
+                            .whitespace_nowrap()
+                            .child(text),
+                    )
+                    .children(whitespace);
+            }
 
             container = container
                 .child(Self::render_line_number(
@@ -1209,22 +1344,7 @@ impl AlignedEditor {
                         .as_ref()
                         .map_or(cx.theme().muted_foreground, |colors| colors.marker),
                 ))
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(GUTTER_WIDTH))
-                        .w(px(text_viewport_width))
-                        .h(px(LINE_HEIGHT))
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .absolute()
-                                .left(px(-self.horizontal_scroll))
-                                .whitespace_nowrap()
-                                .child(text),
-                        )
-                        .children(whitespace),
-                );
+                .child(text_area);
         }
 
         let current = self
@@ -1244,7 +1364,7 @@ impl AlignedEditor {
                     .left(px(GUTTER_WIDTH - TEXT_INSET - 3.0))
                     .top(px(0.0))
                     .w(px(if current { 3.0 } else { 2.0 }))
-                    .h(px(LINE_HEIGHT))
+                    .h(px(display_units(projected.height) * LINE_HEIGHT))
                     .bg(marker),
             );
         }
@@ -1255,6 +1375,7 @@ impl AlignedEditor {
 
 impl gpui_kit::EventEmitter<DirtyChanged> for AlignedEditor {}
 impl gpui_kit::EventEmitter<PaneFocusBoundary> for AlignedEditor {}
+impl gpui_kit::EventEmitter<WordWrapChanged> for AlignedEditor {}
 
 #[cfg(test)]
 impl AlignedEditor {
@@ -1284,7 +1405,7 @@ impl Render for AlignedEditor {
                 let mut bounds = editor.content_bounds.get();
                 bounds.size = size;
                 editor.content_bounds.set(bounds);
-                editor.resolve_initial_change_viewport();
+                editor.resolve_initial_change_viewport(window, cx);
 
                 editor.render_content(window, cx)
             })
@@ -1311,6 +1432,7 @@ impl AlignedEditor {
         };
 
         let geometry = self.geometry();
+        let projection = self.wrap_projection(window, cx);
         let width = geometry.content_width();
         let pane_width = geometry.pane_width();
         let text_viewport_width = geometry.text_viewport_width();
@@ -1318,14 +1440,13 @@ impl AlignedEditor {
         self.horizontal_scroll = self.horizontal_scroll.min(max_horizontal_scroll);
         self.vertical_scroll = self
             .vertical_scroll
-            .min(geometry.vertical_scroll_limit(self.alignment.rows().len()));
+            .min(geometry.vertical_scroll_limit(projection.visual_rows()));
 
-        let first_row = whole_rows(self.vertical_scroll / LINE_HEIGHT);
-        let row_offset = self.vertical_scroll % LINE_HEIGHT;
+        let first_visual_row = whole_rows(self.vertical_scroll / LINE_HEIGHT);
         let visible_count =
             whole_rows((geometry.rows_viewport_height() / LINE_HEIGHT).ceil()) + OVERSCAN_ROWS;
-        let end_row = (first_row + visible_count).min(self.alignment.rows().len());
-        let visible_rows = first_row..end_row;
+        let end_visual_row = (first_visual_row + visible_count).min(projection.visual_rows());
+        let visible_rows = projection.visible_logical_rows(first_visual_row..end_visual_row);
         let theme = &cx.theme().highlight_theme;
         let left_syntax = self.left.syntax_cache.borrow_mut().visible(
             self.left.highlighter.as_ref(),
@@ -1363,8 +1484,9 @@ impl AlignedEditor {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move));
 
-        for row_index in first_row..end_row {
-            let top = geometry.visible_row_top(row_index, first_row, row_offset);
+        for row_index in visible_rows.clone() {
+            let projected = &projection.rows()[row_index];
+            let top = display_units(projected.visual_start) * LINE_HEIGHT - self.vertical_scroll;
             match self
                 .merge
                 .as_ref()
@@ -1375,7 +1497,8 @@ impl AlignedEditor {
                     continue;
                 }
                 Some(merge::RowKind::Base(base)) => {
-                    rows = rows.child(self.render_base_preview_row(base, top, geometry, cx));
+                    rows = rows
+                        .child(self.render_base_preview_row(base, projected, top, geometry, cx));
                     continue;
                 }
                 Some(merge::RowKind::Aligned) | None => {}
@@ -1390,7 +1513,7 @@ impl AlignedEditor {
                 .child(self.render_pane_row(
                     Side::Left,
                     row_index,
-                    top,
+                    projected,
                     geometry,
                     RowHighlighting {
                         syntax: &left_syntax,
@@ -1401,7 +1524,7 @@ impl AlignedEditor {
                 .child(self.render_pane_row(
                     Side::Right,
                     row_index,
-                    top,
+                    projected,
                     geometry,
                     RowHighlighting {
                         syntax: &right_syntax,
@@ -1422,7 +1545,7 @@ impl AlignedEditor {
                 rows = rows.child(self.render_pane_row(
                     Side::Incoming,
                     row_index,
-                    top,
+                    projected,
                     geometry,
                     RowHighlighting {
                         syntax: &incoming_syntax,
@@ -1487,9 +1610,9 @@ impl AlignedEditor {
         }
 
         if self.merge.is_none() {
-            rows = rows.child(self.render_restore_controls(geometry, cx));
+            rows = rows.child(self.render_restore_controls(geometry, &projection, cx));
         } else {
-            rows = rows.child(self.render_merge_conflict_controls(geometry, cx));
+            rows = rows.child(self.render_merge_conflict_controls(geometry, &projection, cx));
         }
 
         let input_entity = cx.entity();
@@ -1514,6 +1637,7 @@ impl AlignedEditor {
             .on_action(cx.listener(Self::next_change))
             .on_action(cx.listener(Self::focus_previous_pane))
             .on_action(cx.listener(Self::focus_next_pane))
+            .on_action(cx.listener(Self::toggle_word_wrap))
             .on_action(cx.listener(Self::restore_selected_lines))
             .on_action(cx.listener(Self::copy_selected))
             .on_action(cx.listener(Self::paste))
@@ -1591,7 +1715,7 @@ impl AlignedEditor {
                 .size_full(),
             )
             .child(rows)
-            .child(self.render_scrollbar(cx))
+            .child(self.render_scrollbar(&projection, cx))
             .children(
                 self.horizontal_scrollbar_visibility
                     .is_visible()

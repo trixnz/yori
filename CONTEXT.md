@@ -36,6 +36,11 @@ A blank display position on one side of a comparison that lines up corresponding
 source content without being a source line itself.
 _Avoid_: Empty source line, padding newline
 
+**Continuation row**:
+A presentation-only visual line created when source content wraps within a display row.
+Shorter panes contribute blank continuation space so corresponding content stays aligned.
+_Avoid_: Wrapped source line, inserted newline
+
 **Change transfer**:
 An edit that applies a change from one participating document to the other;
 restoring a baseline block into a local document is one example.

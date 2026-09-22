@@ -167,7 +167,7 @@ impl AlignedEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), yori_diff::merge::MergeError> {
-        let anchor = self.view_anchor();
+        let anchor = self.view_anchor(window, cx);
         let target = match side {
             Side::Right if !self.right.editable => EditTarget::ReadOnly(&self.right.document),
             Side::Right => {

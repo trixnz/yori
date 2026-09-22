@@ -142,12 +142,31 @@ impl ScrollTrack {
     /// with hunks plus track height; the renderer never paints one element per row.
     #[must_use]
     pub fn bands(self, alignment: &Alignment, line_height: f32) -> Vec<OverviewBand> {
+        self.bands_for(
+            alignment.blocks().iter().map(|block| {
+                (
+                    block.rows.clone(),
+                    !block.left.is_empty(),
+                    !block.right.is_empty(),
+                )
+            }),
+            line_height,
+        )
+    }
+
+    /// Aggregate logical change ranges after a caller maps them into presentation rows.
+    #[must_use]
+    pub fn bands_for(
+        self,
+        ranges: impl IntoIterator<Item = (Range<usize>, bool, bool)>,
+        line_height: f32,
+    ) -> Vec<OverviewBand> {
         let mut pixels = vec![0_u8; whole_rows(self.height.ceil())];
-        for block in alignment.blocks() {
-            let marker = self.marker(block.rows.clone(), line_height);
+        for (rows, left, right) in ranges {
+            let marker = self.marker(rows, line_height);
             let start = whole_rows(marker.start).min(pixels.len());
             let end = whole_rows(marker.end.ceil()).min(pixels.len());
-            let sides = u8::from(!block.left.is_empty()) | (u8::from(!block.right.is_empty()) << 1);
+            let sides = u8::from(left) | (u8::from(right) << 1);
 
             for pixel in &mut pixels[start..end] {
                 *pixel |= sides;

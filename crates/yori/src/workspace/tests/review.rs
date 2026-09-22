@@ -191,6 +191,93 @@ fn source_identity_deduplicates_and_navigation_lazily_retains_editors(cx: &mut T
 }
 
 #[gpui_kit::test]
+fn review_word_wrap_reaches_current_and_future_file_comparisons(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let first = ReviewFileIdentity::new("first");
+    let second = ReviewFileIdentity::new("second");
+    let manifest = ReviewManifest::new(vec![
+        text_file(
+            "first",
+            "src/first.rs",
+            "old first line\n",
+            "new first line that is long enough to wrap\n",
+        ),
+        text_file(
+            "second",
+            "src/second.rs",
+            "old second line\n",
+            "new second line that is long enough to wrap\n",
+        ),
+    ])
+    .unwrap();
+    let (tab_id, session) = open_review(
+        &workspace,
+        source(TestProvider::new([manifest]), "word-wrap"),
+        cx,
+    );
+
+    cx.update(|window, cx| {
+        let first_editor = session.read(cx).editor(&first).unwrap();
+        assert!(!first_editor.read(cx).word_wrap_enabled());
+        assert!(session.read(cx).editor(&second).is_none());
+
+        first_editor.focus_handle(cx).focus(window, cx);
+        window.render_frame(cx);
+        assert!(first_editor.focus_handle(cx).contains_focused(window, cx));
+        window.dispatch_action(Box::new(crate::editor::ToggleWordWrap), cx);
+    });
+
+    cx.update(|window, cx| {
+        let first_editor = session.read(cx).editor(&first).unwrap();
+        assert!(first_editor.read(cx).word_wrap_enabled());
+
+        {
+            let workspace = workspace.read(cx);
+            let OpenTab::Review { word_wrap, .. } = &workspace.tabs.get(tab_id).unwrap().content
+            else {
+                panic!("expected review tab");
+            };
+            assert_eq!(word_wrap.override_value, Some(true));
+            assert!(word_wrap.effective());
+        }
+
+        window.click(("review-file", 1usize), cx);
+        let second_editor = session.read(cx).editor(&second).unwrap();
+        assert!(second_editor.read(cx).word_wrap_enabled());
+        assert!(first_editor.read(cx).word_wrap_enabled());
+    });
+
+    cx.update(|_, cx| {
+        let mut config = crate::config::editor(cx);
+        config.word_wrap = true;
+        crate::config::update_editor(config, cx).unwrap();
+    });
+    cx.update(|_, cx| {
+        let workspace = workspace.read(cx);
+        let OpenTab::Review { word_wrap, .. } = &workspace.tabs.get(tab_id).unwrap().content else {
+            panic!("expected review tab");
+        };
+        assert_eq!(word_wrap.override_value, None);
+        assert!(
+            session
+                .read(cx)
+                .editor(&first)
+                .unwrap()
+                .read(cx)
+                .word_wrap_enabled()
+        );
+        assert!(
+            session
+                .read(cx)
+                .editor(&second)
+                .unwrap()
+                .read(cx)
+                .word_wrap_enabled()
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn clicking_a_file_selects_it_and_hands_focus_to_its_editor(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
     let second = ReviewFileIdentity::new("second");

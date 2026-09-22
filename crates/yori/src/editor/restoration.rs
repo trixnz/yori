@@ -15,7 +15,7 @@ use yori::geometry::{EditorGeometry, display_units, whole_rows};
 use yori_diff::SelectionRestore;
 use yori_document::{Document, editing::TextSelection};
 
-use super::{AlignedEditor, LINE_HEIGHT, RESTORE_WIDTH, Side};
+use super::{AlignedEditor, LINE_HEIGHT, RESTORE_WIDTH, Side, wrapping::WrapProjection};
 
 impl AlignedEditor {
     pub(super) fn selection_restore(&self) -> Option<SelectionRestore> {
@@ -46,28 +46,31 @@ impl AlignedEditor {
     pub(super) fn render_restore_controls(
         &self,
         geometry: EditorGeometry,
+        projection: &WrapProjection,
         cx: &mut Context<Self>,
     ) -> Div {
         let mut controls = div()
             .absolute()
             .size_full()
-            .child(self.render_connections(geometry, cx));
+            .child(self.render_connections(geometry, projection, cx));
         if !self.can_edit() {
             return controls;
         }
 
-        let first_row = whole_rows(self.vertical_scroll / LINE_HEIGHT);
+        let first_visual_row = whole_rows(self.vertical_scroll / LINE_HEIGHT);
+        let (first_row, _) = projection.visual_location(first_visual_row);
         let viewport_end = self.vertical_scroll + geometry.rows_viewport_height();
         let button_top = |rows: &std::ops::Range<usize>| {
-            if display_units(rows.start) * LINE_HEIGHT >= viewport_end
-                || display_units(rows.end) * LINE_HEIGHT <= self.vertical_scroll
+            let visual = projection.visual_range(rows.clone());
+            if display_units(visual.start) * LINE_HEIGHT >= viewport_end
+                || display_units(visual.end) * LINE_HEIGHT <= self.vertical_scroll
             {
                 return None;
             }
 
             Some(
-                ((display_units(rows.start) * LINE_HEIGHT - self.vertical_scroll).max(0.0)).min(
-                    display_units(rows.end) * LINE_HEIGHT - self.vertical_scroll - LINE_HEIGHT,
+                ((display_units(visual.start) * LINE_HEIGHT - self.vertical_scroll).max(0.0)).min(
+                    display_units(visual.end) * LINE_HEIGHT - self.vertical_scroll - LINE_HEIGHT,
                 ),
             )
         };
@@ -80,8 +83,9 @@ impl AlignedEditor {
         {
             if let Some(plan) = self.selection_restore() {
                 if !self.show_connections {
-                    let top = display_units(plan.rows.start) * LINE_HEIGHT - self.vertical_scroll;
-                    let height = display_units(plan.rows.len()) * LINE_HEIGHT;
+                    let visual = projection.visual_range(plan.rows.clone());
+                    let top = display_units(visual.start) * LINE_HEIGHT - self.vertical_scroll;
+                    let height = display_units(visual.len()) * LINE_HEIGHT;
                     for left in [0.0, geometry.right_pane_left()] {
                         controls = controls.child(
                             div()
@@ -127,7 +131,8 @@ impl AlignedEditor {
             .blocks()
             .partition_point(|block| block.rows.end <= first_row);
         for (index, block) in self.alignment.blocks().iter().enumerate().skip(first_block) {
-            if display_units(block.rows.start) * LINE_HEIGHT >= viewport_end {
+            let visual = projection.visual_range(block.rows.clone());
+            if display_units(visual.start) * LINE_HEIGHT >= viewport_end {
                 break;
             }
 

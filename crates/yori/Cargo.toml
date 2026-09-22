@@ -19,6 +19,7 @@ yori-p4 = { path = "../yori-p4" }
 gpui-kit = { version = "=0.6.1", features = ["tree-sitter-c", "tree-sitter-cpp", "tree-sitter-go", "tree-sitter-rust"] }
 ropey = "=2.0.0-beta.1"
 unicode-width = "=0.2.2"
+unicode-segmentation = "=1.13.3"
 tree-sitter = "=0.26.13"
 interprocess = "=2.4.4"
 bitcode = "=0.6.9"

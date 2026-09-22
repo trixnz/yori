@@ -29,7 +29,7 @@ use gpui_kit::{
 use yori_document::Document;
 
 use crate::comparison::{Comparison, MergePaths};
-use crate::editor::{AlignedEditor, DirtyChanged, PaneDocument};
+use crate::editor::{AlignedEditor, DirtyChanged, PaneDocument, WordWrap, WordWrapChanged};
 use crate::invocation::InvocationRequest;
 use crate::review::{
     GitRepository, GitSourceChooser, GitSourceChooserEvent, PerforceContext, ReviewChanged,
@@ -71,11 +71,41 @@ enum PerforceDiscovery {
     Loading,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TabWordWrap {
+    preference: bool,
+    override_value: Option<bool>,
+}
+
+impl TabWordWrap {
+    fn new(preference: bool) -> Self {
+        Self {
+            preference,
+            override_value: None,
+        }
+    }
+
+    fn effective(self) -> bool {
+        self.override_value.unwrap_or(self.preference)
+    }
+
+    fn set_override(&mut self, enabled: bool) {
+        self.override_value = (enabled != self.preference).then_some(enabled);
+    }
+
+    fn apply_preference(&mut self, enabled: bool) {
+        self.preference = enabled;
+        self.override_value = None;
+    }
+}
+
 struct ComparisonTab {
     editor: Entity<AlignedEditor>,
-    _subscription: Subscription,
+    _dirty_subscription: Subscription,
+    _word_wrap_subscription: Subscription,
     files: files::Files,
     message: Option<String>,
+    word_wrap: TabWordWrap,
 }
 
 enum OpenTab {
@@ -83,6 +113,7 @@ enum OpenTab {
     Review {
         session: Entity<ReviewSession>,
         _subscription: Subscription,
+        word_wrap: TabWordWrap,
     },
 }
 
@@ -145,6 +176,7 @@ pub(super) struct Workspace {
     monitor: Option<gpui_kit::Task<()>>,
     git_source_chooser: Option<(Entity<GitSourceChooser>, Subscription)>,
     preferences: Option<Entity<PreferencesDialog>>,
+    global_word_wrap: WordWrap,
 }
 
 impl Workspace {
@@ -168,6 +200,15 @@ impl Workspace {
         crate::window_placement::track(window, cx);
 
         let focus = cx.focus_handle();
+        let global_word_wrap = WordWrap::from(crate::config::editor(cx).word_wrap);
+        cx.observe_global::<crate::config::Configuration>(|this, cx| {
+            let enabled = crate::config::editor(cx).word_wrap;
+            if enabled != this.global_word_wrap.enabled() {
+                this.apply_word_wrap_preference(enabled, cx);
+            }
+        })
+        .detach();
+
         let home = cx.new(Home::new);
         let home_subscription = cx.subscribe_in(
             &home,
@@ -214,6 +255,7 @@ impl Workspace {
             monitor,
             git_source_chooser: None,
             preferences: None,
+            global_word_wrap,
         };
         workspace.watch_paths(cx);
         home.update(cx, |home, cx| home.focus(window, cx));
@@ -225,6 +267,30 @@ impl Workspace {
         if let Some(diagnostic) = crate::config::reload(cx) {
             window.push_notification(Notification::error(diagnostic), cx);
         }
+    }
+
+    fn apply_word_wrap_preference(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.global_word_wrap = enabled.into();
+
+        for tab in &mut self.tabs.entries {
+            match &mut tab.content {
+                OpenTab::Comparison(tab) => {
+                    tab.word_wrap.apply_preference(enabled);
+                    tab.editor
+                        .update(cx, |editor, cx| editor.set_word_wrap(enabled, cx));
+                }
+                OpenTab::Review {
+                    session, word_wrap, ..
+                } => {
+                    word_wrap.apply_preference(enabled);
+                    session.update(cx, |session, cx| {
+                        session.set_word_wrap(enabled, cx);
+                    });
+                }
+            }
+        }
+
+        cx.notify();
     }
 
     #[cfg(test)]
@@ -348,14 +414,31 @@ impl Workspace {
                 cx.new(|cx| AlignedEditor::new_merge(paths, session, window, cx))
             }
         };
-        let subscription = cx.subscribe(&editor, |_, _, _: &DirtyChanged, cx| cx.notify());
+        let dirty_subscription = cx.subscribe(&editor, |_, _, _: &DirtyChanged, cx| cx.notify());
+        let word_wrap_subscription = cx.subscribe(
+            &editor,
+            |this, changed_editor, event: &WordWrapChanged, cx| {
+                let Some(tab) = this.tabs.entries.iter_mut().find_map(|tab| {
+                    tab.content
+                        .comparison_mut()
+                        .filter(|tab| tab.editor == changed_editor)
+                }) else {
+                    return;
+                };
+
+                tab.word_wrap.set_override(event.enabled);
+                cx.notify();
+            },
+        );
         self.tabs.insert(
             identity,
             OpenTab::Comparison(ComparisonTab {
                 editor,
-                _subscription: subscription,
+                _dirty_subscription: dirty_subscription,
+                _word_wrap_subscription: word_wrap_subscription,
                 files,
                 message: None,
+                word_wrap: TabWordWrap::new(self.global_word_wrap.enabled()),
             }),
         );
         self.selection = WorkspaceSelection::Work;
@@ -384,7 +467,7 @@ impl Workspace {
         }
 
         self.deactivate(cx);
-        let session = cx.new(|cx| ReviewSession::new(source, cx));
+        let session = cx.new(|cx| ReviewSession::new(source, self.global_word_wrap.enabled(), cx));
         let subscription = cx.subscribe_in(
             &session,
             window,
@@ -418,8 +501,21 @@ impl Workspace {
                         | ReviewChanged::RefreshCompleted { activate: false }
                         | ReviewChanged::ActiveEditorChanged {
                             transfer_focus: false,
-                        } => {}
+                        }
+                        | ReviewChanged::WordWrapChanged { .. } => {}
                     }
+                }
+
+                if let ReviewChanged::WordWrapChanged { enabled } = event
+                    && let Some(tab) = this.tabs.entries.iter_mut().find(|tab| {
+                        matches!(
+                            &tab.content,
+                            OpenTab::Review { session, .. } if session == changed_session
+                        )
+                    })
+                    && let OpenTab::Review { word_wrap, .. } = &mut tab.content
+                {
+                    word_wrap.set_override(*enabled);
                 }
 
                 cx.notify();
@@ -430,6 +526,7 @@ impl Workspace {
             OpenTab::Review {
                 session: session.clone(),
                 _subscription: subscription,
+                word_wrap: TabWordWrap::new(self.global_word_wrap.enabled()),
             },
         );
         self.selection = WorkspaceSelection::Work;

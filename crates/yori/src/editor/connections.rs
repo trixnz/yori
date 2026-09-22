@@ -11,7 +11,7 @@ use yori::geometry::{EditorGeometry, display_units, whole_rows};
 use yori_diff::Alignment;
 use yori_document::Document;
 
-use super::{AlignedEditor, HEADER_HEIGHT, LINE_HEIGHT, RESTORE_WIDTH};
+use super::{AlignedEditor, HEADER_HEIGHT, LINE_HEIGHT, RESTORE_WIDTH, wrapping::WrapProjection};
 use crate::appearance;
 
 pub(super) const WIDTH: f32 = 38.0;
@@ -79,7 +79,7 @@ impl AlignedEditor {
         cx.notify();
     }
 
-    pub(super) fn update_connection_hover(&mut self, window: &Window, cx: &mut Context<Self>) {
+    pub(super) fn update_connection_hover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let geometry = self.geometry();
         let position = window.mouse_position() - self.content_bounds.get().origin;
         let x = f32::from(position.x);
@@ -87,7 +87,9 @@ impl AlignedEditor {
         let inside = self.show_connections
             && (geometry.pane_width()..geometry.right_pane_left()).contains(&x)
             && (0.0..geometry.rows_viewport_height()).contains(&y);
-        let row = whole_rows((y + self.vertical_scroll) / LINE_HEIGHT);
+        let visual_row = whole_rows((y + self.vertical_scroll) / LINE_HEIGHT);
+        let projection = self.wrap_projection(window, cx);
+        let (row, _) = projection.visual_location(visual_row);
 
         let hovered = if !inside {
             None
@@ -119,7 +121,11 @@ impl AlignedEditor {
         }
     }
 
-    fn visible_connections(&self, geometry: EditorGeometry) -> Vec<Connection> {
+    fn visible_connections(
+        &self,
+        geometry: EditorGeometry,
+        projection: &WrapProjection,
+    ) -> Vec<Connection> {
         let build = |rows, baseline: &Range<usize>, local: &Range<usize>| {
             Connection::new(
                 &self.alignment,
@@ -144,7 +150,8 @@ impl AlignedEditor {
                 .collect();
         }
 
-        let first_row = whole_rows(self.vertical_scroll / LINE_HEIGHT);
+        let first_visual_row = whole_rows(self.vertical_scroll / LINE_HEIGHT);
+        let (first_row, _) = projection.visual_location(first_visual_row);
         let end = self.vertical_scroll + geometry.rows_viewport_height();
         let first_block = self
             .alignment
@@ -155,7 +162,9 @@ impl AlignedEditor {
             .blocks()
             .iter()
             .skip(first_block)
-            .take_while(|block| display_units(block.rows.start) * LINE_HEIGHT < end)
+            .take_while(|block| {
+                display_units(projection.visual_range(block.rows.clone()).start) * LINE_HEIGHT < end
+            })
             .map(|block| build(block.rows.clone(), &block.left, &block.right))
             .collect()
     }
@@ -163,6 +172,7 @@ impl AlignedEditor {
     pub(super) fn render_connections(
         &self,
         geometry: EditorGeometry,
+        projection: &WrapProjection,
         cx: &mut Context<Self>,
     ) -> Div {
         if !self.show_connections {
@@ -189,7 +199,7 @@ impl AlignedEditor {
             .as_ref()
             .is_some_and(|selection| !selection.range().is_empty());
 
-        for connection in self.visible_connections(geometry) {
+        for connection in self.visible_connections(geometry, projection) {
             let hovered = self.hovered_connection.as_ref() == Some(&connection.rows);
             let current = self
                 .navigation
@@ -205,18 +215,23 @@ impl AlignedEditor {
                         div()
                             .absolute()
                             .left(px(left + RESTORE_WIDTH))
-                            .top(px(
-                                display_units(rows.start) * LINE_HEIGHT - self.vertical_scroll
-                            ))
+                            .top(px(display_units(
+                                projection.visual_range(rows.clone()).start,
+                            ) * LINE_HEIGHT
+                                - self.vertical_scroll))
                             .w(px((geometry.pane_width() - RESTORE_WIDTH).max(0.0)))
-                            .h(px((display_units(rows.len()) * LINE_HEIGHT).max(2.0)))
+                            .h(px((display_units(
+                                projection.visual_range(rows.clone()).len(),
+                            ) * LINE_HEIGHT)
+                                .max(2.0)))
                             .border_1()
                             .border_color(cx.theme().muted_foreground),
                     );
                 }
             }
 
-            channel = channel.child(self.render_connection(connection, hovered, current, cx));
+            channel =
+                channel.child(self.render_connection(connection, hovered, current, projection, cx));
         }
 
         surface.child(channel)
@@ -227,13 +242,16 @@ impl AlignedEditor {
         connection: Connection,
         hovered: bool,
         current: bool,
+        projection: &WrapProjection,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Stateful<Div> {
-        let top = display_units(connection.rows.start) * LINE_HEIGHT - self.vertical_scroll;
-        let height = display_units(connection.rows.len()) * LINE_HEIGHT;
+        let connection_visual = projection.visual_range(connection.rows.clone());
+        let top = display_units(connection_visual.start) * LINE_HEIGHT - self.vertical_scroll;
+        let height = display_units(connection_visual.len()) * LINE_HEIGHT;
         let relative = |rows: &Range<usize>| {
-            let start = display_units(rows.start - connection.rows.start) * LINE_HEIGHT;
-            let end = display_units(rows.end - connection.rows.start) * LINE_HEIGHT;
+            let visual = projection.visual_range(rows.clone());
+            let start = display_units(visual.start - connection_visual.start) * LINE_HEIGHT;
+            let end = display_units(visual.end - connection_visual.start) * LINE_HEIGHT;
             start..end
         };
         let left = relative(&connection.left);

@@ -40,6 +40,7 @@ fn in_memory_updates_preserve_the_unavailable_configuration_diagnostic() {
         vim_keybindings: true,
         show_whitespace: true,
         show_change_connections: false,
+        word_wrap: true,
     };
     let mut configuration = Configuration {
         diagnostic: Some(diagnostic.into()),
@@ -60,6 +61,7 @@ fn valid_configuration_survives_a_new_store() {
         vim_keybindings: true,
         show_whitespace: true,
         show_change_connections: false,
+        word_wrap: true,
     };
     let mut first = Configuration::persistent(path.clone());
 
@@ -89,6 +91,7 @@ show_change_connections = true
             vim_keybindings: true,
             show_whitespace: false,
             show_change_connections: true,
+            word_wrap: false,
         }
     );
     assert!(diagnostic.unwrap().contains("show_whitespace"));
@@ -174,6 +177,7 @@ fn invalid_file_retains_the_last_valid_configuration_until_recovery() {
             vim_keybindings: false,
             show_whitespace: false,
             show_change_connections: true,
+            word_wrap: false,
         }
     );
     assert!(configuration.diagnostic.is_none());
@@ -201,6 +205,7 @@ fn watcher_handles_direct_edits_atomic_replacement_deletion_and_recreation() {
             vim_keybindings: true,
             show_whitespace: false,
             show_change_connections: true,
+            word_wrap: true,
         },
     )
     .unwrap();
@@ -249,6 +254,7 @@ fn updates_preserve_comments_unknown_keys_and_file_permissions() {
                 vim_keybindings: true,
                 show_whitespace: true,
                 show_change_connections: false,
+                word_wrap: true,
             })
             .unwrap()
             .is_none()
@@ -260,6 +266,7 @@ fn updates_preserve_comments_unknown_keys_and_file_permissions() {
         updated.contains("# key-specific note\nvim_keybindings = true # keep this inline note")
     );
     assert!(updated.contains("future_option = \"future\""));
+    assert!(updated.contains("word_wrap = true"));
     assert!(updated.contains("# shortcut notes\n[keybindings]"));
     assert!(updated.contains("save = [\"primary-k\"] # keep shortcut note"));
     assert!(updated.contains("[plugin]\nenabled = true"));

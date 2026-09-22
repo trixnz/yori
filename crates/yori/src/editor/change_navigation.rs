@@ -5,8 +5,13 @@ use gpui_kit::{Context, Pixels, Point, Window};
 use yori::navigation::{ChangeDirection, ChangeTarget};
 
 impl AlignedEditor {
-    pub(super) fn locate_pointer_change(&mut self, position: Point<Pixels>) {
-        let row = self
+    pub(super) fn locate_pointer_change(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &gpui_kit::App,
+    ) {
+        let visual_row = self
             .geometry()
             .hit(
                 f32::from(position.x),
@@ -15,6 +20,8 @@ impl AlignedEditor {
                 self.horizontal_scroll,
             )
             .row;
+        let projection = self.wrap_projection(window, cx);
+        let (row, _) = projection.visual_location(visual_row);
         if self.merge.is_some() {
             self.locate_merge_row(row);
         } else {
@@ -55,7 +62,7 @@ impl AlignedEditor {
         self.navigate_change(ChangeDirection::Next, window, cx);
     }
 
-    pub(super) fn initialize_change_navigation(&mut self) {
+    pub(super) fn initialize_change_navigation(&mut self, window: &mut Window, cx: &gpui_kit::App) {
         let Some(target) = self
             .navigation
             .advance(&self.alignment, ChangeDirection::Next)
@@ -64,10 +71,14 @@ impl AlignedEditor {
         };
 
         self.pending_initial_change_row = Some(target.rows.start);
-        self.apply_change_target(&target);
+        self.apply_change_target(&target, window, cx);
     }
 
-    pub(super) fn resolve_initial_change_viewport(&mut self) {
+    pub(super) fn resolve_initial_change_viewport(
+        &mut self,
+        window: &mut Window,
+        cx: &gpui_kit::App,
+    ) {
         let geometry = self.geometry();
         if geometry.rows_viewport_height() <= 0.0 {
             return;
@@ -76,7 +87,9 @@ impl AlignedEditor {
             return;
         };
 
-        self.vertical_scroll = geometry.change_scroll_top(first_row, self.alignment.rows().len());
+        let projection = self.wrap_projection(window, cx);
+        let visual_row = projection.visual_range(first_row..first_row + 1).start;
+        self.vertical_scroll = geometry.change_scroll_top(visual_row, projection.visual_rows());
     }
 
     fn navigate_change(
@@ -97,22 +110,32 @@ impl AlignedEditor {
         };
 
         self.pending_initial_change_row = None;
-        self.apply_change_target(&target);
+        self.apply_change_target(&target, window, cx);
         self.focus.focus(window, cx);
         cx.notify();
     }
 
-    fn apply_change_target(&mut self, target: &ChangeTarget) {
+    fn apply_change_target(
+        &mut self,
+        target: &ChangeTarget,
+        window: &mut Window,
+        cx: &gpui_kit::App,
+    ) {
         self.selection = Some(Selection {
             side: Side::Right,
             anchor: target.right_offset,
             head: target.right_offset,
         });
         self.preferred_column = None;
+        self.preferred_visual_x = None;
         self.horizontal_scroll = 0.0;
+        let projection = self.wrap_projection(window, cx);
+        let visual_row = projection
+            .visual_range(target.rows.start..target.rows.start + 1)
+            .start;
         self.vertical_scroll = self
             .geometry()
-            .change_scroll_top(target.rows.start, self.alignment.rows().len());
+            .change_scroll_top(visual_row, projection.visual_rows());
     }
 }
 
@@ -386,6 +409,7 @@ mod tests {
                     pane("local.txt", &local),
                     true,
                     true,
+                    false,
                     window,
                     cx,
                 )

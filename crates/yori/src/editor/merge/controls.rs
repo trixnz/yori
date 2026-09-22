@@ -13,6 +13,7 @@ use yori::geometry::{EditorGeometry, display_units};
 use yori_diff::merge::{ConflictId, Take};
 
 use super::{AlignedEditor, LINE_HEIGHT};
+use crate::editor::wrapping::WrapProjection;
 use crate::editor::{RESTORE_WIDTH, Side};
 
 pub(super) fn outline_bounds(pane_left: f32, pane_width: f32) -> std::ops::Range<f32> {
@@ -52,19 +53,20 @@ impl AlignedEditor {
     pub(in crate::editor) fn render_merge_conflict_controls(
         &self,
         geometry: EditorGeometry,
+        projection: &WrapProjection,
         cx: &mut Context<Self>,
     ) -> Div {
         if self.merge_selection_active() {
-            return self.render_merge_line_controls(geometry, cx);
+            return self.render_merge_line_controls(geometry, projection, cx);
         }
 
         let merge = self.merge.as_ref().expect("merge mode");
         let mut controls = div().absolute().size_full();
         for conflict in merge.display.conflicts() {
             let id = conflict.id;
-            let top =
-                display_units(conflict.control_span.start) * LINE_HEIGHT - self.vertical_scroll;
-            let end = display_units(conflict.control_span.end) * LINE_HEIGHT - self.vertical_scroll;
+            let visual = projection.visual_range(conflict.control_span.clone());
+            let top = display_units(visual.start) * LINE_HEIGHT - self.vertical_scroll;
+            let end = display_units(visual.end) * LINE_HEIGHT - self.vertical_scroll;
             if end <= 0.0 || top >= geometry.rows_viewport_height() {
                 continue;
             }

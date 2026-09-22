@@ -11,7 +11,7 @@ use gpui_kit::{
     Styled, TestSupportExt, Window, div, px,
 };
 
-use super::{AlignedEditor, FOOTER_HEIGHT, Language, PaneDocument, Side};
+use super::{AlignedEditor, FOOTER_HEIGHT, Language, PaneDocument, Side, ToggleWordWrap};
 
 impl AlignedEditor {
     pub(super) fn render_footer(
@@ -197,6 +197,7 @@ impl AlignedEditor {
     }
 
     fn render_options_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let word_wrap = self.word_wrap.enabled();
         let whitespace = self.show_whitespace;
         let connections = self.show_connections;
         let two_way = self.merge.is_none();
@@ -209,6 +210,12 @@ impl AlignedEditor {
             .ghost()
             .small()
             .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
+                let wrap_item = PopupMenuItem::new("Word wrap (this tab)")
+                    .checked(word_wrap)
+                    .on_click(move |_, window, cx| {
+                        window.dispatch_action(Box::new(ToggleWordWrap), cx);
+                    });
+
                 let whitespace_editor = editor.clone();
                 let whitespace_item = PopupMenuItem::new("Show whitespace (all comparisons)")
                     .checked(whitespace)
@@ -243,7 +250,7 @@ impl AlignedEditor {
                 } else {
                     menu
                 };
-                menu.separator().item(vim_item)
+                menu.separator().item(vim_item).item(wrap_item)
             })
     }
 

@@ -9,9 +9,7 @@ use yori_diff::{
 };
 use yori_document::editing::EditUpdate;
 
-use super::{
-    AlignedEditor, DirtyChanged, LINE_HEIGHT, Selection, Side, TAB_WIDTH, source_offset_at,
-};
+use super::{AlignedEditor, DirtyChanged, LINE_HEIGHT, Selection, Side};
 
 #[derive(Clone, Copy)]
 pub(super) struct ViewAnchor {
@@ -36,25 +34,23 @@ pub(super) enum Placement {
 }
 
 impl AlignedEditor {
-    pub(super) fn view_anchor(&self) -> ViewAnchor {
-        let row = whole_rows(self.vertical_scroll / LINE_HEIGHT);
+    pub(super) fn view_anchor(&self, window: &mut Window, cx: &gpui_kit::App) -> ViewAnchor {
+        let visual_row = whole_rows(self.vertical_scroll / LINE_HEIGHT);
+        let projection = self.wrap_projection(window, cx);
+        let (row, continuation) = projection.visual_location(visual_row);
         let side = if self.line_for_row(Side::Left, row).is_some() {
             Side::Left
         } else {
             Side::Right
         };
-        let document = &self.document(side).document;
+        let display_byte = projection
+            .row(row)
+            .and_then(|row| row.segments(side).get(continuation))
+            .map_or(0, |segment| segment.start);
 
         ViewAnchor {
             side,
-            offset: source_offset_at(
-                &self.alignment,
-                document,
-                row,
-                side == Side::Left,
-                0,
-                TAB_WIDTH,
-            ),
+            offset: self.source_offset_for(side, row, display_byte),
             fraction: self.vertical_scroll % LINE_HEIGHT,
         }
     }
@@ -161,6 +157,7 @@ impl AlignedEditor {
         }));
         if input_selection.is_none() && (has_text_edit || modal) {
             self.preferred_column = None;
+            self.preferred_visual_x = None;
         }
         if let Placement::Conflict(id) = placement {
             self.merge.as_mut().expect("merge mode").current = Some(id);
@@ -180,12 +177,8 @@ impl AlignedEditor {
             } else {
                 anchor.offset
             };
-            let row = self.alignment.row_for_offset(
-                &self.document(anchor.side).document,
-                offset,
-                anchor.side == Side::Left,
-            );
-            self.vertical_scroll = display_units(row) * LINE_HEIGHT + anchor.fraction;
+            let (visual_row, _) = self.source_position(anchor.side, offset, window, cx);
+            self.vertical_scroll = display_units(visual_row) * LINE_HEIGHT + anchor.fraction;
         }
 
         // Preserve the established modal policy: immutable-input history imports
@@ -203,7 +196,7 @@ impl AlignedEditor {
                 .then(|| self.merge.as_ref().and_then(|merge| merge.current))
                 .flatten();
             if let Some(id) = history_conflict {
-                self.reveal_merge_conflict(id);
+                self.reveal_merge_conflict(id, window, cx);
             } else {
                 self.reveal_source(side, offset, window, cx);
             }

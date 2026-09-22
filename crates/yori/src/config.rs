@@ -19,10 +19,15 @@ const APPLICATION_NAME: &str = "yori";
 const FILE_NAME: &str = "config.toml";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the persisted editor schema intentionally exposes independent boolean preferences"
+)]
 pub(crate) struct EditorConfig {
     pub vim_keybindings: bool,
     pub show_whitespace: bool,
     pub show_change_connections: bool,
+    pub word_wrap: bool,
 }
 
 #[derive(Default)]
@@ -275,6 +280,7 @@ fn parse_editor(document: &DocumentMut) -> (EditorConfig, Option<String>) {
         vim_keybindings: boolean(editor, "vim_keybindings", &mut invalid),
         show_whitespace: boolean(editor, "show_whitespace", &mut invalid),
         show_change_connections: boolean(editor, "show_change_connections", &mut invalid),
+        word_wrap: boolean(editor, "word_wrap", &mut invalid),
     };
     let diagnostic = (!invalid.is_empty()).then(|| {
         format!(
@@ -341,6 +347,7 @@ fn update_document(path: &Path, editor: EditorConfig) -> Result<(), String> {
         "show_change_connections",
         editor.show_change_connections,
     );
+    set_boolean(table, "word_wrap", editor.word_wrap);
 
     let parent = path
         .parent()

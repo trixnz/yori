@@ -4,7 +4,7 @@ use super::decision_dialog::{Decision, DecisionDialog, DecisionShortcut};
 use super::files::{Files, Role};
 use super::{OpenTab, Save, Workspace};
 use crate::comparison::Comparison;
-use crate::editor::{AlignedEditor, DirtyChanged};
+use crate::editor::{AlignedEditor, DirtyChanged, WordWrapChanged};
 use crate::storage::{FileWatch, SaveError, Snapshot};
 use gpui_kit::component::WindowExt;
 use gpui_kit::{App, AppContext, Context, Task, Window};
@@ -568,20 +568,46 @@ impl Workspace {
         let Some(Comparison::Merge(paths)) = tab.identity.comparison() else {
             return Ok(());
         };
+        let paths = paths.clone();
+        let word_wrap = tab
+            .content
+            .comparison()
+            .expect("merge restart belongs to a comparison tab")
+            .word_wrap;
         let session = yori_diff::merge::MergeSession::new(
             files.document(Role::Base).clone(),
             files.document(Role::Local).clone(),
             files.document(Role::Incoming).clone(),
         )
         .map_err(|error| error.to_string())?;
-        let editor = cx.new(|cx| AlignedEditor::new_merge(paths, session, window, cx));
-        let subscription = cx.subscribe(&editor, |_, _, _: &DirtyChanged, cx| cx.notify());
+        let editor = cx.new(|cx| AlignedEditor::new_merge(&paths, session, window, cx));
+        editor.update(cx, |editor, cx| {
+            editor.set_word_wrap(word_wrap.effective(), cx);
+        });
+        let dirty_subscription = cx.subscribe(&editor, |_, _, _: &DirtyChanged, cx| cx.notify());
+        let word_wrap_subscription = cx.subscribe(
+            &editor,
+            |this, changed_editor, event: &WordWrapChanged, cx| {
+                let Some(tab) = this.tabs.entries.iter_mut().find_map(|tab| {
+                    tab.content
+                        .comparison_mut()
+                        .filter(|tab| tab.editor == changed_editor)
+                }) else {
+                    return;
+                };
+
+                tab.word_wrap.set_override(event.enabled);
+                cx.notify();
+            },
+        );
         if let Some(tab) = self.tabs.entries.iter_mut().find(|tab| tab.id == id) {
             tab.content = OpenTab::Comparison(super::ComparisonTab {
                 editor,
-                _subscription: subscription,
+                _dirty_subscription: dirty_subscription,
+                _word_wrap_subscription: word_wrap_subscription,
                 files,
                 message: None,
+                word_wrap,
             });
         }
 
