@@ -51,7 +51,7 @@ const TEXT_INSET: f32 = 8.0;
 const GUTTER_WIDTH: f32 = 64.0 + RESTORE_WIDTH + TEXT_INSET;
 const TAB_WIDTH: usize = 4;
 const OVERSCAN_ROWS: usize = 4;
-const KEY_CONTEXT: &str = "AlignedEditor";
+pub(crate) const KEY_CONTEXT: &str = "AlignedEditor";
 
 gpui_kit::actions!(
     aligned_editor,
@@ -1628,10 +1628,14 @@ impl AlignedEditor {
     }
 }
 
+pub(crate) fn fixed_key_bindings() -> Vec<KeyBinding> {
+    input::fixed_key_bindings()
+}
+
 pub(super) fn init(cx: &mut App) {
     crate::config::init_transient(cx);
     vim::init(cx);
-    input::bind_keys(cx);
+    crate::keymap::init(cx);
 }
 
 #[cfg(test)]

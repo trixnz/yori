@@ -6,10 +6,13 @@ mod tests;
 use atomicwrites::{AllowOverwrite, AtomicFile};
 use gpui_kit::{App, Global};
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
 };
+
+use crate::keymap::KeybindingOverrides;
 use toml_edit::{DocumentMut, Item, Table, TableLike, Value, value};
 
 const APPLICATION_NAME: &str = "yori";
@@ -26,6 +29,7 @@ pub(crate) struct EditorConfig {
 pub(crate) struct Configuration {
     path: Option<PathBuf>,
     editor: EditorConfig,
+    keybindings: KeybindingOverrides,
     diagnostic: Option<String>,
 }
 
@@ -51,21 +55,36 @@ impl Configuration {
         configuration
     }
 
-    fn refreshed(&self) -> (EditorConfig, Option<String>) {
+    fn refreshed(&self) -> (EditorConfig, KeybindingOverrides, Option<String>) {
         let Some(path) = &self.path else {
-            return (self.editor, self.diagnostic.clone());
+            return (
+                self.editor,
+                self.keybindings.clone(),
+                self.diagnostic.clone(),
+            );
         };
 
         match load(path) {
-            Ok(state) => state,
-            Err(error) => (self.editor, Some(error)),
+            Ok(loaded) => match loaded.keybindings {
+                Ok(keybindings) => (loaded.editor, keybindings, loaded.editor_diagnostic),
+                Err(errors) => (
+                    loaded.editor,
+                    self.keybindings.clone(),
+                    combine_diagnostics(
+                        loaded.editor_diagnostic,
+                        Some(keybinding_diagnostic(&errors)),
+                    ),
+                ),
+            },
+            Err(error) => (self.editor, self.keybindings.clone(), Some(error)),
         }
     }
 
     fn reload(&mut self) -> Option<String> {
         let previous_diagnostic = self.diagnostic.clone();
-        let (editor, diagnostic) = self.refreshed();
+        let (editor, keybindings, diagnostic) = self.refreshed();
         self.editor = editor;
+        self.keybindings = keybindings;
         self.diagnostic = diagnostic;
 
         (self.diagnostic != previous_diagnostic)
@@ -82,8 +101,7 @@ impl Configuration {
         let result = update_document(path, editor);
         match result {
             Ok(()) => {
-                self.editor = editor;
-                self.diagnostic = None;
+                self.reload();
                 Ok(())
             }
             Err(error) => {
@@ -129,40 +147,50 @@ pub(crate) fn diagnostic(cx: &App) -> Option<String> {
     cx.global::<Configuration>().diagnostic.clone()
 }
 
+pub(crate) fn keybindings(cx: &App) -> KeybindingOverrides {
+    cx.global::<Configuration>().keybindings.clone()
+}
+
 /// Reload the current file and return a newly changed diagnostic to report.
 pub(crate) fn reload(cx: &mut App) -> Option<String> {
-    let (editor, diagnostic, previous_diagnostic) = {
-        let configuration = cx.global::<Configuration>();
-        let (editor, diagnostic) = configuration.refreshed();
+    let previous_keybindings = keybindings(cx);
+    let report = cx.global_mut::<Configuration>().reload();
+    let current_keybindings = keybindings(cx);
 
-        (editor, diagnostic, configuration.diagnostic.clone())
-    };
-
-    let configuration = cx.global::<Configuration>();
-    if configuration.editor == editor && configuration.diagnostic == diagnostic {
-        return None;
+    if current_keybindings != previous_keybindings {
+        crate::keymap::apply(&current_keybindings, cx);
     }
-
-    let report = (diagnostic != previous_diagnostic)
-        .then(|| diagnostic.clone())
-        .flatten();
-
-    let configuration = cx.global_mut::<Configuration>();
-    configuration.editor = editor;
-    configuration.diagnostic = diagnostic;
 
     report
 }
 
 pub(crate) fn update_editor(editor: EditorConfig, cx: &mut App) -> Result<(), String> {
-    cx.global_mut::<Configuration>().update_editor(editor)
+    let previous_keybindings = keybindings(cx);
+    let result = cx.global_mut::<Configuration>().update_editor(editor);
+    let current_keybindings = keybindings(cx);
+
+    if result.is_ok() && current_keybindings != previous_keybindings {
+        crate::keymap::apply(&current_keybindings, cx);
+    }
+
+    result
 }
 
-fn load(path: &Path) -> Result<(EditorConfig, Option<String>), String> {
+struct LoadedConfiguration {
+    editor: EditorConfig,
+    keybindings: Result<KeybindingOverrides, Vec<String>>,
+    editor_diagnostic: Option<String>,
+}
+
+fn load(path: &Path) -> Result<LoadedConfiguration, String> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((EditorConfig::default(), None));
+            return Ok(LoadedConfiguration {
+                editor: EditorConfig::default(),
+                keybindings: Ok(KeybindingOverrides::default()),
+                editor_diagnostic: None,
+            });
         }
         Err(error) => {
             return Err(format!("cannot read {}: {error}", path.display()));
@@ -173,7 +201,64 @@ fn load(path: &Path) -> Result<(EditorConfig, Option<String>), String> {
         .parse::<DocumentMut>()
         .map_err(|error| format!("invalid configuration in {}: {error}", path.display()))?;
 
-    Ok(parse_editor(&document))
+    let (editor, editor_diagnostic) = parse_editor(&document);
+
+    Ok(LoadedConfiguration {
+        editor,
+        keybindings: parse_keybindings(&document),
+        editor_diagnostic,
+    })
+}
+
+fn parse_keybindings(document: &DocumentMut) -> Result<KeybindingOverrides, Vec<String>> {
+    let Some(item) = document.get("keybindings") else {
+        return Ok(KeybindingOverrides::default());
+    };
+    let Some(table) = item.as_table_like() else {
+        return Err(vec!["`keybindings` must be a table".into()]);
+    };
+
+    let mut raw = HashMap::new();
+    let mut errors = Vec::new();
+
+    for (name, item) in table.iter() {
+        let Some(array) = item.as_array() else {
+            errors.push(format!(
+                "action `{name}` must be an array of keystroke strings"
+            ));
+            continue;
+        };
+
+        let mut bindings = Vec::new();
+        for (index, value) in array.iter().enumerate() {
+            if let Some(binding) = value.as_str() {
+                bindings.push(binding.to_owned());
+            } else {
+                errors.push(format!(
+                    "action `{name}` binding {} must be a string",
+                    index + 1
+                ));
+            }
+        }
+        raw.insert(name.to_owned(), bindings);
+    }
+
+    KeybindingOverrides::from_raw(raw, errors)
+}
+
+fn keybinding_diagnostic(errors: &[String]) -> String {
+    format!(
+        "invalid keybinding configuration; retained the previous valid keymap:\n- {}",
+        errors.join("\n- ")
+    )
+}
+
+fn combine_diagnostics(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first}\n{second}")),
+        (Some(diagnostic), None) | (None, Some(diagnostic)) => Some(diagnostic),
+        (None, None) => None,
+    }
 }
 
 fn parse_editor(document: &DocumentMut) -> (EditorConfig, Option<String>) {

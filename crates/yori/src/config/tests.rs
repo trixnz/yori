@@ -95,6 +95,27 @@ show_change_connections = true
 }
 
 #[test]
+fn invalid_keybindings_do_not_block_valid_editor_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = path(&directory);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        "[editor]\nshow_whitespace = true\n\n[keybindings]\nsave = \"primary-k\"\nundo = [1]\nfuture_action = [\"primary-f\"]\n",
+    )
+    .unwrap();
+
+    let configuration = Configuration::persistent(path);
+    let diagnostic = configuration.diagnostic.unwrap();
+
+    assert!(configuration.editor.show_whitespace);
+    assert_eq!(configuration.keybindings, KeybindingOverrides::default());
+    assert!(diagnostic.contains("action `save` must be an array"));
+    assert!(diagnostic.contains("action `undo` binding 1 must be a string"));
+    assert!(diagnostic.contains("unknown action `future_action`"));
+}
+
+#[test]
 fn invalid_file_retains_the_last_valid_configuration_until_recovery() {
     let directory = tempfile::tempdir().unwrap();
     let path = path(&directory);
@@ -189,7 +210,7 @@ fn updates_preserve_comments_unknown_keys_and_file_permissions() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         &path,
-        "# user notes\n[editor]\n# key-specific note\nvim_keybindings = false # keep this inline note\nfuture_option = \"future\"\n\n[plugin]\nenabled = true\n",
+        "# user notes\n[editor]\n# key-specific note\nvim_keybindings = false # keep this inline note\nfuture_option = \"future\"\n\n# shortcut notes\n[keybindings]\nsave = [\"primary-k\"] # keep shortcut note\n\n[plugin]\nenabled = true\n",
     )
     .unwrap();
 
@@ -214,6 +235,8 @@ fn updates_preserve_comments_unknown_keys_and_file_permissions() {
         updated.contains("# key-specific note\nvim_keybindings = true # keep this inline note")
     );
     assert!(updated.contains("future_option = \"future\""));
+    assert!(updated.contains("# shortcut notes\n[keybindings]"));
+    assert!(updated.contains("save = [\"primary-k\"] # keep shortcut note"));
     assert!(updated.contains("[plugin]\nenabled = true"));
 
     #[cfg(unix)]

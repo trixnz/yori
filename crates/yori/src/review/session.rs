@@ -1414,8 +1414,8 @@ impl Render for ReviewSession {
     }
 }
 
-pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([
+pub(crate) fn fixed_key_bindings() -> Vec<KeyBinding> {
+    vec![
         KeyBinding::new("up", SelectPreviousFile, Some(NAVIGATOR_KEY_CONTEXT)),
         KeyBinding::new("k", SelectPreviousFile, Some(NAVIGATOR_KEY_CONTEXT)),
         KeyBinding::new("down", SelectNextFile, Some(NAVIGATOR_KEY_CONTEXT)),
@@ -1424,7 +1424,7 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("space", ActivateSelectedFile, Some(NAVIGATOR_KEY_CONTEXT)),
         KeyBinding::new("ctrl-l", ActivateSelectedFile, Some(NAVIGATOR_KEY_CONTEXT)),
         KeyBinding::new("ctrl-h", FocusNavigator, Some(NON_TEXT_BODY_KEY_CONTEXT)),
-    ]);
+    ]
 }
 
 #[cfg(test)]

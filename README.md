@@ -200,10 +200,52 @@ Preferences live in `config.toml` under the platform configuration directory —
 vim_keybindings = false
 show_whitespace = false
 show_change_connections = false
+
+[keybindings]
+save = ["primary-s", "primary-shift-s"]
+redo = []
+next_change = ["alt-down", "primary-j"]
 ```
 
-yori rewrites only the keys it owns, so comments and unrelated entries survive a
-change made through the dialog.
+Each key under `[keybindings]` is a stable action name whose array replaces all
+of that action's defaults. Omit an action to retain its defaults, provide several
+strings to assign multiple shortcuts, or use an empty array to disable it.
+`primary` is portable: it resolves to <kbd>Cmd</kbd> on macOS and
+<kbd>Ctrl</kbd> elsewhere. Key sequences are separated by spaces within one
+string, for example `"primary-k primary-s"`.
+
+| Action name | Default binding(s) |
+| --- | --- |
+| `open_comparison` | `primary-o` |
+| `open_merge` | `primary-shift-m` |
+| `open_git_review` | `primary-shift-g` |
+| `save` | `primary-s` |
+| `close_tab` | `primary-w` |
+| `quit` | `primary-q` |
+| `preferences` | `primary-,` |
+| `next_tab` | `ctrl-tab` |
+| `previous_tab` | `ctrl-shift-tab` |
+| `show_home` | `primary-shift-h` |
+| `previous_change` | `alt-up` |
+| `next_change` | `alt-down` |
+| `restore_selected_lines` | `alt-enter` |
+| `focus_previous_pane` | `ctrl-h` |
+| `focus_next_pane` | `ctrl-l` |
+| `copy` | `primary-c` |
+| `paste` | `primary-v` |
+| `cut` | `primary-x` |
+| `select_all` | `primary-a` |
+| `undo` | `primary-z` |
+| `redo` | `primary-shift-z`, `primary-y` |
+
+Changes take effect when yori regains focus. The complete candidate keymap is
+validated first; an unknown action, malformed keystroke, or duplicate in the
+same key context rejects the entire candidate and leaves the last valid keymap
+active. Text entry and movement keys, Vim bindings, and list-local navigation
+remain fixed.
+
+yori rewrites only the editor keys it owns, so `[keybindings]`, comments, and
+unrelated entries survive a change made through the Preferences dialog.
 
 ## Project structure
 

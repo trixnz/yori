@@ -3,12 +3,11 @@
 use super::completion::Placement;
 use super::{
     ActiveTheme, AlignedEditor, App, Backspace, Bounds, Context, CopySelected, CutSelected, Delete,
-    DisplayLine, EntityInputHandler, FocusNextPane, FocusPreviousPane, Font, GUTTER_WIDTH,
-    HEADER_HEIGHT, InsertTab, KEY_CONTEXT, KeyBinding, LINE_HEIGHT, Motion, MoveDown, MoveEnd,
-    MoveFinish, MoveHome, MoveLeft, MoveRight, MoveStart, MoveUp, Newline, NextChange, Paste,
-    Pixels, PreviousChange, Range, Redo, RestoreSelectedLines, SelectAll, SelectDown, SelectEnd,
-    SelectHome, SelectLeft, SelectRight, SelectUp, Selection, Side, TAB_WIDTH, TextRun,
-    UTF16Selection, Undo, Window, point, px,
+    DisplayLine, EntityInputHandler, Font, GUTTER_WIDTH, HEADER_HEIGHT, InsertTab, KEY_CONTEXT,
+    KeyBinding, LINE_HEIGHT, Motion, MoveDown, MoveEnd, MoveFinish, MoveHome, MoveLeft, MoveRight,
+    MoveStart, MoveUp, Newline, Paste, Pixels, Range, Redo, RestoreSelectedLines, SelectAll,
+    SelectDown, SelectEnd, SelectHome, SelectLeft, SelectRight, SelectUp, Selection, Side,
+    TAB_WIDTH, TextRun, UTF16Selection, Undo, Window, point, px,
 };
 use yori::geometry::display_units;
 use yori::vim::EditTarget;
@@ -613,26 +612,8 @@ impl EntityInputHandler for AlignedEditor {
     }
 }
 
-pub(super) fn bind_keys(cx: &mut App) {
-    let command = if cfg!(target_os = "macos") {
-        "cmd"
-    } else {
-        "ctrl"
-    };
-
-    cx.bind_keys([
-        KeyBinding::new("alt-up", PreviousChange, Some(KEY_CONTEXT)),
-        KeyBinding::new("alt-down", NextChange, Some(KEY_CONTEXT)),
-        KeyBinding::new("alt-enter", RestoreSelectedLines, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-h", FocusPreviousPane, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-l", FocusNextPane, Some(KEY_CONTEXT)),
-        KeyBinding::new(&format!("{command}-c"), CopySelected, Some(KEY_CONTEXT)),
-        KeyBinding::new(&format!("{command}-v"), Paste, Some(KEY_CONTEXT)),
-        KeyBinding::new(&format!("{command}-x"), CutSelected, Some(KEY_CONTEXT)),
-        KeyBinding::new(&format!("{command}-a"), SelectAll, Some(KEY_CONTEXT)),
-        KeyBinding::new(&format!("{command}-z"), Undo, Some(KEY_CONTEXT)),
-        KeyBinding::new(&format!("{command}-shift-z"), Redo, Some(KEY_CONTEXT)),
-        KeyBinding::new(&format!("{command}-y"), Redo, Some(KEY_CONTEXT)),
+pub(super) fn fixed_key_bindings() -> Vec<KeyBinding> {
+    vec![
         KeyBinding::new("backspace", Backspace, Some(KEY_CONTEXT)),
         KeyBinding::new("delete", Delete, Some(KEY_CONTEXT)),
         KeyBinding::new("enter", Newline, Some(KEY_CONTEXT)),
@@ -651,5 +632,5 @@ pub(super) fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-end", SelectEnd, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-home", MoveStart, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-end", MoveFinish, Some(KEY_CONTEXT)),
-    ]);
+    ]
 }

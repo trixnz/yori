@@ -6,6 +6,7 @@ mod config;
 mod editor;
 mod instance;
 mod invocation;
+mod keymap;
 mod review;
 mod storage;
 mod window_placement;

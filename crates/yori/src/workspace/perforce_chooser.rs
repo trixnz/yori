@@ -1,5 +1,7 @@
 use std::{num::NonZeroU32, sync::Arc};
 
+#[cfg(test)]
+use gpui_kit::App;
 use gpui_kit::component::{
     ActiveTheme, Disableable, WindowExt,
     button::{Button, ButtonVariants},
@@ -7,7 +9,7 @@ use gpui_kit::component::{
     scroll::ScrollableElement,
 };
 use gpui_kit::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
+    AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
     IntoElement, KeyBinding, ParentElement, Render, Role as AccessibilityRole, ScrollHandle,
     StatefulInteractiveElement, Styled, Subscription, TestSupportExt, Window, div,
     prelude::FluentBuilder, px,
@@ -405,13 +407,13 @@ impl Render for PerforceSourceChooser {
     }
 }
 
-pub(super) fn init(cx: &mut App) {
-    cx.bind_keys([
+pub(super) fn fixed_key_bindings() -> Vec<KeyBinding> {
+    vec![
         KeyBinding::new("up", SelectPrevious, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("k", SelectPrevious, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("down", SelectNext, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("j", SelectNext, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("enter", ActivateSelected, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("space", ActivateSelected, Some(LIST_KEY_CONTEXT)),
-    ]);
+    ]
 }

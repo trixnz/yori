@@ -521,13 +521,13 @@ impl Home {
     }
 }
 
-pub(super) fn init(cx: &mut App) {
-    cx.bind_keys([
+pub(super) fn fixed_key_bindings() -> Vec<KeyBinding> {
+    vec![
         KeyBinding::new("up", SelectPrevious, Some(KEY_CONTEXT)),
         KeyBinding::new("k", SelectPrevious, Some(KEY_CONTEXT)),
         KeyBinding::new("down", SelectNext, Some(KEY_CONTEXT)),
         KeyBinding::new("j", SelectNext, Some(KEY_CONTEXT)),
         KeyBinding::new("enter", ActivateSelected, Some(KEY_CONTEXT)),
         KeyBinding::new("space", ActivateSelected, Some(KEY_CONTEXT)),
-    ]);
+    ]
 }
