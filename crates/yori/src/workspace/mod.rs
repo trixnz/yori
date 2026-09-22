@@ -770,7 +770,9 @@ impl Workspace {
                 .close_button(false)
                 .overlay_closable(false)
                 .footer(footer)
-                .on_ok(move |_, _, cx| applying.update(cx, PreferencesDialog::apply))
+                .on_ok(move |_, window, cx| {
+                    applying.update(cx, |preferences, cx| preferences.apply(window, cx))
+                })
                 .on_cancel(|_, _, _| true)
                 .on_close(move |_, _, cx| {
                     let _ = workspace.update(cx, |workspace, cx| {

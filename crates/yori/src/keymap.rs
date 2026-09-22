@@ -263,16 +263,32 @@ fn validate(raw: &HashMap<String, Vec<String>>, errors: &mut Vec<String>) {
         .map(|action| action.name)
         .collect::<HashSet<_>>();
 
-    let mut unknown = raw
-        .keys()
-        .filter(|name| !known_names.contains(name.as_str()))
-        .collect::<Vec<_>>();
-    unknown.sort();
-    errors.extend(
-        unknown
-            .into_iter()
-            .map(|name| format!("unknown action `{name}`")),
-    );
+    let mut names = raw.keys().collect::<Vec<_>>();
+    names.sort();
+
+    let mut parsed_overrides = HashMap::new();
+    for name in names {
+        if !known_names.contains(name.as_str()) {
+            errors.push(format!("unknown action `{name}`"));
+        }
+
+        let bindings = raw
+            .get(name)
+            .expect("key came from the keybinding override map");
+        let parsed: Vec<Option<Vec<Keystroke>>> = bindings
+            .iter()
+            .map(|source| match parse_sequence(&expand_primary(source)) {
+                Ok(sequence) => Some(sequence),
+                Err(error) => {
+                    errors.push(format!(
+                        "action `{name}` has invalid keystroke `{source}`: {error}"
+                    ));
+                    None
+                }
+            })
+            .collect();
+        parsed_overrides.insert(name.as_str(), parsed);
+    }
 
     let fixed = fixed_bindings();
     let mut occupied = fixed
@@ -286,24 +302,7 @@ fn validate(raw: &HashMap<String, Vec<String>>, errors: &mut Vec<String>) {
         .collect::<HashMap<_, _>>();
 
     for action in ACTIONS {
-        let bindings = raw.get(action.name).map_or_else(
-            || action.defaults.to_vec(),
-            |bindings| bindings.iter().map(String::as_str).collect(),
-        );
-
-        for source in bindings {
-            let expanded = expand_primary(source);
-            let parsed = parse_sequence(&expanded);
-            let sequence = match parsed {
-                Ok(sequence) => sequence,
-                Err(error) => {
-                    errors.push(format!(
-                        "action `{}` has invalid keystroke `{source}`: {error}",
-                        action.name
-                    ));
-                    continue;
-                }
-            };
+        let mut record = |source: &str, sequence: Vec<Keystroke>| {
             let key = (action.context.map(str::to_owned), sequence);
 
             if let Some(previous) = occupied.insert(key, format!("action `{}`", action.name)) {
@@ -312,6 +311,24 @@ fn validate(raw: &HashMap<String, Vec<String>>, errors: &mut Vec<String>) {
                     action.name,
                     action.context.unwrap_or("global")
                 ));
+            }
+        };
+
+        if let Some(bindings) = raw.get(action.name) {
+            let parsed = parsed_overrides
+                .get(action.name)
+                .expect("configured action was parsed");
+
+            for (source, sequence) in bindings.iter().zip(parsed) {
+                if let Some(sequence) = sequence {
+                    record(source, sequence.clone());
+                }
+            }
+        } else {
+            for source in action.defaults {
+                let sequence = parse_sequence(&expand_primary(source))
+                    .expect("catalog defaults must be valid keystrokes");
+                record(source, sequence);
             }
         }
     }
@@ -335,7 +352,14 @@ fn parse_sequence(source: &str) -> Result<Vec<Keystroke>, String> {
 
     source
         .split_whitespace()
-        .map(|keystroke| Keystroke::parse(keystroke).map_err(|error| error.to_string()))
+        .map(|source| {
+            let keystroke = Keystroke::parse(source).map_err(|error| error.to_string())?;
+            if keystroke.key_char.is_some() {
+                return Err("test-event key_char notation is not supported".into());
+            }
+
+            Ok(keystroke)
+        })
         .collect()
 }
 

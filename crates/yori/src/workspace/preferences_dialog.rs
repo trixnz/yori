@@ -1,4 +1,4 @@
-use gpui_kit::component::{ActiveTheme, checkbox::Checkbox};
+use gpui_kit::component::{ActiveTheme, WindowExt, checkbox::Checkbox, notification::Notification};
 use gpui_kit::{
     Context, FocusHandle, InteractiveElement, IntoElement, ParentElement, Render, Role,
     SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window, div, px,
@@ -25,9 +25,14 @@ impl PreferencesDialog {
         self.focus.clone()
     }
 
-    pub(super) fn apply(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(super) fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match crate::config::update_editor(self.editor, cx) {
-            Ok(()) => true,
+            Ok(diagnostic) => {
+                if let Some(diagnostic) = diagnostic {
+                    window.push_notification(Notification::error(diagnostic), cx);
+                }
+                true
+            }
             Err(error) => {
                 self.error = Some(error.into());
                 cx.notify();

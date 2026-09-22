@@ -121,6 +121,16 @@ fn same_keystroke_is_allowed_in_different_contexts() {
 }
 
 #[test]
+fn test_event_key_char_notation_is_rejected() {
+    let errors = KeybindingOverrides::from_raw(raw(&[("save", &["ctrl-k->x"])]), Vec::new())
+        .unwrap_err()
+        .join("\n");
+
+    assert!(errors.contains("action `save` has invalid keystroke `ctrl-k->x`"));
+    assert!(errors.contains("test-event key_char notation is not supported"));
+}
+
+#[test]
 fn empty_keystrokes_are_rejected() {
     let errors = KeybindingOverrides::from_raw(raw(&[("save", &[""])]), Vec::new())
         .unwrap_err()
@@ -179,6 +189,22 @@ fn reload_replaces_disables_and_preserves_the_last_valid_keymap(cx: &mut TestApp
         assert!(diagnostic.contains("`next_tab`"));
         assert!(diagnostic.contains("action `next_change` has invalid keystroke"));
         assert!(crate::config::editor(cx).show_whitespace);
+        assert!(cx.key_bindings().borrow().version() == version);
+
+        let save = (action("save").binding)("ctrl-s");
+        assert!(has_binding(cx, save.action(), "primary-k"));
+        assert!(has_binding(cx, save.action(), "ctrl-alt-s"));
+    });
+
+    fs::write(
+        &path,
+        "[editor]\nshow_whitespace = false\n\n[keybindings]\nsave = [\"ctrl-k->x\"]\nnext_tab = [\"ctrl-k\"]\n",
+    )
+    .unwrap();
+    cx.update(|cx| {
+        let diagnostic = crate::config::reload(cx).unwrap();
+        assert!(diagnostic.contains("test-event key_char notation is not supported"));
+        assert!(!crate::config::editor(cx).show_whitespace);
         assert!(cx.key_bindings().borrow().version() == version);
 
         let save = (action("save").binding)("ctrl-s");

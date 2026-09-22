@@ -92,18 +92,15 @@ impl Configuration {
             .flatten()
     }
 
-    fn update_editor(&mut self, editor: EditorConfig) -> Result<(), String> {
+    fn update_editor(&mut self, editor: EditorConfig) -> Result<Option<String>, String> {
         let Some(path) = &self.path else {
             self.editor = editor;
-            return Ok(());
+            return Ok(None);
         };
 
         let result = update_document(path, editor);
         match result {
-            Ok(()) => {
-                self.reload();
-                Ok(())
-            }
+            Ok(()) => Ok(self.reload()),
             Err(error) => {
                 self.diagnostic = Some(error.clone());
                 Err(error)
@@ -164,7 +161,7 @@ pub(crate) fn reload(cx: &mut App) -> Option<String> {
     report
 }
 
-pub(crate) fn update_editor(editor: EditorConfig, cx: &mut App) -> Result<(), String> {
+pub(crate) fn update_editor(editor: EditorConfig, cx: &mut App) -> Result<Option<String>, String> {
     let previous_keybindings = keybindings(cx);
     let result = cx.global_mut::<Configuration>().update_editor(editor);
     let current_keybindings = keybindings(cx);
@@ -226,6 +223,7 @@ fn parse_keybindings(document: &DocumentMut) -> Result<KeybindingOverrides, Vec<
             errors.push(format!(
                 "action `{name}` must be an array of keystroke strings"
             ));
+            raw.insert(name.to_owned(), Vec::new());
             continue;
         };
 

@@ -611,6 +611,47 @@ fn apply_updates_every_open_editor_and_future_editor(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn apply_reports_new_invalid_external_keybindings_after_saving_valid_editor_preferences(
+    cx: &mut TestAppContext,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("yori").join("config.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "[keybindings]\nsave = [\"primary-k\"]\n").unwrap();
+
+    let (_, cx) = harness_with_config(cx, Some(path.clone()));
+    show_preferences(cx);
+    std::fs::write(
+        &path,
+        "# external edit\n[keybindings]\nsave = [\"broken-key\"]\n",
+    )
+    .unwrap();
+
+    cx.update(|window, cx| {
+        window.click("show-whitespace", cx);
+        window.click("preferences-apply", cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+
+        assert!(!window.has_active_dialog(cx));
+        assert!(crate::config::editor(cx).show_whitespace);
+        assert!(
+            crate::config::diagnostic(cx)
+                .is_some_and(|diagnostic| diagnostic.contains("invalid keybinding configuration"))
+        );
+        assert!(window.find("notification").visible());
+        assert!(crate::config::reload(cx).is_none());
+    });
+
+    let saved = std::fs::read_to_string(path).unwrap();
+    assert!(saved.contains("# external edit"));
+    assert!(saved.contains("show_whitespace = true"));
+    assert!(saved.contains("save = [\"broken-key\"]"));
+}
+
+#[gpui_kit::test]
 fn save_failure_keeps_dialog_selections_and_reports_an_accessible_error(cx: &mut TestAppContext) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("yori").join("config.toml");

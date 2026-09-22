@@ -22,9 +22,15 @@ impl AlignedEditor {
     ) {
         let mut config = crate::config::editor(cx);
         config.show_whitespace = visible;
-        if let Err(error) = crate::config::update_editor(config, cx) {
-            window.push_notification(Notification::error(error), cx);
-            return;
+        let diagnostic = match crate::config::update_editor(config, cx) {
+            Ok(diagnostic) => diagnostic,
+            Err(error) => {
+                window.push_notification(Notification::error(error), cx);
+                return;
+            }
+        };
+        if let Some(diagnostic) = diagnostic {
+            window.push_notification(Notification::error(diagnostic), cx);
         }
 
         self.show_whitespace = visible;
