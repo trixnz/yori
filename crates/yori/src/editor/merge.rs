@@ -87,7 +87,7 @@ impl AlignedEditor {
             .and_then(|id| session.state(id))
             .map_or(0, |state| state.result.start);
 
-        let mut editor = Self::new(local, result, window, cx);
+        let mut editor = Self::new_merge_base(local, result, window, cx);
         editor.merge = Some(MergeState {
             session,
             incoming,

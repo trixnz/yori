@@ -268,6 +268,26 @@ impl From<bool> for VimKeybindings {
     }
 }
 
+#[derive(Clone, Copy)]
+enum EditorActivation {
+    Focus,
+    Preserve,
+}
+
+#[derive(Clone, Copy)]
+enum InitialChange {
+    First,
+    Neutral,
+}
+
+#[derive(Clone, Copy)]
+struct DiffOptions {
+    editable: bool,
+    saveable: bool,
+    activation: EditorActivation,
+    initial_change: InitialChange,
+}
+
 pub(super) struct AlignedEditor {
     left: PaneDocument,
     right: PaneDocument,
@@ -284,6 +304,7 @@ pub(super) struct AlignedEditor {
     selection: Option<Selection>,
     vertical_scroll: f32,
     horizontal_scroll: f32,
+    pending_initial_change_row: Option<usize>,
     show_whitespace: bool,
     show_connections: bool,
     hovered_connection: Option<Range<usize>>,
@@ -293,6 +314,7 @@ pub(super) struct AlignedEditor {
 }
 
 impl AlignedEditor {
+    #[cfg(test)]
     pub(super) fn new(
         left: PaneDocument,
         right: PaneDocument,
@@ -324,26 +346,71 @@ impl AlignedEditor {
         Self::new_diff_with_activation(left, right, editable, saveable, false, window, cx)
     }
 
+    pub(super) fn new_merge_base(
+        left: PaneDocument,
+        right: PaneDocument,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_diff_with_options(
+            left,
+            right,
+            DiffOptions {
+                editable: true,
+                saveable: true,
+                activation: EditorActivation::Focus,
+                initial_change: InitialChange::Neutral,
+            },
+            window,
+            cx,
+        )
+    }
+
     fn new_diff_with_activation(
-        mut left: PaneDocument,
-        mut right: PaneDocument,
+        left: PaneDocument,
+        right: PaneDocument,
         editable: bool,
         saveable: bool,
         activate: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_diff_with_options(
+            left,
+            right,
+            DiffOptions {
+                editable,
+                saveable,
+                activation: if activate {
+                    EditorActivation::Focus
+                } else {
+                    EditorActivation::Preserve
+                },
+                initial_change: InitialChange::First,
+            },
+            window,
+            cx,
+        )
+    }
+
+    fn new_diff_with_options(
+        mut left: PaneDocument,
+        mut right: PaneDocument,
+        options: DiffOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         left.editable = false;
         left.saveable = false;
-        right.editable = editable;
-        right.saveable = editable && saveable;
+        right.editable = options.editable;
+        right.saveable = options.editable && options.saveable;
 
         let alignment = Alignment::between(&left.document, &right.document);
         let dirty = DirtyState::new(right.document.text());
         let config = crate::config::editor(cx);
 
         let focus = cx.focus_handle();
-        if activate {
+        if matches!(options.activation, EditorActivation::Focus) {
             focus.focus(window, cx);
         }
         cx.on_blur(&focus, window, |this, _, cx| {
@@ -400,6 +467,7 @@ impl AlignedEditor {
             selection: None,
             vertical_scroll: 0.0,
             horizontal_scroll: 0.0,
+            pending_initial_change_row: None,
             show_whitespace: config.show_whitespace,
             show_connections: config.show_change_connections,
             hovered_connection: None,
@@ -409,6 +477,9 @@ impl AlignedEditor {
                 window.viewport_size(),
             ))),
         };
+        if matches!(options.initial_change, InitialChange::First) {
+            editor.initialize_change_navigation();
+        }
         editor.schedule_highlighting(Side::Left, window, cx);
         editor.schedule_highlighting(Side::Right, window, cx);
 
@@ -1185,6 +1256,7 @@ impl Render for AlignedEditor {
                 let mut bounds = editor.content_bounds.get();
                 bounds.size = size;
                 editor.content_bounds.set(bounds);
+                editor.resolve_initial_change_viewport();
 
                 editor.render_content(window, cx)
             })
