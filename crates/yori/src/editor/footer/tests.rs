@@ -1,7 +1,7 @@
 //! Language changes, incremental syntax, and footer geometry—not widget-presence tests.
 
 use super::*;
-use crate::editor::{GUTTER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT};
+use crate::editor::{GUTTER_WIDTH, LINE_HEIGHT};
 use gpui_kit::component::{Root, highlighter::HighlightTheme};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AppContext, Entity, TestAppContext, VisualTestContext, point};
@@ -266,11 +266,17 @@ fn footer_reserves_viewport_space_and_eof_reveal_stays_above_it(cx: &mut TestApp
             let rows = window.find("rows-viewport").bounds();
             let footer = window.find("editor-footer").bounds();
             let content = window.find("aligned-editor").bounds();
-            assert_eq!(rows.bottom(), footer.top());
+            if let Some(scrollbar) = window.try_find("horizontal-scrollbar") {
+                let scrollbar = scrollbar.bounds();
+                assert_eq!(rows.bottom(), scrollbar.top());
+                assert_eq!(scrollbar.bottom(), footer.top());
+            } else {
+                assert_eq!(rows.bottom(), footer.top());
+            }
             assert_eq!(footer.bottom(), content.bottom());
             assert_eq!(
                 rows.size.height,
-                content.size.height - px(HEADER_HEIGHT + FOOTER_HEIGHT)
+                px(editor.read(cx).geometry().rows_viewport_height())
             );
 
             window.click_at(

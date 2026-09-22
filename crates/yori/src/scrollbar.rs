@@ -7,6 +7,65 @@ use yori_diff::Alignment;
 use crate::geometry::{display_units, whole_rows};
 
 #[derive(Clone, Copy, Debug)]
+pub struct HorizontalScrollTrack {
+    width: f32,
+    max_scroll: f32,
+    thumb_width: f32,
+}
+
+impl HorizontalScrollTrack {
+    #[must_use]
+    pub fn new(viewport_width: f32, max_scroll: f32, track_width: f32) -> Self {
+        let width = track_width.max(0.0);
+        let viewport_width = viewport_width.max(0.0);
+        let max_scroll = max_scroll.max(0.0);
+        let content_width = viewport_width + max_scroll;
+        let thumb_width = if content_width > 0.0 {
+            (width * viewport_width / content_width).clamp(24.0_f32.min(width), width)
+        } else {
+            0.0
+        };
+
+        Self {
+            width,
+            max_scroll,
+            thumb_width,
+        }
+    }
+
+    #[must_use]
+    pub fn max_scroll(self) -> f32 {
+        self.max_scroll
+    }
+
+    #[must_use]
+    pub fn thumb(self, scroll: f32) -> Range<f32> {
+        let left = if self.max_scroll > 0.0 {
+            scroll.clamp(0.0, self.max_scroll) / self.max_scroll * (self.width - self.thumb_width)
+        } else {
+            0.0
+        };
+
+        left..left + self.thumb_width
+    }
+
+    #[must_use]
+    pub fn scroll_for_thumb(self, left: f32) -> f32 {
+        let travel = self.width - self.thumb_width;
+        if travel <= 0.0 {
+            return 0.0;
+        }
+
+        (left / travel).clamp(0.0, 1.0) * self.max_scroll
+    }
+
+    #[must_use]
+    pub fn jump(self, x: f32) -> f32 {
+        self.scroll_for_thumb(x - self.thumb_width / 2.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct ScrollTrack {
     height: f32,
     content_height: f32,
@@ -132,6 +191,47 @@ mod tests {
     use super::*;
     use crate::geometry::EditorGeometry;
     use yori_document::Document;
+
+    #[test]
+    fn horizontal_thumb_represents_viewport_and_round_trips_across_the_range() {
+        let track = HorizontalScrollTrack::new(400.0, 600.0, 800.0);
+
+        assert!((track.max_scroll() - 600.0).abs() < f32::EPSILON);
+        assert_eq!(track.thumb(0.0), 0.0..320.0);
+        assert_eq!(track.thumb(300.0), 240.0..560.0);
+        assert_eq!(track.thumb(600.0), 480.0..800.0);
+
+        for fraction in [0.0, 0.2, 0.5, 1.0] {
+            let scroll = track.max_scroll() * fraction;
+            let thumb = track.thumb(scroll);
+            assert!((track.scroll_for_thumb(thumb.start) - scroll).abs() <= f32::EPSILON);
+        }
+
+        assert!(track.jump(-100.0).abs() < f32::EPSILON);
+        assert!((track.jump(900.0) - track.max_scroll()).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn horizontal_track_handles_non_overflow_and_tiny_bounds() {
+        for (viewport, max_scroll, width) in [
+            (400.0, 0.0, 800.0),
+            (0.0, 100.0, 10.0),
+            (100.0, 100_000.0, 10.0),
+            (0.0, 0.0, 0.0),
+        ] {
+            let track = HorizontalScrollTrack::new(viewport, max_scroll, width);
+            let thumb = track.thumb(100.0);
+
+            assert!(thumb.start.is_finite() && thumb.end.is_finite());
+            assert!(thumb.start >= 0.0 && thumb.end <= width);
+            assert!(track.scroll_for_thumb(40.0).is_finite());
+        }
+
+        assert_eq!(
+            HorizontalScrollTrack::new(400.0, 0.0, 800.0).thumb(0.0),
+            0.0..800.0
+        );
+    }
 
     #[test]
     fn thumb_round_trips_and_reaches_both_ends_even_with_minimum_height() {

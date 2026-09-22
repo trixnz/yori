@@ -8,6 +8,14 @@ use gpui_kit::{AppContext, Entity, Modifiers, TestAppContext, VisualTestContext}
 use yori_document::Document;
 
 fn harness(cx: &mut TestAppContext) -> (Entity<AlignedEditor>, &mut VisualTestContext) {
+    harness_with_text(cx, String::new(), "long local line\n".repeat(1_000))
+}
+
+fn harness_with_text(
+    cx: &mut TestAppContext,
+    left: String,
+    right: String,
+) -> (Entity<AlignedEditor>, &mut VisualTestContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         crate::appearance::init(cx);
@@ -24,8 +32,8 @@ fn harness(cx: &mut TestAppContext) -> (Entity<AlignedEditor>, &mut VisualTestCo
         };
         let view = cx.new(|cx| {
             AlignedEditor::new(
-                pane("baseline.txt", String::new()),
-                pane("local.txt", "long local line\n".repeat(1_000)),
+                pane("baseline.txt", left),
+                pane("local.txt", right),
                 window,
                 cx,
             )
@@ -151,6 +159,237 @@ fn resize_and_edit_keep_the_track_aligned_and_clamp_short_documents(cx: &mut Tes
         assert!(view.vertical_scroll.abs() < f32::EPSILON);
         assert!(track.max_scroll().abs() < f32::EPSILON);
         assert!(track.bands(&view.alignment, LINE_HEIGHT).is_empty());
+    });
+}
+
+#[gpui_kit::test]
+fn horizontal_scrollbar_reserves_space_only_for_overflow_and_tracks_range_changes(
+    cx: &mut TestAppContext,
+) {
+    let source = format!("{}\n", "wide ".repeat(16));
+    let (editor, cx) = harness_with_text(cx, String::new(), source);
+
+    cx.simulate_resize(size(px(700.0), px(620.0)));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let horizontal = window.find("horizontal-scrollbar").bounds();
+        let vertical = window.find("diff-scrollbar").bounds();
+        let rows = window.find("rows-viewport").bounds();
+        let footer = window.find("editor-footer").bounds();
+        let content = window.find("aligned-editor").bounds();
+
+        assert_eq!(horizontal.left(), content.left());
+        assert_eq!(horizontal.right(), vertical.left());
+        assert_eq!(horizontal.top(), rows.bottom());
+        assert_eq!(horizontal.bottom(), footer.top());
+        assert_eq!(horizontal.size.height, px(HEIGHT));
+        assert!(editor.read(cx).horizontal_scrollbar_visibility.is_visible());
+    });
+
+    cx.simulate_resize(size(px(2_000.0), px(620.0)));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("horizontal-scrollbar").is_none());
+        assert!(!editor.read(cx).horizontal_scrollbar_visibility.is_visible());
+        assert!(editor.read(cx).horizontal_scroll.abs() < f32::EPSILON);
+        assert_eq!(
+            window.find("rows-viewport").bounds().bottom(),
+            window.find("editor-footer").bounds().top()
+        );
+    });
+
+    cx.simulate_resize(size(px(700.0), px(620.0)));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("horizontal-scrollbar").is_some());
+
+        editor.update(cx, |editor, cx| {
+            editor.horizontal_scroll = editor.max_horizontal_scroll(window, cx);
+        });
+        assert!(editor.read(cx).horizontal_scroll > 0.0);
+
+        let rows = window.find("rows-viewport").bounds();
+        window.click_at(
+            "rows-viewport",
+            point(rows.size.width / 2.0 + px(GUTTER_WIDTH + 10.0), px(11.0)),
+            cx,
+        );
+        window.press("ctrl-a", cx);
+        window.input("short\n", cx);
+        window.render_frame(cx);
+
+        assert!(window.try_find("horizontal-scrollbar").is_none());
+        assert!(!editor.read(cx).horizontal_scrollbar_visibility.is_visible());
+        assert!(editor.read(cx).horizontal_scroll.abs() < f32::EPSILON);
+        assert_eq!(
+            window.find("rows-viewport").bounds().bottom(),
+            window.find("editor-footer").bounds().top()
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn horizontal_track_jump_and_thumb_drag_reach_both_ends_without_editing(cx: &mut TestAppContext) {
+    let source = format!("{}\n", "0123456789".repeat(100));
+    let (editor, cx) = harness_with_text(cx, source.clone(), source.clone());
+    let (bar, selection, current) = cx.update(|window, cx| {
+        let rows = window.find("rows-viewport").bounds();
+        window.click_at(
+            "rows-viewport",
+            point(rows.size.width * 0.75 + px(GUTTER_WIDTH), px(11.0)),
+            cx,
+        );
+        window.press("shift-right", cx);
+        window.render_frame(cx);
+
+        (
+            window.find("horizontal-scrollbar").bounds(),
+            editor.read(cx).right_selection(),
+            editor
+                .read(cx)
+                .navigation
+                .current(&editor.read(cx).alignment),
+        )
+    });
+
+    cx.simulate_click(
+        point(bar.left() + bar.size.width * 0.75, bar.center().y),
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+
+    let grab = cx.update(|window, cx| {
+        window.render_frame(cx);
+        let view = editor.read(cx);
+        let max_scroll = view.max_horizontal_scroll(window, cx);
+        let track = view.horizontal_scroll_track(max_scroll);
+        assert!(view.horizontal_scroll > max_scroll * 0.5);
+        assert_eq!(view.right_selection(), selection);
+
+        let thumb = track.thumb(view.horizontal_scroll);
+        point(
+            bar.left() + px(thumb.start.midpoint(thumb.end)),
+            bar.center().y,
+        )
+    });
+
+    cx.simulate_mouse_down(grab, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(
+        point(bar.left() - px(100.0), bar.center().y),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        point(bar.left() - px(100.0), bar.center().y),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert!(editor.read(cx).horizontal_scroll.abs() < f32::EPSILON);
+    });
+
+    let start_grab = cx.update(|window, cx| {
+        let view = editor.read(cx);
+        let max_scroll = view.max_horizontal_scroll(window, cx);
+        let thumb = view.horizontal_scroll_track(max_scroll).thumb(0.0);
+
+        point(
+            bar.left() + px(thumb.start.midpoint(thumb.end)),
+            bar.center().y,
+        )
+    });
+    cx.simulate_mouse_down(start_grab, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(
+        point(bar.right() + px(100.0), bar.center().y),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        point(bar.right() + px(100.0), bar.center().y),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        let view = editor.read(cx);
+        let max_scroll = view.max_horizontal_scroll(window, cx);
+        assert!((view.horizontal_scroll - max_scroll).abs() < f32::EPSILON);
+        assert_eq!(view.right_selection(), selection);
+        assert_eq!(view.right.document.text(), source);
+        assert_eq!(view.navigation.current(&view.alignment), current);
+        assert!(view.horizontal_scrollbar_grab.is_none());
+        assert!(view.focus.is_focused(window));
+    });
+}
+
+#[gpui_kit::test]
+fn merge_horizontal_scroll_uses_one_offset_for_every_pane_hit(cx: &mut TestAppContext) {
+    let (editor, cx) = harness(cx);
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            let source = |text: String| Document::from_bytes(text.into_bytes()).unwrap();
+            let session = yori_diff::merge::MergeSession::new(
+                source("base\n".to_owned()),
+                source(format!("{}\n", "local".repeat(200))),
+                source(format!("{}\n", "incoming".repeat(200))),
+            )
+            .unwrap();
+            *editor = AlignedEditor::from_merge_session(session, window, cx);
+        });
+        window.render_frame(cx);
+
+        let bar = window.find("horizontal-scrollbar").bounds();
+        window.click_at(
+            "horizontal-scrollbar",
+            point(bar.size.width * 0.75, bar.size.height / 2.0),
+            cx,
+        );
+        window.render_frame(cx);
+
+        let view = editor.read(cx);
+        let geometry = view.geometry();
+        assert!(view.horizontal_scroll > 0.0);
+
+        let y = f32::from(view.content_bounds.get().origin.y) + HEADER_HEIGHT + 1.0;
+        let text_inset = GUTTER_WIDTH + 12.0;
+        let hits = [
+            geometry.hit(
+                f32::from(view.content_bounds.get().origin.x) + text_inset,
+                y,
+                view.vertical_scroll,
+                view.horizontal_scroll,
+            ),
+            geometry.hit(
+                f32::from(view.content_bounds.get().origin.x)
+                    + geometry.right_pane_left()
+                    + text_inset,
+                y,
+                view.vertical_scroll,
+                view.horizontal_scroll,
+            ),
+            geometry.hit(
+                f32::from(view.content_bounds.get().origin.x)
+                    + geometry.incoming_pane_left()
+                    + text_inset,
+                y,
+                view.vertical_scroll,
+                view.horizontal_scroll,
+            ),
+        ];
+
+        assert!(hits[0].left_side && !hits[0].incoming_side);
+        assert!(!hits[1].left_side && !hits[1].incoming_side);
+        assert!(!hits[2].left_side && hits[2].incoming_side);
+        assert!(
+            hits.iter()
+                .all(|hit| { (hit.text_x - (12.0 + view.horizontal_scroll)).abs() < f32::EPSILON })
+        );
     });
 }
 
