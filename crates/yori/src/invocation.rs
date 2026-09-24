@@ -7,6 +7,9 @@ use crate::comparison::Comparison;
 pub(crate) struct InvocationRequest {
     pub directory: PathBuf,
     pub comparisons: Vec<Comparison>,
+    /// Keep the invoking process until the opened tab closes, as external merge
+    /// tools such as `git mergetool` expect.
+    pub wait: bool,
 }
 
 impl InvocationRequest {
@@ -14,6 +17,11 @@ impl InvocationRequest {
         Self {
             directory,
             comparisons,
+            wait: false,
         }
+    }
+
+    pub fn waiting(self) -> Self {
+        Self { wait: true, ..self }
     }
 }

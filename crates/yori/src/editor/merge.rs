@@ -60,25 +60,31 @@ impl AlignedEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let paths = crate::comparison::MergePaths {
+        let merge = crate::comparison::MergeComparison::from(crate::comparison::MergePaths {
             base: "base.rs".into(),
             local: "local.rs".into(),
             incoming: "incoming.rs".into(),
             result: "result.rs".into(),
-        };
+        });
 
-        Self::new_merge(&paths, session, window, cx)
+        Self::new_merge(&merge, session, window, cx)
     }
 
     pub(crate) fn new_merge(
-        paths: &crate::comparison::MergePaths,
+        merge: &crate::comparison::MergeComparison,
         session: MergeSession,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let local = PaneDocument::new(paths.local.clone(), session.local().clone());
-        let result = PaneDocument::new(paths.result.clone(), session.result().clone());
-        let incoming = PaneDocument::new(paths.incoming.clone(), session.incoming().clone());
+        let local = PaneDocument::new(
+            merge.local.logical_path().to_owned(),
+            session.local().clone(),
+        );
+        let result = PaneDocument::new(merge.result.clone(), session.result().clone());
+        let incoming = PaneDocument::new(
+            merge.incoming.logical_path().to_owned(),
+            session.incoming().clone(),
+        );
         let incoming_alignment = Alignment::between(session.incoming(), session.result());
         let base_columns = super::max_display_columns(session.base(), super::TAB_WIDTH);
 

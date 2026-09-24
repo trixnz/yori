@@ -272,7 +272,7 @@ mod tests {
             incoming: "/incoming.rs".into(),
             result: "/result.rs".into(),
         };
-        let original = TabIdentity::Comparison(Comparison::Merge(paths.clone()));
+        let original = TabIdentity::Comparison(Comparison::from(paths.clone()));
         let mut tabs = Tabs::default();
         let first = tabs.insert(original.clone(), "edited first");
         let diff = tabs.insert(pair("/base.rs", "/result.rs"), "edited diff");
@@ -297,7 +297,7 @@ mod tests {
             },
         ] {
             let id = tabs.insert(
-                TabIdentity::Comparison(Comparison::Merge(variant)),
+                TabIdentity::Comparison(Comparison::from(variant)),
                 "another merge",
             );
             assert_ne!(id, first);

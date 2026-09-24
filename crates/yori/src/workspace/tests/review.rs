@@ -14,12 +14,12 @@ use gpui_kit::{App, Entity, Role, VisualTestContext, point, px};
 
 use super::*;
 use crate::{
-    comparison::ComparisonDocument,
+    comparison::{ComparisonDocument, MergeComparison},
     review::{
         ReviewSession,
         model::{
-            ReviewFile, ReviewFileIdentity, ReviewFileStatus, ReviewManifest, ReviewProvider,
-            ReviewSource, ReviewSourceIdentity, TextComparison,
+            ReviewConflict, ReviewFile, ReviewFileIdentity, ReviewFileStatus, ReviewManifest,
+            ReviewProvider, ReviewSource, ReviewSourceIdentity, TextComparison,
         },
     },
 };
@@ -1487,4 +1487,81 @@ fn aggregate_close_cancel_discard_and_failed_save_preserve_the_session(cx: &mut 
     });
     cx.run_until_parked();
     cx.update(|_, cx| assert!(workspace.read(cx).tabs.get(id).is_none()));
+}
+
+#[gpui_kit::test]
+fn conflicted_files_offer_a_three_way_merge_of_their_recorded_versions(cx: &mut TestAppContext) {
+    let (workspace, cx) = harness(cx);
+    let directory = tempfile::tempdir().unwrap();
+    let result = directory.path().join("conflict.rs");
+    let markers = "<<<<<<< ours\nlocal\n=======\nincoming\n>>>>>>> theirs\n";
+    std::fs::write(&result, markers).unwrap();
+    let input = |bytes: &str| {
+        ComparisonDocument::read_only_memory(result.clone(), bytes.as_bytes().to_vec())
+    };
+    let mergeable = saveable_text_file("conflict", "conflict.rs", "local\n", markers, &result)
+        .with_conflict(ReviewConflict::Mergeable(Box::new(MergeComparison {
+            base: input("base\n"),
+            local: input("local\n"),
+            incoming: input("incoming\n"),
+            result: result.clone(),
+        })));
+    let unmergeable = text_file("deleted", "deleted.rs", "old\n", "old\n")
+        .with_conflict(ReviewConflict::unmergeable("One side deleted this file."));
+    let manifest = ReviewManifest::new(vec![mergeable, unmergeable]).unwrap();
+    let (review, session) =
+        open_review(&workspace, source(TestProvider::new([manifest]), "git"), cx);
+    let tab_count = cx.update(|_, cx| workspace.read(cx).tabs.entries.len());
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            session.read(cx).selected_identity().unwrap().to_string(),
+            "conflict"
+        );
+        assert!(
+            window
+                .find("review-file-conflict")
+                .label()
+                .unwrap()
+                .contains("unresolved merge conflict")
+        );
+
+        window.click("start-conflict-merge", cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|_, cx| {
+        let workspace = workspace.read(cx);
+        let active = workspace.tabs.get(workspace.tabs.active.unwrap()).unwrap();
+        let Some(Comparison::Merge(merge)) = active.identity.comparison() else {
+            panic!("the conflict should open a merge tab");
+        };
+        let editor = &active.content.comparison().unwrap().editor;
+
+        assert_eq!(workspace.tabs.entries.len(), tab_count + 1);
+        assert_eq!(merge.result, result.canonicalize().unwrap());
+        assert_eq!(editor.read(cx).unresolved_count(), 1);
+    });
+    assert_eq!(std::fs::read_to_string(&result).unwrap(), markers);
+
+    // A conflict without a text merge explains itself and opens nothing.
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| workspace.activate(review, window, cx));
+        window.render_frame(cx);
+        window.click(("review-file", 1usize), cx);
+        window.render_frame(cx);
+
+        assert!(
+            window
+                .find("review-file-conflict")
+                .label()
+                .unwrap()
+                .contains("One side deleted this file.")
+        );
+        window.click("start-conflict-merge", cx);
+    });
+    cx.run_until_parked();
+
+    cx.update(|_, cx| assert_eq!(workspace.read(cx).tabs.entries.len(), tab_count + 1));
 }

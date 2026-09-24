@@ -131,6 +131,7 @@ pub(crate) struct DiffComparison {
     pub local: ComparisonDocument,
 }
 
+/// File-backed merge inputs, as named on the command line or in a file chooser.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MergePaths {
     pub base: PathBuf,
@@ -139,10 +140,43 @@ pub(crate) struct MergePaths {
     pub result: PathBuf,
 }
 
+/// Read-only merge inputs and the result destination. Inputs may be files or
+/// memory, such as the stages of a Git index conflict.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MergeComparison {
+    pub base: ComparisonDocument,
+    pub local: ComparisonDocument,
+    pub incoming: ComparisonDocument,
+    pub result: PathBuf,
+}
+
+impl MergeComparison {
+    pub fn inputs(&self) -> [&ComparisonDocument; 3] {
+        [&self.base, &self.local, &self.incoming]
+    }
+}
+
+impl From<MergePaths> for MergeComparison {
+    fn from(paths: MergePaths) -> Self {
+        Self {
+            base: ComparisonDocument::read_only_file(paths.base),
+            local: ComparisonDocument::read_only_file(paths.local),
+            incoming: ComparisonDocument::read_only_file(paths.incoming),
+            result: paths.result,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Comparison {
     Diff(DiffComparison),
-    Merge(MergePaths),
+    Merge(Box<MergeComparison>),
+}
+
+impl From<MergePaths> for Comparison {
+    fn from(paths: MergePaths) -> Self {
+        Self::Merge(Box::new(paths.into()))
+    }
 }
 
 impl Comparison {
@@ -160,12 +194,13 @@ impl Comparison {
     pub fn from_paths(paths: &[PathBuf]) -> Result<Self, String> {
         match paths {
             [baseline, local] => Ok(Self::diff(baseline.clone(), local.clone())),
-            [base, local, incoming, result] => Ok(Self::Merge(MergePaths {
+            [base, local, incoming, result] => Ok(MergePaths {
                 base: base.clone(),
                 local: local.clone(),
                 incoming: incoming.clone(),
                 result: result.clone(),
-            })),
+            }
+            .into()),
             _ => Err("expected two diff paths or four merge paths".into()),
         }
     }
@@ -195,12 +230,25 @@ impl Comparison {
 
                 Ok(vec![baseline, local])
             }
-            Self::Merge(paths) => Ok(vec![
-                &paths.base,
-                &paths.local,
-                &paths.incoming,
-                &paths.result,
-            ]),
+            Self::Merge(merge) => {
+                let mut paths = Vec::with_capacity(4);
+                for input in merge.inputs() {
+                    let path = input
+                        .file_path()
+                        .ok_or("in-memory merges cannot be forwarded to another yori instance")?;
+                    if input.editable() || input.save_destination().is_some() {
+                        return Err(
+                            "merge input capabilities cannot be represented by the current instance protocol"
+                                .into(),
+                        );
+                    }
+
+                    paths.push(path);
+                }
+                paths.push(&merge.result);
+
+                Ok(paths)
+            }
         }
     }
 
@@ -216,19 +264,25 @@ impl Comparison {
                     diff.local.resolve()?,
                 ))
             }
-            Self::Merge(paths) => Ok(Self::Merge(MergePaths {
-                base: resolve_input(&paths.base)?,
-                local: resolve_input(&paths.local)?,
-                incoming: resolve_input(&paths.incoming)?,
-                result: resolve_result(&paths.result)?,
-            })),
+            Self::Merge(merge) => {
+                if merge.inputs().iter().any(|input| input.editable()) {
+                    return Err("merge inputs must be read-only".into());
+                }
+
+                Ok(Self::Merge(Box::new(MergeComparison {
+                    base: merge.base.resolve()?,
+                    local: merge.local.resolve()?,
+                    incoming: merge.incoming.resolve()?,
+                    result: resolve_result(&merge.result)?,
+                })))
+            }
         }
     }
 
     pub fn target(&self) -> &Path {
         match self {
             Self::Diff(diff) => diff.local.logical_path(),
-            Self::Merge(paths) => &paths.result,
+            Self::Merge(merge) => &merge.result,
         }
     }
 
@@ -241,12 +295,12 @@ impl Comparison {
                     diff.local.logical_path().display()
                 )
             }
-            Self::Merge(paths) => format!(
+            Self::Merge(merge) => format!(
                 "Base: {}\nLocal: {}\nIncoming: {}\nResult: {}",
-                paths.base.display(),
-                paths.local.display(),
-                paths.incoming.display(),
-                paths.result.display(),
+                merge.base.logical_path().display(),
+                merge.local.logical_path().display(),
+                merge.incoming.logical_path().display(),
+                merge.result.display(),
             ),
         }
     }
@@ -254,11 +308,11 @@ impl Comparison {
     pub fn qualifier(&self) -> String {
         match self {
             Self::Diff(diff) => diff.baseline.logical_path().display().to_string(),
-            Self::Merge(paths) => format!(
+            Self::Merge(merge) => format!(
                 "merge {} + {} (base {})",
-                paths.local.display(),
-                paths.incoming.display(),
-                paths.base.display(),
+                merge.local.logical_path().display(),
+                merge.incoming.logical_path().display(),
+                merge.base.logical_path().display(),
             ),
         }
     }

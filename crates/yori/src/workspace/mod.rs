@@ -106,6 +106,8 @@ struct ComparisonTab {
     files: files::Files,
     message: Option<String>,
     word_wrap: TabWordWrap,
+    /// Invocations waiting for this tab to close; dropping them reports back.
+    waiters: Vec<crate::instance::Completion>,
 }
 
 enum OpenTab {
@@ -189,6 +191,7 @@ impl Workspace {
                 }
                 if !this.has_modified_tabs(cx) {
                     crate::window_placement::persist(window, cx);
+                    this.release_waiters();
                     return true;
                 }
 
@@ -334,6 +337,30 @@ impl Workspace {
         self.open_comparisons(&invocation.comparisons, window, cx)
     }
 
+    /// Keep `completion` until the open tab for `comparison` closes. The tab
+    /// reports whether it saved during that time.
+    pub(super) fn wait_for_close(
+        &mut self,
+        comparison: &Comparison,
+        completion: crate::instance::Completion,
+    ) -> Result<(), String> {
+        let identity = TabIdentity::Comparison(comparison.resolve()?);
+        let id = self
+            .tabs
+            .find(&identity)
+            .ok_or("the requested comparison is not open")?;
+        let tab = self
+            .tabs
+            .entries
+            .iter_mut()
+            .find(|tab| tab.id == id)
+            .and_then(|tab| tab.content.comparison_mut())
+            .expect("a comparison identity belongs to a comparison tab");
+
+        tab.waiters.push(completion);
+        Ok(())
+    }
+
     /// Completion means every comparison was loaded or rejected, not just queued;
     /// temporary files can then be released.
     fn open_comparisons(
@@ -439,6 +466,7 @@ impl Workspace {
                 files,
                 message: None,
                 word_wrap: TabWordWrap::new(self.global_word_wrap.enabled()),
+                waiters: Vec::new(),
             }),
         );
         self.selection = WorkspaceSelection::Work;
@@ -502,7 +530,16 @@ impl Workspace {
                         | ReviewChanged::ActiveEditorChanged {
                             transfer_focus: false,
                         }
-                        | ReviewChanged::WordWrapChanged { .. } => {}
+                        | ReviewChanged::WordWrapChanged { .. }
+                        | ReviewChanged::MergeRequested(_) => {}
+                    }
+                }
+
+                if let ReviewChanged::MergeRequested(merge) = event {
+                    let merge = Comparison::Merge(merge.clone());
+                    match this.open_comparison(&merge, window, cx) {
+                        Ok(()) => this.focus_active(window, cx),
+                        Err(error) => window.push_notification(Notification::error(error), cx),
                     }
                 }
 
@@ -1006,9 +1043,20 @@ impl Workspace {
             .requires_discard_confirmation(None, |tab| tab.needs_save(cx))
     }
 
+    /// Answer every waiting invocation now. The process quits with its window,
+    /// and waiting tools should hear back before it does.
+    fn release_waiters(&mut self) {
+        for tab in &mut self.tabs.entries {
+            if let Some(comparison) = tab.content.comparison_mut() {
+                comparison.waiters.clear();
+            }
+        }
+    }
+
     fn close(&mut self, target: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = target else {
             crate::window_placement::persist(window, cx);
+            self.release_waiters();
             window.defer(cx, |window, _| window.remove_window());
             return;
         };
@@ -1478,7 +1526,7 @@ async fn choose_paths(
         .map_err(|error| error.to_string())?;
 
     Ok(result.map(|result| {
-        Comparison::Merge(MergePaths {
+        Comparison::from(MergePaths {
             base,
             local,
             incoming,

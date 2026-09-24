@@ -1,7 +1,8 @@
 //! Cross-platform single-instance ownership and acknowledged file handoff.
 //!
 //! The first process owns a local socket name. Later invocations connect to it
-//! and exit only after the workspace acknowledges the request.
+//! and exit only after the workspace acknowledges the request. A waiting
+//! invocation also stays connected until its tab closes.
 
 mod protocol;
 
@@ -10,6 +11,8 @@ mod tests;
 
 use std::{
     io,
+    path::Path,
+    process::{Child, Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -29,7 +32,7 @@ use interprocess::{
 
 use crate::invocation::InvocationRequest;
 
-const INSTANCE_NAME: &str = "io.github.trixnz.yori.instance.v2";
+const INSTANCE_NAME: &str = "io.github.trixnz.yori.instance.v3";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ELECTION_RETRY_INTERVAL: Duration = Duration::from_millis(10);
@@ -53,16 +56,54 @@ enum HandoffError {
     Failed(String),
 }
 
+/// Reports to a waiting invocation when the tab it opened goes away. Dropping
+/// it is the report, so every path that disposes of a tab also answers.
+pub(crate) struct Completion {
+    reply: mpsc::SyncSender<bool>,
+    saved: bool,
+}
+
+impl Completion {
+    pub fn mark_saved(&mut self) {
+        self.saved = true;
+    }
+
+    #[cfg(test)]
+    pub fn channel() -> (Self, mpsc::Receiver<bool>) {
+        let (reply, finished) = mpsc::sync_channel(1);
+
+        (
+            Self {
+                reply,
+                saved: false,
+            },
+            finished,
+        )
+    }
+}
+
+impl Drop for Completion {
+    fn drop(&mut self) {
+        let _ = self.reply.try_send(self.saved);
+    }
+}
+
 pub(super) struct OpenRequest {
     pub invocation: InvocationRequest,
     received: Instant,
     reply: mpsc::SyncSender<Result<(), String>>,
+    completion: Option<Completion>,
 }
 
 impl OpenRequest {
     /// Don't apply a request which sat in the UI queue beyond the client timeout.
     pub fn expired(&self) -> bool {
         self.received.elapsed() >= REQUEST_TIMEOUT
+    }
+
+    /// The report for a waiting request; attach it to the opened tab.
+    pub fn take_completion(&mut self) -> Option<Completion> {
+        self.completion.take()
     }
 
     pub fn complete(self, result: Result<(), String>) {
@@ -102,8 +143,66 @@ impl Instance {
     /// Return the primary instance, or `None` after a successful handoff. Failure
     /// never falls back to a second window: a timed-out request may have started.
     pub fn start(invocation: &InvocationRequest) -> Result<Option<Self>, String> {
-        let name = std::env::var("YORI_INSTANCE_NAME").unwrap_or_else(|_| INSTANCE_NAME.into());
-        Self::establish(&name, invocation)
+        Self::establish(&instance_name(), invocation)
+    }
+
+    /// Hand a waiting invocation to the running workspace, starting a detached
+    /// one when none runs, and return whether the opened tab saved before it
+    /// closed. The waiting process never owns the workspace: closing a tab must
+    /// not end a window that later tabs share.
+    pub fn wait(
+        invocation: &InvocationRequest
+    ) -> Result<bool, String> {
+        let mut owner: Option<Child> = None;
+        
+        Self::wait_with_owner(&instance_name(), invocation, || {
+            if let Some(child) = &mut owner {
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Err(format!("yori exited during startup: {status}"));
+                }
+                return Ok(());
+            }
+            
+            owner = Some(spawn_owner(&invocation.directory)?);
+        
+            Ok(())
+        })
+    }
+
+    fn wait_with_owner(
+        name: &str,
+        invocation: &InvocationRequest,
+        mut start_owner: impl FnMut() -> Result<(), String>,
+    ) -> Result<bool, String> {
+        let started = Instant::now();
+        let mut owner_started = false;
+
+        let mut stream = loop {
+            match Self::handoff(name, invocation) {
+                Ok(stream) => break stream,
+                Err(HandoffError::OwnerUnavailable(_)) if started.elapsed() < REQUEST_TIMEOUT => {
+                    if !owner_started {
+                        start_owner()?;
+                        owner_started = true;
+                    }
+
+                    thread::sleep(ELECTION_RETRY_INTERVAL);
+                }
+                Err(HandoffError::OwnerUnavailable(error)) => {
+                    return Err(format!("cannot connect to yori: {error}"));
+                }
+                Err(HandoffError::Failed(error)) => return Err(error),
+            }
+        };
+
+        // Editing takes as long as it takes; only the handoff itself is timed.
+        #[cfg(not(windows))]
+        stream
+            .set_recv_timeout(None)
+            .map_err(|error| format!("cannot configure local socket timeout: {error}"))?;
+
+        protocol::read_completion(&mut stream)
+            .map_err(|error| format!("yori closed before the tab finished: {error}"))
     }
 
     fn establish(name: &str, invocation: &InvocationRequest) -> Result<Option<Self>, String> {
@@ -133,7 +232,7 @@ impl Instance {
                 Err(error) if socket_name_is_occupied(&error) => {
                     before_handoff();
                     match Self::handoff(name, invocation) {
-                        Ok(()) => return Ok(None),
+                        Ok(_) => return Ok(None),
                         Err(HandoffError::OwnerUnavailable(_))
                             if election_started.elapsed() < REQUEST_TIMEOUT =>
                         {
@@ -181,7 +280,8 @@ impl Instance {
         }))
     }
 
-    fn handoff(name: &str, invocation: &InvocationRequest) -> Result<(), HandoffError> {
+    /// Send `invocation` and return the stream after the workspace accepts it.
+    fn handoff(name: &str, invocation: &InvocationRequest) -> Result<Stream, HandoffError> {
         let socket_name = name.to_ns_name::<GenericNamespaced>().map_err(|error| {
             HandoffError::Failed(format!("invalid yori instance name: {error}"))
         })?;
@@ -198,7 +298,9 @@ impl Instance {
         })?;
         protocol::read_response(&mut stream).map_err(|error| {
             HandoffError::Failed(format!("handoff to running yori failed: {error}"))
-        })
+        })?;
+
+        Ok(stream)
     }
 
     pub async fn next(&self) -> Result<OpenRequest, async_channel::RecvError> {
@@ -231,9 +333,8 @@ fn accept_requests(
                 let result = thread::Builder::new()
                     .name("yori-instance-request".into())
                     .spawn(move || {
-                        let _permit = permit;
                         let mut stream = stream;
-                        handle_request(&mut stream, &requests);
+                        handle_request(&mut stream, &requests, permit);
                     });
                 if let Err(error) = result {
                     eprintln!("yori: cannot handle local request: {error}");
@@ -250,7 +351,7 @@ fn accept_requests(
     }
 }
 
-fn handle_request(stream: &mut Stream, requests: &Sender<OpenRequest>) {
+fn handle_request(stream: &mut Stream, requests: &Sender<OpenRequest>, permit: ConnectionPermit) {
     #[cfg(not(windows))]
     if let Err(error) = configure_timeouts(stream) {
         let _ = protocol::write_response(stream, Err(error));
@@ -264,12 +365,33 @@ fn handle_request(stream: &mut Stream, requests: &Sender<OpenRequest>) {
             return;
         }
     };
+    if invocation.wait && invocation.comparisons.len() != 1 {
+        let _ = protocol::write_response(
+            stream,
+            Err("a waiting request must open exactly one comparison".into()),
+        );
+        return;
+    }
+
     let (reply, response) = mpsc::sync_channel(1);
+    let (completion, finished) = if invocation.wait {
+        let (reply, finished) = mpsc::sync_channel(1);
+        (
+            Some(Completion {
+                reply,
+                saved: false,
+            }),
+            Some(finished),
+        )
+    } else {
+        (None, None)
+    };
     if requests
         .try_send(OpenRequest {
             invocation,
             received: Instant::now(),
             reply,
+            completion,
         })
         .is_err()
     {
@@ -291,7 +413,65 @@ fn handle_request(stream: &mut Stream, requests: &Sender<OpenRequest>) {
             Err("yori closed before opening the comparison".into())
         }
     };
-    let _ = protocol::write_response(stream, result);
+    let accepted = result.is_ok();
+    if protocol::write_response(stream, result).is_err() || !accepted {
+        return;
+    }
+
+    let Some(finished) = finished else {
+        return;
+    };
+
+    // A waiting connection lasts as long as its tab. It no longer counts as a
+    // pending request, so open tabs cannot exhaust the connection limit.
+    drop(permit);
+
+    #[cfg(not(windows))]
+    if stream.set_send_timeout(None).is_err() {
+        return;
+    }
+
+    // A closed workspace drops its completions; report that as unsaved.
+    let saved = finished.recv().unwrap_or(false);
+    let _ = protocol::write_completion(stream, saved);
+}
+
+/// Start a detached workspace owner without the waiting invocation's own
+/// console or standard streams.
+fn spawn_owner(directory: &Path) -> Result<Child, String> {
+    let program =
+        std::env::current_exe().map_err(|error| format!("cannot locate yori: {error}"))?;
+    let mut command = Command::new(program);
+    command
+        .current_dir(directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+
+    // Interrupting the waiting tool must not end the shared workspace.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        command.process_group(0);
+    }
+
+    command
+        .spawn()
+        .map_err(|error| format!("cannot start yori: {error}"))
+}
+
+fn instance_name() -> String {
+    std::env::var("YORI_INSTANCE_NAME").unwrap_or_else(|_| INSTANCE_NAME.into())
 }
 
 #[cfg(not(windows))]

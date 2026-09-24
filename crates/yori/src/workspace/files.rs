@@ -61,11 +61,11 @@ impl Files {
                 files.load_document(Role::Baseline, &diff.baseline)?;
                 files.load_document(Role::Local, &diff.local)?;
             }
-            Comparison::Merge(paths) => {
-                files.load_file_document(Role::Base, &paths.base, false)?;
-                files.load_file_document(Role::Local, &paths.local, false)?;
-                files.load_file_document(Role::Incoming, &paths.incoming, false)?;
-                files.track_destination(Role::Result, &paths.result)?;
+            Comparison::Merge(merge) => {
+                files.load_document(Role::Base, &merge.base)?;
+                files.load_document(Role::Local, &merge.local)?;
+                files.load_document(Role::Incoming, &merge.incoming)?;
+                files.track_destination(Role::Result, &merge.result)?;
             }
         }
 

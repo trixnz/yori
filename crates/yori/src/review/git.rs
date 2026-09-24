@@ -14,11 +14,11 @@ use gix::{
     status::{Item as StatusItem, UntrackedFiles, index_worktree, tree_index},
 };
 
-use crate::comparison::ComparisonDocument;
+use crate::comparison::{ComparisonDocument, MergeComparison};
 
 use super::model::{
-    ReviewFile, ReviewFileIdentity, ReviewFileStatus, ReviewManifest, ReviewProvider, ReviewSource,
-    ReviewSourceIdentity, TextComparison,
+    ReviewConflict, ReviewFile, ReviewFileIdentity, ReviewFileStatus, ReviewManifest,
+    ReviewProvider, ReviewSource, ReviewSourceIdentity, TextComparison,
 };
 
 const RECENT_COMMIT_LIMIT: usize = 20;
@@ -264,6 +264,10 @@ impl Snapshot {
         }
     }
 
+    fn is_link(&self) -> bool {
+        matches!(self, Self::Blob { mode, .. } if mode.is_link())
+    }
+
     fn is_physical_symlink(&self) -> bool {
         matches!(
             self,
@@ -364,11 +368,29 @@ fn working_manifest(repository: &gix::Repository) -> Result<ReviewManifest, Stri
         .index_or_empty()
         .map_err(|error| format!("cannot read the Git index: {error}"))?;
 
-    let (candidates, rename_hints) = working_candidates(repository)?;
+    let (mut candidates, rename_hints) = working_candidates(repository)?;
+    let mut conflicts = index_conflicts(repository, &index)?;
+    candidates.extend(conflicts.keys().cloned());
+
     let mut changes = BTreeMap::new();
+    let mut files = Vec::new();
     for path in candidates {
         let old = tree_snapshot(repository, &baseline_tree, &path)?;
         let new = worktree_snapshot(repository, work_dir, &index, &path, old.as_ref())?;
+
+        if let Some(stages) = conflicts.remove(&path) {
+            let conflict = stages.conflict(work_dir, &path);
+            let file = working_file(
+                work_dir,
+                path,
+                ReviewFileStatus::Conflicted,
+                old.as_ref(),
+                new.as_ref(),
+            )?;
+
+            files.push(file.with_conflict(conflict));
+            continue;
+        }
 
         if old == new && !matches!(old, Some(Snapshot::Submodule { .. })) {
             continue;
@@ -379,7 +401,6 @@ fn working_manifest(repository: &gix::Repository) -> Result<ReviewManifest, Stri
 
     let rename_pairs = reconcile_renames(&changes, rename_hints);
     let mut consumed = BTreeSet::new();
-    let mut files = Vec::new();
     for (destination, source) in rename_pairs {
         let Some(old) = changes.get(&source).and_then(|change| change.old.clone()) else {
             continue;
@@ -464,6 +485,85 @@ fn reconcile_renames(
                     .is_some_and(|change| change.old.is_some() && change.new.is_none())
         })
         .collect()
+}
+
+#[derive(Debug, Default)]
+struct ConflictStages {
+    base: Option<Snapshot>,
+    ours: Option<Snapshot>,
+    theirs: Option<Snapshot>,
+}
+
+impl ConflictStages {
+    fn conflict(self, work_dir: &Path, path: &Path) -> ReviewConflict {
+        let (Some(ours), Some(theirs)) = (&self.ours, &self.theirs) else {
+            return ReviewConflict::unmergeable(
+                "One side deleted this file, so it has no three-way merge. Keep or remove the file, then mark it resolved in Git.",
+            );
+        };
+        let stages = [self.base.as_ref(), Some(ours), Some(theirs)];
+        let present = || stages.into_iter().flatten();
+
+        if present().any(|stage| stage.submodule_id().is_some()) {
+            return ReviewConflict::unmergeable(
+                "Submodule conflicts cannot be merged as text. Choose a commit, then mark it resolved in Git.",
+            );
+        }
+        if present().any(Snapshot::is_link) {
+            return ReviewConflict::unmergeable(
+                "Symbolic link conflicts cannot be merged as text. Choose a target, then mark it resolved in Git.",
+            );
+        }
+        if present().any(Snapshot::is_binary) {
+            return ReviewConflict::unmergeable(
+                "Binary conflicts cannot be merged as text. Choose a version, then mark it resolved in Git.",
+            );
+        }
+
+        let destination = work_dir.join(path);
+        let input = |stage: Option<&Snapshot>| {
+            let bytes = stage.and_then(Snapshot::bytes).unwrap_or_default().to_vec();
+
+            ComparisonDocument::read_only_memory(destination.clone(), bytes)
+        };
+
+        ReviewConflict::Mergeable(Box::new(MergeComparison {
+            base: input(self.base.as_ref()),
+            local: input(Some(ours)),
+            incoming: input(Some(theirs)),
+            result: destination.clone(),
+        }))
+    }
+}
+
+fn index_conflicts(
+    repository: &gix::Repository,
+    index: &gix::worktree::Index,
+) -> Result<BTreeMap<PathBuf, ConflictStages>, String> {
+    let mut conflicts = BTreeMap::<PathBuf, ConflictStages>::new();
+    for entry in index.entries() {
+        let stage = entry.stage();
+        if stage == gix::index::entry::Stage::Unconflicted {
+            continue;
+        }
+
+        let path = git_path(entry.path(index))?;
+        let mode = entry
+            .mode
+            .to_tree_entry_mode()
+            .ok_or_else(|| format!("unsupported Git file mode {:?}", entry.mode))?;
+        let snapshot = snapshot_from_tree_entry(repository, mode, entry.id)?;
+
+        let stages = conflicts.entry(path).or_default();
+        match stage {
+            gix::index::entry::Stage::Base => stages.base = Some(snapshot),
+            gix::index::entry::Stage::Ours => stages.ours = Some(snapshot),
+            gix::index::entry::Stage::Theirs => stages.theirs = Some(snapshot),
+            gix::index::entry::Stage::Unconflicted => unreachable!("skipped above"),
+        }
+    }
+
+    Ok(conflicts)
 }
 
 fn working_file(
@@ -847,7 +947,7 @@ mod tests {
 
     use gix::{
         bstr::ByteSlice,
-        index::entry::{Flags, Mode, Stat},
+        index::entry::{Flags, Mode, Stage, Stat},
         objs::{Tree, tree::Entry},
     };
     use tempfile::TempDir;
@@ -1448,5 +1548,150 @@ mod tests {
         assert!(error.contains("Merge commit"));
         assert!(error.contains("Parent selection is not supported"));
         assert!(repository.commit_source("does-not-exist").is_err());
+    }
+
+    /// The blob contents that each conflict stage records for one path.
+    type ConflictStageBytes<'a> = &'a [(Stage, &'a [u8])];
+
+    /// Replace each path's stage-0 entry with the given conflict stages.
+    fn write_conflicts(fixture: &RepositoryFixture, conflicts: &[(&str, ConflictStageBytes<'_>)]) {
+        let mut index = fixture.repository.index_from_tree(&fixture.tree).unwrap();
+        for (path, stages) in conflicts {
+            if let Ok(entry) = index.entry_index_by_path(path.as_bytes().as_bstr()) {
+                index.remove_entry_at_index(entry);
+            }
+
+            for (stage, bytes) in *stages {
+                let id = fixture.repository.write_blob(bytes).unwrap().detach();
+                index.dangerously_push_entry(
+                    Stat::default(),
+                    id,
+                    Flags::from_stage(*stage),
+                    Mode::FILE,
+                    path.as_bytes().as_bstr(),
+                );
+            }
+        }
+
+        index.sort_entries();
+        index.write(gix::index::write::Options::default()).unwrap();
+    }
+
+    fn mergeable(file: &ReviewFile) -> [&[u8]; 3] {
+        let Some(ReviewConflict::Mergeable(merge)) = &file.conflict else {
+            panic!("expected a mergeable conflict, found {:?}", file.conflict);
+        };
+
+        merge.inputs().map(|input| {
+            let DocumentContent::Memory(bytes) = input.content() else {
+                panic!("expected an in-memory merge input");
+            };
+            assert!(!input.editable());
+
+            &**bytes
+        })
+    }
+
+    #[test]
+    fn working_manifest_reports_index_conflicts_with_their_merge_inputs() {
+        let fixture = RepositoryFixture::committed(&[
+            ("both.txt", b"ours\n"),
+            ("same.txt", b"head\n"),
+            ("gone.txt", b"ours\n"),
+            ("logo.bin", b"ours\0"),
+            ("clean.txt", b"clean\n"),
+        ]);
+        fixture.write_worktree(&[
+            (
+                "both.txt",
+                b"<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n",
+            ),
+            (
+                "added.txt",
+                b"<<<<<<< ours\nmine\n=======\nyours\n>>>>>>> theirs\n",
+            ),
+        ]);
+        write_conflicts(
+            &fixture,
+            &[
+                (
+                    "both.txt",
+                    &[
+                        (Stage::Base, b"base\n"),
+                        (Stage::Ours, b"ours\n"),
+                        (Stage::Theirs, b"theirs\n"),
+                    ],
+                ),
+                (
+                    "same.txt",
+                    &[
+                        (Stage::Base, b"base\n"),
+                        (Stage::Ours, b"head\n"),
+                        (Stage::Theirs, b"theirs\n"),
+                    ],
+                ),
+                (
+                    "added.txt",
+                    &[(Stage::Ours, b"mine\n"), (Stage::Theirs, b"yours\n")],
+                ),
+                (
+                    "gone.txt",
+                    &[(Stage::Base, b"base\n"), (Stage::Ours, b"ours\n")],
+                ),
+                (
+                    "logo.bin",
+                    &[
+                        (Stage::Base, b"base\0"),
+                        (Stage::Ours, b"ours\0"),
+                        (Stage::Theirs, b"theirs\0"),
+                    ],
+                ),
+            ],
+        );
+
+        let manifest = load(&fixture.discovered().working_source());
+        let files = by_path(&manifest);
+
+        assert!(!files.contains_key("clean.txt"));
+        for path in ["both.txt", "same.txt", "added.txt", "gone.txt", "logo.bin"] {
+            assert_eq!(files[path].status, ReviewFileStatus::Conflicted, "{path}");
+        }
+
+        // The review still compares HEAD with the working file and its markers.
+        let (baseline, local, editable, saveable) = text_bytes(files["both.txt"]);
+        assert_eq!(baseline, b"ours\n");
+        assert!(local.starts_with(b"<<<<<<< ours\n"));
+        assert!(editable && saveable);
+
+        assert_eq!(
+            mergeable(files["both.txt"]),
+            [b"base\n".as_slice(), b"ours\n", b"theirs\n"]
+        );
+        let Some(ReviewConflict::Mergeable(merge)) = &files["both.txt"].conflict else {
+            unreachable!();
+        };
+        assert_eq!(
+            merge.result,
+            fixture.root.canonicalize().unwrap().join("both.txt")
+        );
+
+        // A working file equal to HEAD is still unresolved in the index.
+        assert_eq!(
+            mergeable(files["same.txt"]),
+            [b"base\n".as_slice(), b"head\n", b"theirs\n"]
+        );
+
+        // Add/add conflicts merge against an empty base.
+        assert_eq!(
+            mergeable(files["added.txt"]),
+            [b"".as_slice(), b"mine\n", b"yours\n"]
+        );
+
+        for (path, reason) in [("gone.txt", "deleted"), ("logo.bin", "Binary")] {
+            let Some(ReviewConflict::Unmergeable { reason: actual }) = &files[path].conflict else {
+                panic!("{path} should not be mergeable");
+            };
+            assert!(actual.contains(reason), "{path}: {actual}");
+        }
     }
 }

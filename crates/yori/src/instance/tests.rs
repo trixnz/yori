@@ -274,3 +274,90 @@ fn protocol_rejects_invalid_requests_before_dispatch() {
     let oversized = u32::MAX.to_le_bytes();
     assert!(protocol::read_request(&mut oversized.as_slice()).is_err());
 }
+
+fn waiting_merge(directory: &Path) -> InvocationRequest {
+    let paths =
+        ["base.rs", "local.rs", "incoming.rs", "result.rs"].map(|name| directory.join(name));
+
+    invocation(vec![Comparison::from_paths(&paths).unwrap()]).waiting()
+}
+
+#[test]
+fn waiting_invocation_returns_when_its_tab_reports_the_save_outcome() {
+    let directory = tempfile::tempdir().unwrap();
+
+    for saved in [true, false] {
+        let name = instance_name();
+        let primary = Instance::establish(&name, &invocation(Vec::new()))
+            .unwrap()
+            .unwrap();
+        let forwarded = waiting_merge(directory.path());
+        let client = thread::spawn(move || {
+            Instance::wait_with_owner(&name, &forwarded, || {
+                panic!("a running owner needs no replacement")
+            })
+        });
+
+        let mut request = receive_request(&primary);
+        assert!(request.invocation.wait);
+        let mut completion = request.take_completion().expect("waiting request");
+        request.complete(Ok(()));
+
+        // The acknowledged connection waits for the tab, outside the pending limit.
+        wait_for_connection_count(&primary, 0);
+        thread::sleep(Duration::from_millis(30));
+        assert!(!client.is_finished(), "the tab is still open");
+
+        if saved {
+            completion.mark_saved();
+        }
+        drop(completion);
+
+        assert_eq!(client.join().unwrap(), Ok(saved));
+    }
+}
+
+#[test]
+fn waiting_invocation_starts_a_detached_owner_when_none_runs() {
+    let name = instance_name();
+    let directory = tempfile::tempdir().unwrap();
+    let forwarded = waiting_merge(directory.path());
+    let owner_name = name.clone();
+    let (owners, started) = mpsc::channel();
+    let client = thread::spawn(move || {
+        let mut starts = 0;
+        let result = Instance::wait_with_owner(&name, &forwarded, || {
+            starts += 1;
+            let owner = Instance::establish(&owner_name, &invocation(Vec::new()))?
+                .ok_or("the test owner must claim the name")?;
+            owners.send(owner).unwrap();
+
+            Ok(())
+        });
+
+        (starts, result)
+    });
+
+    let owner = started.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut request = receive_request(&owner);
+    let completion = request.take_completion().expect("waiting request");
+    request.complete(Ok(()));
+    drop(completion);
+
+    assert_eq!(client.join().unwrap(), (1, Ok(false)));
+}
+
+#[test]
+fn waiting_requests_must_open_exactly_one_comparison() {
+    let name = instance_name();
+    let _primary = Instance::establish(&name, &invocation(Vec::new()))
+        .unwrap()
+        .unwrap();
+
+    let error = Instance::wait_with_owner(&name, &invocation(Vec::new()).waiting(), || {
+        panic!("a running owner needs no replacement")
+    })
+    .unwrap_err();
+
+    assert!(error.contains("exactly one comparison"));
+}

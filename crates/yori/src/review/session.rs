@@ -24,7 +24,7 @@ use gpui_kit::{
 use yori::document_info::path_labels;
 
 use crate::{
-    comparison::Comparison,
+    comparison::{Comparison, MergeComparison},
     editor::{
         AlignedEditor, DirtyChanged, PaneDocument, PaneFocusBoundary, ToggleWordWrap, WordWrap,
         WordWrapChanged,
@@ -34,8 +34,8 @@ use crate::{
 };
 
 use super::model::{
-    DiffStat, ReviewFile, ReviewFileIdentity, ReviewFileKind, ReviewManifest, ReviewSource,
-    TextComparison,
+    DiffStat, ReviewConflict, ReviewFile, ReviewFileIdentity, ReviewFileKind, ReviewManifest,
+    ReviewSource, TextComparison,
 };
 
 const NAVIGATOR_KEY_CONTEXT: &str = "ReviewNavigator";
@@ -53,9 +53,17 @@ gpui_kit::actions!(
 
 pub(crate) enum ReviewChanged {
     State,
-    RefreshCompleted { activate: bool },
-    ActiveEditorChanged { transfer_focus: bool },
-    WordWrapChanged { enabled: bool },
+    RefreshCompleted {
+        activate: bool,
+    },
+    ActiveEditorChanged {
+        transfer_focus: bool,
+    },
+    WordWrapChanged {
+        enabled: bool,
+    },
+    /// The user asked to reconcile a conflicted file in a three-way merge tab.
+    MergeRequested(Box<MergeComparison>),
 }
 
 impl EventEmitter<ReviewChanged> for ReviewSession {}
@@ -1086,7 +1094,8 @@ impl ReviewSession {
         let badge_color = match &entry.file.status {
             super::model::ReviewFileStatus::Added => cx.theme().success,
             super::model::ReviewFileStatus::Modified => cx.theme().warning,
-            super::model::ReviewFileStatus::Deleted => cx.theme().danger,
+            super::model::ReviewFileStatus::Deleted
+            | super::model::ReviewFileStatus::Conflicted => cx.theme().danger,
             super::model::ReviewFileStatus::Renamed { .. } => cx.theme().info,
         };
         let accessible_label = format!(
@@ -1382,6 +1391,51 @@ impl ReviewSession {
                 .into_any_element(),
         }
     }
+
+    fn render_conflict(
+        conflict: &ReviewConflict,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let merge = conflict.merge();
+        let (detail, tooltip) = match conflict {
+            ReviewConflict::Mergeable(_) => (
+                "This file has an unresolved merge conflict. Saving the merge result does not mark it resolved in Git.".to_owned(),
+                "Open base, local and incoming versions in a three-way merge".to_owned(),
+            ),
+            ReviewConflict::Unmergeable { reason } => (
+                format!("This file has an unresolved merge conflict. {reason}"),
+                "This conflict cannot be merged as text".to_owned(),
+            ),
+        };
+
+        div()
+            .id("review-file-conflict")
+            .test_support()
+            .flex_shrink_0()
+            .px(px(12.0))
+            .py(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().muted)
+            .aria_label(detail.clone())
+            .child(div().flex_1().min_w_0().child(detail))
+            .child(
+                Button::new("start-conflict-merge")
+                    .label("Start three-way merge")
+                    .small()
+                    .primary()
+                    .disabled(merge.is_none())
+                    .tooltip(tooltip)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        if let Some(merge) = merge.clone() {
+                            cx.emit(ReviewChanged::MergeRequested(merge));
+                        }
+                    })),
+            )
+    }
 }
 
 impl Render for ReviewSession {
@@ -1391,6 +1445,10 @@ impl Render for ReviewSession {
             .selected_entry()
             .and_then(|entry| entry.warning.as_ref())
             .map(|warning| warning.detail().to_owned());
+        let conflict = self
+            .selected_entry()
+            .and_then(|entry| entry.file.conflict.clone())
+            .map(|conflict| Self::render_conflict(&conflict, cx));
         let non_text_body = self.selected_is_non_text();
         let body = self.render_body(cx);
 
@@ -1431,6 +1489,7 @@ impl Render for ReviewSession {
                             .aria_label(warning.clone())
                             .child(warning)
                     }))
+                    .children(conflict)
                     .child(
                         div()
                             .id("review-file-body")

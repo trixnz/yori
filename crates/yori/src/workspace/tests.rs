@@ -12,14 +12,18 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Modifiers, TestAppContext, VisualTestContext, point, size};
 use std::path::Path;
 
-fn merge_paths(result: &str) -> Comparison {
+fn fixture_merge_paths(result: &str) -> MergePaths {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/merge");
-    Comparison::Merge(MergePaths {
+    MergePaths {
         base: fixtures.join("base.rs"),
         local: fixtures.join("local.rs"),
         incoming: fixtures.join("incoming.rs"),
         result: fixtures.join(result),
-    })
+    }
+}
+
+fn merge_paths(result: &str) -> Comparison {
+    fixture_merge_paths(result).into()
 }
 
 fn harness(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
