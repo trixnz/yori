@@ -327,6 +327,10 @@ fn waiting_invocation_starts_a_detached_owner_when_none_runs() {
     let client = thread::spawn(move || {
         let mut starts = 0;
         let result = Instance::wait_with_owner(&name, &forwarded, || {
+            if starts > 0 {
+                return Ok(());
+            }
+
             starts += 1;
             let owner = Instance::establish(&owner_name, &invocation(Vec::new()))?
                 .ok_or("the test owner must claim the name")?;

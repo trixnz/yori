@@ -150,42 +150,41 @@ impl Instance {
     /// one when none runs, and return whether the opened tab saved before it
     /// closed. The waiting process never owns the workspace: closing a tab must
     /// not end a window that later tabs share.
-    pub fn wait(
-        invocation: &InvocationRequest
-    ) -> Result<bool, String> {
+    pub fn wait(invocation: &InvocationRequest) -> Result<bool, String> {
         let mut owner: Option<Child> = None;
-        
+
         Self::wait_with_owner(&instance_name(), invocation, || {
+            // A successful exit means another process won the election.
             if let Some(child) = &mut owner {
-                if let Ok(Some(status)) = child.try_wait() {
+                if let Ok(Some(status)) = child.try_wait()
+                    && !status.success()
+                {
                     return Err(format!("yori exited during startup: {status}"));
                 }
+
                 return Ok(());
             }
-            
+
             owner = Some(spawn_owner(&invocation.directory)?);
-        
+
             Ok(())
         })
     }
 
+    /// Hand off a waiting invocation, calling `ensure_owner` on each retry
+    /// while no owner accepts the connection.
     fn wait_with_owner(
         name: &str,
         invocation: &InvocationRequest,
-        mut start_owner: impl FnMut() -> Result<(), String>,
+        mut ensure_owner: impl FnMut() -> Result<(), String>,
     ) -> Result<bool, String> {
         let started = Instant::now();
-        let mut owner_started = false;
 
         let mut stream = loop {
             match Self::handoff(name, invocation) {
                 Ok(stream) => break stream,
                 Err(HandoffError::OwnerUnavailable(_)) if started.elapsed() < REQUEST_TIMEOUT => {
-                    if !owner_started {
-                        start_owner()?;
-                        owner_started = true;
-                    }
-
+                    ensure_owner()?;
                     thread::sleep(ELECTION_RETRY_INTERVAL);
                 }
                 Err(HandoffError::OwnerUnavailable(error)) => {
