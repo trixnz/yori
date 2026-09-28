@@ -868,7 +868,7 @@ fn activation_refreshes_once_without_provider_polling(cx: &mut TestAppContext) {
     open_review(&workspace, source(provider.clone(), "activation"), cx);
 
     cx.executor()
-        .advance_clock(std::time::Duration::from_secs(60));
+        .advance_clock(std::time::Duration::from_mins(1));
     cx.run_until_parked();
     assert_eq!(provider.loads(), 1, "review sources must never be polled");
 
