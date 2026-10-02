@@ -11,7 +11,7 @@ use crate::{
     invocation::InvocationRequest,
 };
 
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 const MAX_COMPARISONS: usize = 128;
 const MAX_PATH_BYTES: usize = 1024 * 1024;
 const MAX_REQUEST_FRAME_BYTES: usize = MAX_PATH_BYTES + 64 * 1024;
@@ -40,12 +40,19 @@ struct WireRequest {
     version: u16,
     directory: WirePath,
     comparisons: Vec<WireComparison>,
+    wait: bool,
 }
 
 #[derive(Encode, Decode)]
 struct WireResponse {
     version: u16,
     error: Option<String>,
+}
+
+#[derive(Encode, Decode)]
+struct WireCompletion {
+    version: u16,
+    saved: bool,
 }
 
 pub(crate) fn write_request(
@@ -61,6 +68,7 @@ pub(crate) fn write_request(
             "invocation directory",
         )?,
         comparisons: encode_comparisons(&invocation.comparisons, &mut total_path_bytes)?,
+        wait: invocation.wait,
     };
 
     write_frame(writer, &bitcode::encode(&request), MAX_REQUEST_FRAME_BYTES)
@@ -85,7 +93,11 @@ pub(crate) fn read_request(reader: &mut impl Read) -> Result<InvocationRequest, 
     )?;
     let comparisons = decode_comparisons(request.comparisons, &mut total_path_bytes)?;
 
-    Ok(InvocationRequest::new(directory, comparisons))
+    Ok(InvocationRequest {
+        directory,
+        comparisons,
+        wait: request.wait,
+    })
 }
 
 pub(crate) fn write_response(
@@ -120,6 +132,32 @@ pub(crate) fn read_response(reader: &mut impl Read) -> Result<(), String> {
     }
 
     response.error.map_or(Ok(()), Err)
+}
+
+pub(crate) fn write_completion(writer: &mut impl Write, saved: bool) -> Result<(), String> {
+    let completion = WireCompletion {
+        version: VERSION,
+        saved,
+    };
+
+    write_frame(
+        writer,
+        &bitcode::encode(&completion),
+        MAX_RESPONSE_FRAME_BYTES,
+    )
+}
+
+pub(crate) fn read_completion(reader: &mut impl Read) -> Result<bool, String> {
+    let frame = read_frame(reader, MAX_RESPONSE_FRAME_BYTES)?;
+
+    let completion: WireCompletion = bitcode::decode(&frame)
+        .map_err(|error| format!("completion has invalid encoding: {error}"))?;
+
+    if completion.version != VERSION {
+        return Err("completion uses an unsupported protocol version".into());
+    }
+
+    Ok(completion.saved)
 }
 
 fn write_frame(writer: &mut impl Write, bytes: &[u8], limit: usize) -> Result<(), String> {
@@ -199,7 +237,7 @@ fn decode_comparisons(
                 local,
                 incoming,
                 result,
-            } => Ok(Comparison::Merge(MergePaths {
+            } => Ok(Comparison::from(MergePaths {
                 base: decode_path(&base, total_path_bytes, "file path")?,
                 local: decode_path(&local, total_path_bytes, "file path")?,
                 incoming: decode_path(&incoming, total_path_bytes, "file path")?,
@@ -319,6 +357,7 @@ mod tests {
             version,
             directory,
             comparisons: Vec::new(),
+            wait: false,
         };
         let mut frame = Vec::new();
         write_frame(
@@ -355,6 +394,26 @@ mod tests {
         write_request(&mut frame, &invocation).unwrap();
 
         assert_eq!(read_request(&mut frame.as_slice()).unwrap(), invocation);
+    }
+
+    #[test]
+    fn waiting_requests_round_trip_and_completion_reports_the_save_outcome() {
+        let directory = tempfile::tempdir().unwrap();
+        let invocation = InvocationRequest::new(directory.path().to_owned(), Vec::new()).waiting();
+        let mut frame = Vec::new();
+
+        write_request(&mut frame, &invocation).unwrap();
+        let decoded = read_request(&mut frame.as_slice()).unwrap();
+
+        assert!(decoded.wait);
+        assert_eq!(decoded, invocation);
+
+        for saved in [true, false] {
+            let mut frame = Vec::new();
+            write_completion(&mut frame, saved).unwrap();
+
+            assert_eq!(read_completion(&mut frame.as_slice()).unwrap(), saved);
+        }
     }
 
     #[test]

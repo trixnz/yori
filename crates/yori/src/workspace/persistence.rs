@@ -354,6 +354,10 @@ impl Workspace {
                         {
                             comparison.files.saved(&snapshot);
                             comparison.message = None;
+                            comparison
+                                .waiters
+                                .iter_mut()
+                                .for_each(crate::instance::Completion::mark_saved);
                         }
                         editor.update(cx, |editor, cx| editor.mark_saved(checkpoint, cx));
                         this.save_next(batch, None, window, cx);
@@ -601,6 +605,13 @@ impl Workspace {
             },
         );
         if let Some(tab) = self.tabs.entries.iter_mut().find(|tab| tab.id == id) {
+            // Waiting invocations belong to the tab, not to this editor instance.
+            let waiters = tab
+                .content
+                .comparison_mut()
+                .map(|comparison| std::mem::take(&mut comparison.waiters))
+                .unwrap_or_default();
+
             tab.content = OpenTab::Comparison(super::ComparisonTab {
                 editor,
                 _dirty_subscription: dirty_subscription,
@@ -608,6 +619,7 @@ impl Workspace {
                 files,
                 message: None,
                 word_wrap,
+                waiters,
             });
         }
 

@@ -60,17 +60,20 @@ impl AssetSource for AppAssets {
 }
 
 fn usage(program: &str) -> String {
-    format!("usage: {program} [<baseline> <local> | <base> <local> <incoming> <result>]")
+    format!(
+        "usage: {program} [[--wait] <baseline> <local> | [--wait] <base> <local> <incoming> <result>]"
+    )
 }
 
 fn load_invocation() -> Result<InvocationRequest, String> {
     let directory =
         env::current_dir().map_err(|error| format!("cannot read invocation directory: {error}"))?;
-    let mut args = env::args_os();
+    let mut args = env::args_os().peekable();
     let program = args
         .next()
         .and_then(|value| value.into_string().ok())
         .unwrap_or_else(|| "yori".to_owned());
+    let wait = args.next_if(|arg| arg.as_os_str() == "--wait").is_some();
     let paths = args
         .map(|path| {
             std::path::absolute(&path).map_err(|error| {
@@ -79,12 +82,38 @@ fn load_invocation() -> Result<InvocationRequest, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     if paths.is_empty() {
+        if wait {
+            return Err(usage(&program));
+        }
+
         return Ok(InvocationRequest::new(directory, Vec::new()));
     }
 
-    Comparison::from_paths(&paths)
+    let invocation = Comparison::from_paths(&paths)
         .map(|comparison| InvocationRequest::new(directory, vec![comparison]))
-        .map_err(|_| usage(&program))
+        .map_err(|_| usage(&program))?;
+
+    Ok(if wait {
+        invocation.waiting()
+    } else {
+        invocation
+    })
+}
+
+/// Run a `--wait` invocation to completion: exit 0 once the opened tab saved
+/// and closed, and 1 when it closed unsaved or the handoff failed.
+fn wait_for_tab(invocation: &InvocationRequest) -> ! {
+    match instance::Instance::wait(invocation) {
+        Ok(true) => process::exit(0),
+        Ok(false) => {
+            eprintln!("yori: the tab closed without saving");
+            process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("yori: {error}");
+            process::exit(1);
+        }
+    }
 }
 
 fn report_startup_diagnostic<C: AppContext>(window: gpui_kit::AnyWindowHandle, cx: &mut C) {
@@ -107,6 +136,26 @@ fn dispatch_invocation<C: AppContext>(
         .update(cx, |_, window, cx| {
             workspace.update(cx, |workspace, cx| {
                 workspace.handle_invocation(invocation, window, cx)
+            })
+        })
+        .unwrap_or_else(|error| Err(format!("yori's window closed: {error}")))
+}
+
+fn attach_completion<C: AppContext>(
+    window: gpui_kit::AnyWindowHandle,
+    workspace: &gpui_kit::Entity<Workspace>,
+    invocation: &InvocationRequest,
+    completion: instance::Completion,
+    cx: &mut C,
+) -> Result<(), String> {
+    let [comparison] = invocation.comparisons.as_slice() else {
+        return Err("a waiting request must open exactly one comparison".into());
+    };
+
+    window
+        .update(cx, |_, _, cx| {
+            workspace.update(cx, |workspace, _| {
+                workspace.wait_for_close(comparison, completion)
             })
         })
         .unwrap_or_else(|error| Err(format!("yori's window closed: {error}")))
@@ -139,6 +188,9 @@ fn main() {
         eprintln!("yori: {error}");
         process::exit(2);
     });
+    if invocation.wait {
+        wait_for_tab(&invocation);
+    }
 
     let Some(instance) = instance::Instance::start(&invocation).unwrap_or_else(|error| {
         eprintln!("yori: {error}");
@@ -191,12 +243,26 @@ fn main() {
                     eprintln!("yori: {error}");
                 }
 
-                while let Ok(request) = instance.next().await {
-                    let result = if request.expired() {
+                while let Ok(mut request) = instance.next().await {
+                    let mut result = if request.expired() {
                         Err("request expired before yori could open it; retry".into())
                     } else {
                         dispatch_invocation(window, &workspace, &request.invocation, cx)
                     };
+
+                    // Attach before acknowledging, so a waiting invocation never
+                    // sees its tab close before it was bound to it.
+                    if result.is_ok()
+                        && let Some(completion) = request.take_completion()
+                    {
+                        result = attach_completion(
+                            window,
+                            &workspace,
+                            &request.invocation,
+                            completion,
+                            cx,
+                        );
+                    }
 
                     request.complete(result);
                 }

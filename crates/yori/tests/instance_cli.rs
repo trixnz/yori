@@ -202,3 +202,54 @@ fn invalid_arguments_fail_before_instance_startup() {
         assert!(String::from_utf8_lossy(&result.stderr).contains("usage:"));
     }
 }
+
+#[test]
+fn waiting_cli_exits_with_the_outcome_of_its_tab() {
+    let directory = tempfile::tempdir().unwrap();
+
+    for (saved, code) in [(true, 0), (false, 1)] {
+        let name = instance_name();
+        let socket_name = name.clone().to_ns_name::<GenericNamespaced>().unwrap();
+        let listener = ListenerOptions::new()
+            .name(socket_name)
+            .create_sync()
+            .unwrap();
+        let mut child = RunningCli(
+            cli(&name, directory.path())
+                .arg("--wait")
+                .args(paths())
+                .spawn()
+                .unwrap(),
+        );
+
+        let mut stream = listener.accept().unwrap();
+        let invocation = protocol::read_request(&mut stream).unwrap();
+        assert!(invocation.wait);
+        assert!(matches!(
+            invocation.comparisons.as_slice(),
+            [Comparison::Merge(_)]
+        ));
+        protocol::write_response(&mut stream, Ok(())).unwrap();
+
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "the tool waits for the tab after the acknowledgment"
+        );
+
+        protocol::write_completion(&mut stream, saved).unwrap();
+        let status = child.0.wait().unwrap();
+        assert_eq!(status.code(), Some(code));
+    }
+}
+
+#[test]
+fn waiting_without_files_is_a_usage_error() {
+    let name = instance_name();
+    let directory = tempfile::tempdir().unwrap();
+
+    let result = cli(&name, directory.path()).arg("--wait").output().unwrap();
+
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("usage:"));
+}

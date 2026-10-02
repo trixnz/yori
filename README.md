@@ -138,10 +138,35 @@ yori BASE LOCAL INCOMING RESULT
 The merge view displays `LOCAL`, `RESULT`, and `INCOMING`. `BASE` provides the
 common ancestor, while `RESULT` identifies the output destination.
 
-Additional invocations open files in the existing application window. Automated
-invocations exit once the workspace accepts the request; they do not wait for editing
-or merge completion. External-tool integrations requiring that lifecycle remain
-experimental.
+Additional invocations open files in the existing application window. By default, an
+invocation exits once the workspace accepts the request. It does not wait for editing
+or merge completion.
+
+Add `--wait` before the paths to keep the invocation running until you close its tab:
+
+```sh
+yori --wait BASE LOCAL INCOMING RESULT
+```
+
+The invocation exits with status 0 if you saved the tab, and with status 1 if you
+closed it without saving. If no yori window is open, yori starts one in the
+background. Closing the tab does not close the window.
+
+#### Git mergetool
+
+To use yori with `git mergetool`, add this to your Git configuration:
+
+```ini
+[merge]
+    tool = yori
+[mergetool "yori"]
+    cmd = yori --wait "$BASE" "$LOCAL" "$REMOTE" "$MERGED"
+    trustExitCode = true
+```
+
+Git starts one merge tab for each conflicted file. Save the result and close the tab 
+to continue with the next file. 
+If you close the tab without saving, Git keeps the file conflicted.
 
 ### Reviewing changes
 
@@ -161,6 +186,14 @@ A review opens as a single tab with a file navigator listing every changed file 
 its change counts. Working changes and Perforce pending changelists leave the local
 file editable and saveable; committed and submitted revisions open read-only on both
 sides.
+
+Git working changes mark files with an unresolved merge conflict as `U`. The review
+shows the working file with its conflict markers. Select the file and choose **Start
+three-way merge** to open a merge tab. The tab uses the base, local, and incoming
+versions that Git recorded in the index. Saving the result writes the working file.
+It does not mark the conflict as resolved: run `git add` when you are done.
+Conflicts where one side deleted the file, and binary, symbolic link, and submodule
+conflicts, cannot be merged as text.
 
 Perforce review invokes `p4` from the launch directory and reads its ambient
 configuration, including `P4CONFIG`, ticket, and trust files. The `p4` executable

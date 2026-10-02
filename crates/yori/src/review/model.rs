@@ -8,7 +8,7 @@ use std::{
 
 use yori_diff::{Alignment, DiffKind};
 
-use crate::comparison::{Comparison, ComparisonDocument};
+use crate::comparison::{Comparison, ComparisonDocument, MergeComparison};
 use crate::workspace::files::{Files, Role};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -88,7 +88,11 @@ pub(crate) enum ReviewFileStatus {
     Added,
     Modified,
     Deleted,
-    Renamed { from: PathBuf },
+    Renamed {
+        from: PathBuf,
+    },
+    /// The source-control state records an unresolved merge conflict.
+    Conflicted,
 }
 
 impl ReviewFileStatus {
@@ -98,6 +102,7 @@ impl ReviewFileStatus {
             Self::Modified => "M",
             Self::Deleted => "D",
             Self::Renamed { .. } => "R",
+            Self::Conflicted => "U",
         }
     }
 
@@ -107,6 +112,28 @@ impl ReviewFileStatus {
             Self::Modified => "Modified",
             Self::Deleted => "Deleted",
             Self::Renamed { .. } => "Renamed",
+            Self::Conflicted => "Conflicted",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReviewConflict {
+    Mergeable(Box<MergeComparison>),
+    Unmergeable { reason: Arc<str> },
+}
+
+impl ReviewConflict {
+    pub(crate) fn unmergeable(reason: impl Into<Arc<str>>) -> Self {
+        Self::Unmergeable {
+            reason: reason.into(),
+        }
+    }
+
+    pub(crate) fn merge(&self) -> Option<Box<MergeComparison>> {
+        match self {
+            Self::Mergeable(merge) => Some(merge.clone()),
+            Self::Unmergeable { .. } => None,
         }
     }
 }
@@ -206,6 +233,8 @@ pub(crate) struct ReviewFile {
     pub kind: ReviewFileKind,
     /// Filled in after the manifest loads; see `ReviewManifest::measure`.
     pub stat: Option<DiffStat>,
+    /// Present only while source control records this file as conflicted.
+    pub conflict: Option<ReviewConflict>,
 }
 
 impl ReviewFile {
@@ -221,6 +250,7 @@ impl ReviewFile {
             status,
             kind: ReviewFileKind::Text(comparison),
             stat: None,
+            conflict: None,
         }
     }
 
@@ -238,6 +268,7 @@ impl ReviewFile {
                 explanation: explanation.into(),
             },
             stat: None,
+            conflict: None,
         }
     }
 
@@ -257,6 +288,15 @@ impl ReviewFile {
                 new_identifier: new_identifier.into(),
             },
             stat: None,
+            conflict: None,
+        }
+    }
+
+    pub(crate) fn with_conflict(self, conflict: ReviewConflict) -> Self {
+        Self {
+            status: ReviewFileStatus::Conflicted,
+            conflict: Some(conflict),
+            ..self
         }
     }
 
