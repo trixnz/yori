@@ -2615,7 +2615,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c91d8cffac8849493a82233811bd02b2b183b8cf39bf704de0fa0841b737595"
 dependencies = [
  "bstr",
- "hashbrown 0.17.1",
+ "hashbrown 0.15.5",
 ]
 
 [[package]]
@@ -8073,6 +8073,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 
@@ -9890,7 +9891,7 @@ dependencies = [
  "notify 8.2.0",
  "ropey",
  "tempfile",
- "toml_edit 0.22.27",
+ "toml_edit 0.25.15+spec-1.1.0",
  "tree-sitter",
  "unicode-segmentation",
  "unicode-width",
