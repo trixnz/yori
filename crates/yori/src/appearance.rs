@@ -10,8 +10,7 @@ use gpui_kit::{App, Hsla, px, rgb};
 
 pub(super) fn init(cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);
-    apply(Theme::global_mut(cx));
-    Theme::sync_base(cx);
+    Theme::update(cx, apply);
 }
 
 fn apply(theme: &mut Theme) {
@@ -56,8 +55,6 @@ fn apply(theme: &mut Theme) {
     theme.tab_active = theme.secondary;
     theme.tab_active_foreground = theme.foreground;
 
-    // Keep Component's resolved tokens and Base's mirrored theme in agreement.
-    theme.tokens = theme.colors.into();
     theme.font_size = px(13.0);
     theme.mono_font_size = px(14.0);
     theme.radius = px(5.0);
@@ -109,10 +106,15 @@ mod tests {
     use gpui_kit::AssetSource;
     use gpui_kit::component::{IconName, IconNamed};
 
-    #[test]
-    fn chrome_is_neutral_and_component_tokens_follow_the_palette() {
-        let mut theme = Theme::default();
-        apply(&mut theme);
+    #[gpui_kit::test]
+    fn chrome_is_neutral_and_component_tokens_follow_the_palette(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let theme = cx.update(|cx| {
+            gpui_kit::init(cx);
+            init(cx);
+            Theme::global(cx).clone()
+        });
 
         for color in [
             theme.background,

@@ -162,8 +162,8 @@ fn reload_replaces_disables_and_preserves_the_last_valid_keymap(cx: &mut TestApp
     });
 
     cx.update(|cx| {
-        let save = (action("save").binding)("ctrl-s");
-        let redo = (action("redo").binding)("ctrl-y");
+        let save = (action("save").binding)("ctrl-s", cx);
+        let redo = (action("redo").binding)("ctrl-y", cx);
 
         assert!(has_binding(cx, save.action(), "primary-s"));
         assert_eq!(binding_count(cx, redo.action()), 2);
@@ -177,8 +177,8 @@ fn reload_replaces_disables_and_preserves_the_last_valid_keymap(cx: &mut TestApp
     cx.update(|cx| {
         assert!(crate::config::reload(cx).is_none());
 
-        let save = (action("save").binding)("ctrl-s");
-        let redo = (action("redo").binding)("ctrl-y");
+        let save = (action("save").binding)("ctrl-s", cx);
+        let redo = (action("redo").binding)("ctrl-y", cx);
         assert!(!has_binding(cx, save.action(), "primary-s"));
         assert!(has_binding(cx, save.action(), "primary-k"));
         assert!(has_binding(cx, save.action(), "ctrl-alt-s"));
@@ -201,7 +201,7 @@ fn reload_replaces_disables_and_preserves_the_last_valid_keymap(cx: &mut TestApp
         assert!(crate::config::editor(cx).show_whitespace);
         assert!(cx.key_bindings().borrow().version() == version);
 
-        let save = (action("save").binding)("ctrl-s");
+        let save = (action("save").binding)("ctrl-s", cx);
         assert!(has_binding(cx, save.action(), "primary-k"));
         assert!(has_binding(cx, save.action(), "ctrl-alt-s"));
     });
@@ -217,7 +217,7 @@ fn reload_replaces_disables_and_preserves_the_last_valid_keymap(cx: &mut TestApp
         assert!(!crate::config::editor(cx).show_whitespace);
         assert!(cx.key_bindings().borrow().version() == version);
 
-        let save = (action("save").binding)("ctrl-s");
+        let save = (action("save").binding)("ctrl-s", cx);
         assert!(has_binding(cx, save.action(), "primary-k"));
         assert!(has_binding(cx, save.action(), "ctrl-alt-s"));
     });

@@ -30,7 +30,7 @@ use gpui_kit::component::{ActiveTheme, ElementExt, highlighter::SyntaxHighlighte
 use gpui_kit::{
     App, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
     Focusable, Font, HighlightStyle, InteractiveElement, IntoElement, KeyBinding, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, ScrollDelta, ScrollWheelEvent,
+    MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, ScrollDelta, ScrollEvent,
     SharedString, Styled, StyledText, TestSupportExt, TextRun, UTF16Selection, Window, canvas,
     container_query, div, point, px,
 };
@@ -1169,7 +1169,7 @@ impl AlignedEditor {
         }
     }
 
-    fn scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn scroll(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         let delta = match event.delta {
             ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
             ScrollDelta::Lines(delta) => (delta.x * LINE_HEIGHT, delta.y * LINE_HEIGHT),
@@ -1791,7 +1791,7 @@ impl AlignedEditor {
             .on_action(cx.listener(|this, _: &MoveFinish, w, cx| {
                 this.move_cursor(Motion::Finish, false, w, cx);
             }))
-            .on_scroll_wheel(cx.listener(Self::scroll))
+            .on_scroll(cx.listener(Self::scroll))
             .on_prepaint(move |bounds, _, _| {
                 // Input uses the same frame's window-local origin and size.
                 measured_content_bounds.set(bounds);

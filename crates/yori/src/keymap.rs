@@ -5,7 +5,9 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 
-use gpui_kit::{App, AsKeystroke, Global, KeyBinding, Keystroke};
+use gpui_kit::{
+    App, AsKeystroke, Global, KeyBinding, KeyBindingContextPredicate, Keystroke, OperatingSystem,
+};
 
 use crate::{editor, review, workspace};
 
@@ -44,7 +46,7 @@ struct ActionDefinition {
     name: &'static str,
     defaults: &'static [&'static str],
     context: Option<&'static str>,
-    binding: fn(&str) -> KeyBinding,
+    binding: fn(&str, &App) -> KeyBinding,
 }
 
 /// Find navigation works from the open find field and from the editor behind it
@@ -54,8 +56,16 @@ const FIND_NAVIGATION_CONTEXT: &str = "AlignedEditor || FindBar";
 macro_rules! action_catalog {
     ($(($builder:ident, $name:literal, [$($default:literal),* $(,)?], $context:expr, $action:path)),* $(,)?) => {
         $(
-            fn $builder(keystroke: &str) -> KeyBinding {
-                KeyBinding::new(keystroke, $action, $context)
+            fn $builder(keystroke: &str, cx: &App) -> KeyBinding {
+                let context: Option<&str> = $context;
+                let predicate = context.map(|context| {
+                    KeyBindingContextPredicate::parse(context)
+                        .expect("catalog contexts must be valid predicates")
+                        .into()
+                });
+
+                KeyBinding::load(keystroke, Box::new($action), predicate, false, None, cx)
+                    .expect("validated keybindings and catalog defaults must load")
             }
         )*
 
@@ -264,20 +274,20 @@ pub(crate) fn init(cx: &mut App) {
 pub(crate) fn apply(overrides: &KeybindingOverrides, cx: &mut App) {
     let mut bindings = cx.global::<KeymapState>().baseline.clone();
     bindings.extend(fixed_bindings());
-    bindings.extend(catalog_bindings(overrides));
+    bindings.extend(catalog_bindings(overrides, cx));
 
     cx.clear_key_bindings();
     cx.bind_keys(bindings);
 }
 
-fn catalog_bindings(overrides: &KeybindingOverrides) -> Vec<KeyBinding> {
+fn catalog_bindings(overrides: &KeybindingOverrides, cx: &App) -> Vec<KeyBinding> {
     ACTIONS
         .iter()
         .flat_map(|action| {
             overrides
                 .bindings_for(action)
                 .into_iter()
-                .map(|keystroke| (action.binding)(&expand_primary(keystroke)))
+                .map(|keystroke| (action.binding)(&expand_primary(keystroke), cx))
         })
         .collect()
 }
@@ -401,10 +411,19 @@ fn parse_sequence(source: &str) -> Result<Vec<Keystroke>, String> {
         return Err("keystroke cannot be empty".into());
     }
 
+    let os = if cfg!(target_os = "macos") {
+        OperatingSystem::Mac
+    } else if cfg!(target_os = "windows") {
+        OperatingSystem::Windows
+    } else {
+        OperatingSystem::Linux
+    };
+
     source
         .split_whitespace()
         .map(|source| {
-            let keystroke = Keystroke::parse(source).map_err(|error| error.to_string())?;
+            let keystroke =
+                Keystroke::parse_with_os(source, os).map_err(|error| error.to_string())?;
             if keystroke.key_char.is_some() {
                 return Err("test-event key_char notation is not supported".into());
             }
