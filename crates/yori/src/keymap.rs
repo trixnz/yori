@@ -323,26 +323,32 @@ fn validate(raw: &HashMap<String, Vec<String>>, errors: &mut Vec<String>) {
     }
 
     let fixed = fixed_bindings();
-    let mut occupied = fixed
-        .iter()
-        .map(|binding| {
-            (
-                binding_key(binding),
-                format!("fixed action `{}`", binding.action().name()),
-            )
-        })
-        .collect::<HashMap<_, _>>();
+    let mut occupied = HashMap::new();
+    for binding in &fixed {
+        let (context, keystrokes) = binding_key(binding);
+        let owner = format!("fixed action `{}`", binding.action().name());
+
+        for operand in context_operands(context.as_deref()) {
+            occupied.insert(
+                (operand.map(str::to_owned), keystrokes.clone()),
+                owner.clone(),
+            );
+        }
+    }
 
     for action in ACTIONS {
         let mut record = |source: &str, sequence: Vec<Keystroke>| {
-            let key = (action.context.map(str::to_owned), sequence);
+            // An `a || b` binding is live in either context, so it can collide in each.
+            for operand in context_operands(action.context) {
+                let key = (operand.map(str::to_owned), sequence.clone());
 
-            if let Some(previous) = occupied.insert(key, format!("action `{}`", action.name)) {
-                errors.push(format!(
-                    "action `{}` duplicates {previous} with keystroke `{source}` in context `{}`",
-                    action.name,
-                    action.context.unwrap_or("global")
-                ));
+                if let Some(previous) = occupied.insert(key, format!("action `{}`", action.name)) {
+                    errors.push(format!(
+                        "action `{}` duplicates {previous} with keystroke `{source}` in context `{}`",
+                        action.name,
+                        operand.unwrap_or("global")
+                    ));
+                }
             }
         };
 
@@ -364,6 +370,19 @@ fn validate(raw: &HashMap<String, Vec<String>>, errors: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// The contexts in which a binding is live; `None` is the global context.
+fn context_operands(context: Option<&str>) -> Vec<Option<&str>> {
+    context.map_or_else(
+        || vec![None],
+        |context| {
+            context
+                .split("||")
+                .map(|operand| Some(operand.trim()))
+                .collect()
+        },
+    )
 }
 
 fn binding_key(binding: &KeyBinding) -> (Option<String>, Vec<Keystroke>) {

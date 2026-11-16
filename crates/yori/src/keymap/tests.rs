@@ -112,6 +112,16 @@ fn validation_rejects_duplicates_with_fixed_same_context_bindings() {
 }
 
 #[test]
+fn validation_rejects_duplicates_in_either_operand_of_an_or_context() {
+    let errors = KeybindingOverrides::from_raw(raw(&[("find_next", &["left"])]), Vec::new())
+        .unwrap_err()
+        .join("\n");
+
+    assert!(errors.contains("action `find_next` duplicates fixed action"));
+    assert!(errors.contains("context `AlignedEditor`"));
+}
+
+#[test]
 fn same_keystroke_is_allowed_in_different_contexts() {
     KeybindingOverrides::from_raw(
         raw(&[("save", &["alt-down"]), ("next_change", &["alt-down"])]),
