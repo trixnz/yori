@@ -188,7 +188,7 @@ mod tests {
     fn multibyte_text_yields_char_boundary_ranges() {
         let text = "Größe GRÖẞE größe";
         assert_eq!(find_all(text, "größe"), vec![0..7, 8..16, 17..24]);
-        assert!(find_all(text, "GRÖSSE").is_empty());
+        assert_eq!(find_all(text, "GRÖSSE"), []);
 
         // Lowercasing İ yields two chars, so it must not shift or split offsets.
         let text = "İstanbul istanbul";
@@ -202,7 +202,7 @@ mod tests {
     fn empty_query_matches_nothing_and_shows_no_label() {
         let matches = FindMatches::search("text", "", 0);
 
-        assert!(matches.ranges().is_empty());
+        assert_eq!(matches.ranges(), []);
         assert_eq!(matches.current(), None);
         assert_eq!(matches.label(), None);
     }

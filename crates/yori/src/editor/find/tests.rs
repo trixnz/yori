@@ -107,7 +107,10 @@ fn typing_searches_the_local_pane_and_navigation_wraps_both_ways(cx: &mut TestAp
         assert_eq!(label(&editor, cx).as_deref(), Some("1 of 3"));
         assert_eq!(selection(&editor, cx), (Side::Right, 4, 10));
         assert_eq!(highlighted_lines(&editor, Side::Right, cx), vec![0, 1, 2]);
-        assert!(highlighted_lines(&editor, Side::Left, cx).is_empty());
+        assert_eq!(
+            highlighted_lines(&editor, Side::Left, cx),
+            Vec::<usize>::new()
+        );
     });
 
     press(cx, "enter");
@@ -144,7 +147,10 @@ fn escape_closes_find_and_returns_typing_to_the_editor_at_the_match(cx: &mut Tes
         assert!(window.try_find("find-bar").is_none());
         assert!(editor.read(cx).focus.is_focused(window));
         assert_eq!(label(&editor, cx), None);
-        assert!(highlighted_lines(&editor, Side::Right, cx).is_empty());
+        assert_eq!(
+            highlighted_lines(&editor, Side::Right, cx),
+            Vec::<usize>::new()
+        );
         assert_eq!(selection(&editor, cx), (Side::Right, 15, 21));
     });
 
@@ -200,7 +206,10 @@ fn a_single_line_selection_prefills_the_query_for_its_own_pane(cx: &mut TestAppC
         assert_eq!(label(&editor, cx).as_deref(), Some("1 of 1"));
         assert_eq!(selection(&editor, cx), (Side::Left, 9, 15));
         assert_eq!(highlighted_lines(&editor, Side::Left, cx), vec![0]);
-        assert!(highlighted_lines(&editor, Side::Right, cx).is_empty());
+        assert_eq!(
+            highlighted_lines(&editor, Side::Right, cx),
+            Vec::<usize>::new()
+        );
     });
 
     press(cx, "escape");
