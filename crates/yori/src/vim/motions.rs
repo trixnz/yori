@@ -87,7 +87,12 @@ pub(super) fn move_to(
 
             return target;
         }
-        Motion::Word | Motion::BackWord | Motion::WordEnd => {
+        Motion::Word
+        | Motion::BackWord
+        | Motion::WordEnd
+        | Motion::BigWord
+        | Motion::BigBackWord
+        | Motion::BigWordEnd => {
             for _ in 0..count {
                 target = word(text, target, motion);
             }
@@ -116,13 +121,30 @@ pub(super) fn move_to(
     target
 }
 
-// Vim's small words distinguish keyword characters, punctuation and whitespace.
-fn class(text: &str, offset: usize) -> u8 {
+// Vim's small words distinguish keyword characters, punctuation and whitespace;
+// big WORDs only distinguish whitespace from everything else.
+fn class(text: &str, offset: usize, big: bool) -> u8 {
     match text[offset..].chars().next() {
         None => 0,
         Some(ch) if ch.is_whitespace() => 0,
+        Some(_) if big => 1,
         Some(ch) if ch.is_alphanumeric() || ch == '_' => 1,
         Some(_) => 2,
+    }
+}
+
+fn is_big(motion: Motion) -> bool {
+    matches!(
+        motion,
+        Motion::BigWord | Motion::BigBackWord | Motion::BigWordEnd
+    )
+}
+
+fn word_end(big: bool) -> Motion {
+    if big {
+        Motion::BigWordEnd
+    } else {
+        Motion::WordEnd
     }
 }
 
@@ -132,10 +154,13 @@ fn empty_line_at(text: &str, offset: usize) -> bool {
 }
 
 fn word(text: &str, cursor: usize, motion: Motion) -> usize {
+    let big = is_big(motion);
+    let class = |offset| class(text, offset, big);
+
     let mut at = cursor;
-    if motion == Motion::BackWord {
+    if matches!(motion, Motion::BackWord | Motion::BigBackWord) {
         at = editing::previous_grapheme(text, at);
-        while at > 0 && class(text, at) == 0 {
+        while at > 0 && class(at) == 0 {
             if empty_line_at(text, at) {
                 return at;
             }
@@ -143,10 +168,10 @@ fn word(text: &str, cursor: usize, motion: Motion) -> usize {
             at = editing::previous_grapheme(text, at);
         }
 
-        let kind = class(text, at);
+        let kind = class(at);
         while at > 0 {
             let previous = editing::previous_grapheme(text, at);
-            if class(text, previous) != kind {
+            if class(previous) != kind {
                 break;
             }
 
@@ -156,16 +181,16 @@ fn word(text: &str, cursor: usize, motion: Motion) -> usize {
         return at;
     }
 
-    if motion == Motion::WordEnd {
+    if matches!(motion, Motion::WordEnd | Motion::BigWordEnd) {
         at = editing::next_grapheme(text, at);
-        while at < text.len() && class(text, at) == 0 {
+        while at < text.len() && class(at) == 0 {
             at = editing::next_grapheme(text, at);
         }
 
-        let kind = class(text, at);
+        let kind = class(at);
         while at < text.len() {
             let next = editing::next_grapheme(text, at);
-            if next == text.len() || class(text, next) != kind {
+            if next == text.len() || class(next) != kind {
                 break;
             }
 
@@ -175,16 +200,16 @@ fn word(text: &str, cursor: usize, motion: Motion) -> usize {
         return at;
     }
 
-    let kind = class(text, at);
+    let kind = class(at);
     if kind == 0 {
         at = editing::next_grapheme(text, at);
     } else {
-        while at < text.len() && class(text, at) == kind {
+        while at < text.len() && class(at) == kind {
             at = editing::next_grapheme(text, at);
         }
     }
 
-    while at < text.len() && class(text, at) == 0 {
+    while at < text.len() && class(at) == 0 {
         if empty_line_at(text, at) {
             break;
         }
@@ -195,14 +220,21 @@ fn word(text: &str, cursor: usize, motion: Motion) -> usize {
     at
 }
 
-pub(super) fn inner_word(document: &Document, cursor: usize, count: usize) -> Range<usize> {
+pub(super) fn inner_word(
+    document: &Document,
+    cursor: usize,
+    count: usize,
+    big: bool,
+) -> Range<usize> {
     let text = document.text();
     let content = document.line_content_range(document.line_at_offset(cursor));
-    let kind = class(text, cursor);
+    let class = |offset| class(text, offset, big);
+
+    let kind = class(cursor);
     let mut start = cursor;
     while start > content.start {
         let previous = editing::previous_grapheme(text, start);
-        if class(text, previous) != kind {
+        if class(previous) != kind {
             break;
         }
 
@@ -210,11 +242,11 @@ pub(super) fn inner_word(document: &Document, cursor: usize, count: usize) -> Ra
     }
 
     let mut end = cursor;
-    while end < content.end && class(text, end) == kind {
+    while end < content.end && class(end) == kind {
         end = editing::next_grapheme(text, end);
     }
     for _ in 1..count {
-        let next = word(text, end, Motion::WordEnd);
+        let next = word(text, end, word_end(big));
         end = editing::next_grapheme(text, next);
     }
 
@@ -228,13 +260,15 @@ pub(super) fn motion_range(
     count: usize,
     change: bool,
 ) -> (Range<usize>, bool) {
-    if change && motion == Motion::Word && class(document.text(), cursor) != 0 {
-        let range = inner_word(document, cursor, 1);
+    // `cw` and `cW` change to the end of the word, like `ce` and `cE`.
+    let word_motion = matches!(motion, Motion::Word | Motion::BigWord);
+    if change && word_motion && class(document.text(), cursor, false) != 0 {
+        let range = inner_word(document, cursor, 1, is_big(motion));
         let mut end = range.end;
         for _ in 1..count {
             end = editing::next_grapheme(
                 document.text(),
-                word(document.text(), end, Motion::WordEnd),
+                word(document.text(), end, word_end(is_big(motion))),
             );
         }
 
@@ -248,12 +282,12 @@ pub(super) fn motion_range(
     }
 
     let mut range = cursor.min(target)..cursor.max(target);
-    if motion == Motion::WordEnd {
+    if matches!(motion, Motion::WordEnd | Motion::BigWordEnd) {
         range.end = editing::next_grapheme(document.text(), range.end);
     }
 
     // A final word's `dw` removes its trailing spaces, not the next line's indentation.
-    if motion == Motion::Word && document.line_at_offset(target) > document.line_at_offset(cursor) {
+    if word_motion && document.line_at_offset(target) > document.line_at_offset(cursor) {
         let last_line = document.line_at_offset(target).saturating_sub(1);
         let preceding = document.line_content_range(last_line);
         if target <= first_word(document, target) && range.start < preceding.end {

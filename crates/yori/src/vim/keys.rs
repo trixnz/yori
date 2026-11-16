@@ -9,6 +9,10 @@ pub(super) enum Motion {
     Word,
     BackWord,
     WordEnd,
+    /// Whitespace-delimited WORD motions: `W`, `B` and `E`.
+    BigWord,
+    BigBackWord,
+    BigWordEnd,
     Home,
     First,
     End,
@@ -28,6 +32,8 @@ pub(super) enum Target {
     Lines,
     InnerWord,
     Selection,
+    /// Visual `Y`: every line the selection touches, regardless of Visual mode.
+    SelectedLines,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +133,9 @@ impl Keys {
             "w" => Some(Motion::Word),
             "b" => Some(Motion::BackWord),
             "e" => Some(Motion::WordEnd),
+            "W" => Some(Motion::BigWord),
+            "B" => Some(Motion::BigBackWord),
+            "E" => Some(Motion::BigWordEnd),
             "0" | "home" => Some(Motion::Home),
             "^" => Some(Motion::First),
             "$" | "end" => Some(Motion::End),
@@ -185,6 +194,8 @@ impl Keys {
                 Target::Motion(Motion::End),
                 count,
             )),
+            "Y" if visual => Some(Command::Operate(Operator::Yank, Target::SelectedLines, 1)),
+            "Y" => Some(Command::Operate(Operator::Yank, Target::Lines, count)),
             "p" => Some(Command::Paste(true, count)),
             "P" => Some(Command::Paste(false, count)),
             "u" => Some(Command::Undo),

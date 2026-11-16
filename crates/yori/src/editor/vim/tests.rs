@@ -212,3 +212,82 @@ fn right_history_retains_its_existing_normal_mode_with_a_restored_selection(
         assert_eq!(editor.vim.mode(), Mode::Normal);
     });
 }
+
+#[gpui_kit::test]
+fn shift_y_and_visual_yank_write_the_system_clipboard(cx: &mut TestAppContext) {
+    let (editor, cx) = harness_with(cx, "let old = 1;\nnext line\n");
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| editor.toggle_vim(true, window, cx));
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        for key in ["w", "shift-y"] {
+            window.press(key, cx);
+        }
+
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "let old = 1;\n"
+        );
+        assert_eq!(editor.read(cx).right_selection().unwrap().head, 4);
+
+        for key in ["v", "e", "y"] {
+            window.press(key, cx);
+        }
+
+        assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "old");
+        assert_eq!(editor.read(cx).right_selection().unwrap().range(), 4..4);
+        assert_eq!(editor.read(cx).vim.mode(), Mode::Normal);
+    });
+}
+
+#[gpui_kit::test]
+fn paste_reads_text_copied_by_other_apps(cx: &mut TestAppContext) {
+    let (editor, cx) = harness(cx);
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| editor.toggle_vim(true, window, cx));
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        cx.write_to_clipboard(ClipboardItem::new_string("external\n".to_owned()));
+        window.press("shift-p", cx);
+        assert_eq!(
+            editor.read(cx).right.document.text(),
+            "external\nlet old = 1;\n"
+        );
+
+        cx.write_to_clipboard(ClipboardItem::new_string("X".to_owned()));
+        window.press("p", cx);
+        assert_eq!(
+            editor.read(cx).right.document.text(),
+            "eXxternal\nlet old = 1;\n"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn baseline_yank_reaches_the_system_clipboard(cx: &mut TestAppContext) {
+    let (editor, cx) = harness(cx);
+    cx.update(|window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.toggle_vim(true, window, cx);
+            editor.selection = Some(Selection {
+                side: Side::Left,
+                anchor: 0,
+                head: 0,
+            });
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        for key in ["y", "shift-w"] {
+            window.press(key, cx);
+        }
+
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "baseline"
+        );
+        assert_eq!(editor.read(cx).left.document.text(), "baseline\n");
+    });
+}

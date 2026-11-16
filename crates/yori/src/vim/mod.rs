@@ -41,11 +41,12 @@ impl Mode {
     }
 }
 
-/// The session's single unnamed register. Linewise shape is not encoded as fake source bytes.
-#[derive(Clone, Default)]
-pub struct Register {
-    text: String,
-    linewise: bool,
+/// The system clipboard is the only register: yank, delete and change write it, and
+/// paste reads it. Linewise text always ends with a line ending, so text from any
+/// source that ends with one pastes as whole lines, as Vim treats `"+` contents.
+pub trait Clipboard {
+    fn read(&mut self) -> Option<String>;
+    fn write(&mut self, text: String);
 }
 
 struct OperationRange {
@@ -148,7 +149,7 @@ impl Vim {
         key: &str,
         mut target: EditTarget<'_>,
         selection: TextSelection,
-        register: &mut Register,
+        clipboard: &mut dyn Clipboard,
     ) -> Result<Outcome, MergeError> {
         let document = target.document();
         if key == "escape" {
@@ -215,7 +216,7 @@ impl Vim {
         // Insert run. The targets defer starting a group until input validates.
         let grouped = inserting || matches!(target, EditTarget::Merge(_));
         let mut outcome = target.edit(selection, grouped, |source| {
-            self.execute(command, source, selection, cursor, register)
+            self.execute(command, source, selection, cursor, clipboard)
         })?;
 
         if self.mode == Mode::Insert {
@@ -233,7 +234,7 @@ impl Vim {
         source: &mut dyn SourceEdit,
         selection: TextSelection,
         cursor: usize,
-        register: &mut Register,
+        clipboard: &mut dyn Clipboard,
     ) -> Result<Outcome, InputError> {
         let document = source.document();
         match command {
@@ -282,7 +283,7 @@ impl Vim {
                     linewise,
                 };
 
-                self.operate(operator, source, selection, target, register)
+                self.operate(operator, source, selection, cursor, target, clipboard)
             }
             Command::DeleteChar(count) => {
                 let (range, linewise) = if self.visual.is_some() {
@@ -298,14 +299,15 @@ impl Vim {
                     Operator::Delete,
                     source,
                     selection,
+                    cursor,
                     OperationRange {
                         bytes: range,
                         linewise,
                     },
-                    register,
+                    clipboard,
                 )
             }
-            Command::Paste(after, count) => self.paste(source, selection, register, after, count),
+            Command::Paste(after, count) => self.paste(source, selection, clipboard, after, count),
             Command::Undo | Command::Redo => {
                 unreachable!("history is routed before source commands")
             }
@@ -361,7 +363,11 @@ impl Vim {
     ) -> (Range<usize>, bool) {
         match target {
             Target::Selection => (selection.range(), self.mode == Mode::VisualLine),
-            Target::InnerWord => (inner_word(document, cursor, count), false),
+            Target::SelectedLines => {
+                let (anchor, head) = self.visual.unwrap_or((cursor, cursor));
+                (line_range(document, anchor, head), true)
+            }
+            Target::InnerWord => (inner_word(document, cursor, count, false), false),
             Target::Motion(motion) => motion_range(
                 document,
                 cursor,
@@ -383,8 +389,9 @@ impl Vim {
         operator: Operator,
         source: &mut dyn SourceEdit,
         selection: TextSelection,
+        cursor: usize,
         target: OperationRange,
-        register: &mut Register,
+        clipboard: &mut dyn Clipboard,
     ) -> Result<Outcome, InputError> {
         let document = source.document();
         let OperationRange {
@@ -395,9 +402,16 @@ impl Vim {
             return Ok(Self::outcome(selection, None));
         }
 
-        let copied = Register {
-            text: document.copy_range(range.clone()).to_owned(),
-            linewise,
+        let copied = clipboard_text(document, range.clone(), linewise);
+
+        // Like Vim, a yank leaves the cursor at the start of what it copied, except
+        // that a linewise yank from the first line (`yy`, `Y`, `yj`) keeps its column.
+        let starts_on_cursor_line =
+            document.line_at_offset(cursor) == document.line_at_offset(range.start);
+        let yank_head = match self.visual {
+            Some((anchor, head)) => anchor.min(head),
+            None if linewise && starts_on_cursor_line => cursor,
+            None => range.start,
         };
 
         self.mode = Mode::Normal;
@@ -405,9 +419,10 @@ impl Vim {
         self.column = None;
 
         if operator == Operator::Yank {
-            *register = copied;
+            clipboard.write(copied);
+
             return Ok(Self::outcome(
-                TextSelection::caret(normal_cursor(document, range.start)),
+                TextSelection::caret(normal_cursor(document, yank_head)),
                 None,
             ));
         }
@@ -423,7 +438,7 @@ impl Vim {
         };
 
         // Removing an unterminated final line also removes its preceding separator.
-        // The register still contains only the selected line(s).
+        // The clipboard still contains only the selected line(s).
         if operator == Operator::Delete
             && linewise
             && range.end == document.text().len()
@@ -437,7 +452,11 @@ impl Vim {
         let update = source.replace(range.clone(), &replacement)?;
         let document = source.document();
 
-        *register = copied;
+        // An empty `cw` at a line end must not wipe text copied from elsewhere.
+        if !copied.is_empty() {
+            clipboard.write(copied);
+        }
+
         let head = if operator == Operator::Change {
             self.mode = Mode::Insert;
             range.start
@@ -487,24 +506,20 @@ impl Vim {
         &mut self,
         source: &mut dyn SourceEdit,
         selection: TextSelection,
-        register: &mut Register,
+        clipboard: &mut dyn Clipboard,
         after: bool,
         count: usize,
     ) -> Result<Outcome, InputError> {
         let document = source.document();
-        if register.text.is_empty() {
+        let Some(text) = clipboard.read().filter(|text| !text.is_empty()) else {
             return Ok(Self::outcome(selection, None));
-        }
+        };
 
         let cursor = normal_cursor(
             document,
             self.visual.map_or(selection.head, |(_, head)| head),
         );
-        let mut text = register.text.clone();
-        let linewise = register.linewise;
-        if linewise && !text.ends_with('\n') {
-            text.push_str(document.newline());
-        }
+        let linewise = text.ends_with('\n');
         let mut text = text.repeat(count);
 
         let content = document.line_content_range(document.line_at_offset(cursor));
@@ -537,10 +552,11 @@ impl Vim {
             head += document.newline().len();
         }
         if self.visual.is_some() {
-            *register = Register {
-                text: document.copy_range(range.clone()).to_owned(),
-                linewise: self.mode == Mode::VisualLine,
-            };
+            clipboard.write(clipboard_text(
+                document,
+                range.clone(),
+                self.mode == Mode::VisualLine,
+            ));
         }
 
         self.mode = Mode::Normal;
@@ -558,6 +574,16 @@ impl Vim {
             update.edit,
         ))
     }
+}
+
+/// Linewise text always carries a line ending, so its shape survives the clipboard.
+fn clipboard_text(document: &Document, range: Range<usize>, linewise: bool) -> String {
+    let mut text = document.copy_range(range).to_owned();
+    if linewise && !text.ends_with('\n') {
+        text.push_str(document.newline());
+    }
+
+    text
 }
 
 #[cfg(test)]

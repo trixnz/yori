@@ -1831,7 +1831,6 @@ pub(crate) fn fixed_key_bindings() -> Vec<KeyBinding> {
 
 pub(super) fn init(cx: &mut App) {
     crate::config::init_transient(cx);
-    vim::init(cx);
     crate::keymap::init(cx);
 }
 

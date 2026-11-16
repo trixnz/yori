@@ -1,26 +1,26 @@
 //! Native GPUI routing for the bounded, headless Vim command layer.
 
-use std::{cell::RefCell, rc::Rc};
-
 use gpui_kit::component::{WindowExt, notification::Notification};
-use gpui_kit::{App, Context, Global, KeyDownEvent, Window};
-use yori::vim::{EditTarget, Mode, Register};
+use gpui_kit::{App, ClipboardItem, Context, KeyDownEvent, Window};
+use yori::vim::{Clipboard, EditTarget, Mode};
 use yori_document::editing::{EditUpdate, TextSelection};
 
 use super::{AlignedEditor, Selection, Side, completion::Placement};
 
-#[derive(Default)]
-pub(super) struct VimPreferences {
-    register: Rc<RefCell<Register>>,
-}
-
-impl Global for VimPreferences {}
-
 #[cfg(test)]
 mod tests;
 
-pub(super) fn init(cx: &mut App) {
-    cx.set_global(VimPreferences::default());
+/// Vim yanks, deletes and pastes go straight through the OS clipboard.
+struct SystemClipboard<'a>(&'a mut App);
+
+impl Clipboard for SystemClipboard<'_> {
+    fn read(&mut self) -> Option<String> {
+        self.0.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    fn write(&mut self, text: String) {
+        self.0.write_to_clipboard(ClipboardItem::new_string(text));
+    }
 }
 
 impl AlignedEditor {
@@ -139,15 +139,7 @@ impl AlignedEditor {
             return;
         }
 
-        let register = Rc::clone(&cx.global::<VimPreferences>().register);
-        if let Err(error) = self.handle_vim_command(
-            key,
-            selection.side,
-            old,
-            &mut register.borrow_mut(),
-            window,
-            cx,
-        ) {
+        if let Err(error) = self.handle_vim_command(key, selection.side, old, window, cx) {
             eprintln!("Vim command rejected: {error}");
             self.cancel_vim();
             window.play_system_bell();
@@ -163,7 +155,6 @@ impl AlignedEditor {
         key: &str,
         side: Side,
         old: TextSelection,
-        register: &mut Register,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), yori_diff::merge::MergeError> {
@@ -187,7 +178,9 @@ impl AlignedEditor {
                     .document,
             ),
         };
-        let outcome = self.vim.handle(key, target, old, register)?;
+        let outcome = self
+            .vim
+            .handle(key, target, old, &mut SystemClipboard(cx))?;
 
         self.complete_edit(
             anchor,
