@@ -192,6 +192,7 @@ pub(super) struct OverlayColors {
 #[derive(Default)]
 pub(super) struct Overlays<'a> {
     pub changed: &'a [Range<usize>],
+    /// Sorted and non-overlapping, so composition can sweep it once.
     pub found: &'a [Range<usize>],
     pub selected: Option<&'a Range<usize>>,
     pub current_found: Option<&'a Range<usize>>,
@@ -221,6 +222,15 @@ pub(super) fn compose(
     boundaries.sort_unstable();
     boundaries.dedup();
 
+    debug_assert!(
+        overlays
+            .found
+            .windows(2)
+            .all(|pair| pair[0].end <= pair[1].start),
+        "find matches must be sorted and non-overlapping"
+    );
+    let mut next_found = 0;
+
     boundaries
         .windows(2)
         .filter_map(|pair| {
@@ -239,7 +249,16 @@ pub(super) fn compose(
             if overlays.changed.iter().any(touches) {
                 style.background_color = Some(colors.changed);
             }
-            if overlays.found.iter().any(touches) {
+
+            // Intervals move forward, so matches ending before this one never touch again.
+            while overlays
+                .found
+                .get(next_found)
+                .is_some_and(|found| found.end <= range.start)
+            {
+                next_found += 1;
+            }
+            if overlays.found.get(next_found).is_some_and(touches) {
                 style.background_color = Some(colors.found);
             }
 
@@ -375,5 +394,34 @@ mod tests {
         assert_eq!(background(5), Some(colors.current_found));
         assert_eq!(background(7), Some(colors.selected));
         assert_eq!(background(9), Some(colors.changed));
+    }
+
+    #[test]
+    fn dense_find_matches_each_highlight_and_gaps_stay_plain() {
+        let colors = colors(hsla(0.0, 0.0, 0.9, 1.0));
+        let found = vec![0..1, 2..3, 3..4, 6..8];
+
+        let runs = compose(
+            10,
+            &[],
+            &Overlays {
+                changed: &[],
+                found: &found,
+                selected: None,
+                current_found: None,
+                marked: None,
+            },
+            &colors,
+        );
+        let background = |byte: usize| {
+            runs.iter()
+                .find(|(range, _)| range.contains(&byte))
+                .and_then(|(_, style)| style.background_color)
+        };
+
+        let highlighted: Vec<_> = (0..10)
+            .filter(|&byte| background(byte) == Some(colors.found))
+            .collect();
+        assert_eq!(highlighted, [0, 2, 3, 6, 7]);
     }
 }
