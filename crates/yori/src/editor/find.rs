@@ -6,7 +6,7 @@
 use std::ops::Range;
 
 use gpui_kit::component::{
-    ActiveTheme, Disableable, IconName, Sizable,
+    ActiveTheme, Disableable, IconName,
     button::{Button, ButtonVariants},
     input::{Enter, Escape, Input, InputEvent, InputState},
 };
@@ -27,7 +27,7 @@ mod tests;
 /// Also named by the keymap's find navigation context.
 const KEY_CONTEXT: &str = "FindBar";
 
-const WIDTH: f32 = 380.0;
+const WIDTH: f32 = 460.0;
 const INSET: f32 = 8.0;
 
 pub(super) struct FindBar {
@@ -271,8 +271,8 @@ impl AlignedEditor {
                 .w(px(WIDTH))
                 .flex()
                 .items_center()
-                .gap(px(4.0))
-                .p(px(4.0))
+                .gap(px(6.0))
+                .p(px(6.0))
                 .bg(cx.theme().popover)
                 .text_color(cx.theme().popover_foreground)
                 .border_1()
@@ -281,7 +281,7 @@ impl AlignedEditor {
                 .shadow_md()
                 .cursor_default()
                 .font_family(cx.theme().font_family.clone())
-                .text_size(px(12.0))
+                .text_size(px(13.0))
                 .on_action(cx.listener(|this, enter: &Enter, window, cx| {
                     let direction = if enter.shift {
                         FindDirection::Previous
@@ -299,7 +299,7 @@ impl AlignedEditor {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(Input::new(&find.input).small().w_full()),
+                        .child(Input::new(&find.input).focus_bordered(false).w_full()),
                 )
                 .child(
                     div()
@@ -316,7 +316,6 @@ impl AlignedEditor {
                         .icon(IconName::ArrowUp)
                         .accessibility_label("Previous match")
                         .ghost()
-                        .small()
                         .tooltip("Previous match (Shift+Enter)")
                         .disabled(!has_matches)
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -328,7 +327,6 @@ impl AlignedEditor {
                         .icon(IconName::ArrowDown)
                         .accessibility_label("Next match")
                         .ghost()
-                        .small()
                         .tooltip("Next match (Enter)")
                         .disabled(!has_matches)
                         .on_click(cx.listener(|this, _, window, cx| {
@@ -340,7 +338,6 @@ impl AlignedEditor {
                         .icon(IconName::Close)
                         .accessibility_label("Close find")
                         .ghost()
-                        .small()
                         .tooltip("Close (Escape)")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.close_find(window, cx);
