@@ -675,3 +675,22 @@ fn paste_with_an_empty_clipboard_is_a_no_op() {
     assert_eq!(editor.text(), "abc\n");
     assert_eq!(editor.clipboard.writes, 0);
 }
+
+#[test]
+fn rejected_visual_paste_keeps_the_clipboard() {
+    let mut editor = Editor::new("abc\n");
+    editor.clipboard.text = Some("x\ry".to_owned());
+    editor.keys("vl");
+
+    let result = editor.vim.handle(
+        "p",
+        EditTarget::Document(&mut editor.document, &mut editor.history),
+        editor.selection,
+        &mut editor.clipboard,
+    );
+
+    assert!(result.is_err());
+    assert_eq!(editor.text(), "abc\n");
+    assert_eq!(editor.copied(), "x\ry");
+    assert_eq!(editor.clipboard.writes, 0);
+}

@@ -551,19 +551,21 @@ impl Vim {
             text.insert_str(0, document.newline());
             head += document.newline().len();
         }
-        if self.visual.is_some() {
-            clipboard.write(clipboard_text(
-                document,
-                range.clone(),
-                self.mode == Mode::VisualLine,
-            ));
-        }
+        let replaced = self
+            .visual
+            .is_some()
+            .then(|| clipboard_text(document, range.clone(), self.mode == Mode::VisualLine));
 
         self.mode = Mode::Normal;
         self.visual = None;
         self.column = None;
 
+        // Keep the clipboard intact when the document rejects the pasted text.
         let update = source.replace(range, &text)?;
+        if let Some(replaced) = replaced {
+            clipboard.write(replaced);
+        }
+
         let document = source.document();
         if !linewise {
             head = editing::previous_grapheme(document.text(), update.selection.head);
