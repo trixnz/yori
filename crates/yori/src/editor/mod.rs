@@ -11,6 +11,7 @@ mod change_navigation;
 mod chrome;
 mod completion;
 mod connections;
+mod find;
 mod footer;
 mod highlighting;
 mod input;
@@ -87,6 +88,9 @@ gpui_kit::actions!(
         FocusPreviousPane,
         FocusNextPane,
         ToggleWordWrap,
+        OpenFind,
+        FindNext,
+        FindPrevious,
     ]
 );
 
@@ -395,6 +399,7 @@ pub(super) struct AlignedEditor {
     scrollbar_grab: Option<f32>,
     horizontal_scrollbar_grab: Option<f32>,
     horizontal_scrollbar_visibility: HorizontalScrollbarVisibility,
+    find: Option<find::FindBar>,
     // Mouse events are window-local; measured bounds provide the editor's content-local inset.
     content_bounds: Rc<Cell<Bounds<Pixels>>>,
 }
@@ -570,6 +575,7 @@ impl AlignedEditor {
             scrollbar_grab: None,
             horizontal_scrollbar_grab: None,
             horizontal_scrollbar_visibility: HorizontalScrollbarVisibility::Hidden,
+            find: None,
             content_bounds: Rc::new(Cell::new(Bounds::new(
                 point(px(0.0), px(0.0)),
                 window.viewport_size(),
@@ -1250,6 +1256,8 @@ impl AlignedEditor {
             .map(|range| display.display_range(range))
             .filter(|range| !range.is_empty());
 
+        let found = self.find_line_matches(side, &source_range, display);
+
         let changed: Vec<_> = match side {
             Side::Left => &highlighting.intraline.left,
             Side::Right | Side::Incoming => &highlighting.intraline.right,
@@ -1262,15 +1270,21 @@ impl AlignedEditor {
         highlighting::compose(
             display.text.len(),
             syntax,
-            &changed,
-            selected.as_ref(),
-            marked.as_ref(),
+            &highlighting::Overlays {
+                changed: &changed,
+                found: &found.found,
+                selected: selected.as_ref(),
+                current_found: found.current.as_ref(),
+                marked: marked.as_ref(),
+            },
             &highlighting::OverlayColors {
                 changed: match side {
                     Side::Left => appearance::removed().emphasis,
                     Side::Right | Side::Incoming => appearance::added().emphasis,
                 },
                 selected: cx.theme().selection,
+                found: appearance::find().found,
+                current_found: appearance::find().current,
                 foreground: cx.theme().foreground,
             },
         )
@@ -1467,10 +1481,12 @@ impl Focusable for AlignedEditor {
 impl Render for AlignedEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let editor = cx.entity();
+        self.refresh_find();
+        let find_bar = self.render_find_bar(cx);
 
         // Build viewport-dependent content only after this frame's layout has
         // assigned its size, including when a previously hidden tab is activated.
-        container_query(move |size, window, cx| {
+        let content = container_query(move |size, window, cx| {
             editor.update(cx, |editor, cx| {
                 let mut bounds = editor.content_bounds.get();
                 bounds.size = size;
@@ -1479,7 +1495,15 @@ impl Render for AlignedEditor {
 
                 editor.render_content(window, cx)
             })
-        })
+        });
+
+        // The find field is a sibling of the editor surface so its keys bypass
+        // the editor's key context and Vim capture.
+        div()
+            .relative()
+            .size_full()
+            .child(content)
+            .children(find_bar)
     }
 }
 
@@ -1711,6 +1735,9 @@ impl AlignedEditor {
             .on_action(cx.listener(Self::focus_previous_pane))
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::toggle_word_wrap))
+            .on_action(cx.listener(Self::open_find))
+            .on_action(cx.listener(Self::find_next))
+            .on_action(cx.listener(Self::find_previous))
             .on_action(cx.listener(Self::restore_selected_lines))
             .on_action(cx.listener(Self::copy_selected))
             .on_action(cx.listener(Self::paste))

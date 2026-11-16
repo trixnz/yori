@@ -38,6 +38,7 @@ restoration, conflict resolution, and multiple open files in a tabbed workspace.
 ### Edit
 
 - Editable local files with undo and redo
+- Case-insensitive find within the focused pane
 - Syntax highlighting for C, C++, Go, and Rust
 - Guarded saves with external file-change detection
 - Preservation of LF, CRLF, Unicode, tabs, and missing final newlines
@@ -213,6 +214,8 @@ that client.
 | Switch tabs | <kbd>Ctrl</kbd>+<kbd>Tab</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Tab</kbd> |
 | Visit the previous or next change | <kbd>Alt</kbd>+<kbd>Up</kbd> / <kbd>Alt</kbd>+<kbd>Down</kbd> |
 | Apply the selected-line action | <kbd>Alt</kbd>+<kbd>Enter</kbd> |
+| Find in the focused pane | <kbd>Ctrl</kbd>+<kbd>F</kbd> |
+| Next or previous match | <kbd>Enter</kbd> / <kbd>Shift</kbd>+<kbd>Enter</kbd>, <kbd>F3</kbd> / <kbd>Shift</kbd>+<kbd>F3</kbd> |
 | Undo or redo | <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> |
 | Open preferences | <kbd>Ctrl</kbd>+<kbd>,</kbd> |
 | Quit | <kbd>Ctrl</kbd>+<kbd>Q</kbd> |
@@ -267,6 +270,9 @@ string, for example `"primary-k primary-s"`.
 | `focus_previous_pane` | `ctrl-h` |
 | `focus_next_pane` | `ctrl-l` |
 | `toggle_word_wrap` | None |
+| `find` | `primary-f` |
+| `find_next` | `f3` |
+| `find_previous` | `shift-f3` |
 | `copy` | `primary-c` |
 | `paste` | `primary-v` |
 | `cut` | `primary-x` |

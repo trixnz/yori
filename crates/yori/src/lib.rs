@@ -2,6 +2,7 @@
 
 pub mod display;
 pub mod document_info;
+pub mod find;
 pub mod geometry;
 pub mod navigation;
 /// Native Perforce review provider.

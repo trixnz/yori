@@ -182,22 +182,40 @@ impl SyntaxCache {
 pub(super) struct OverlayColors {
     pub changed: Hsla,
     pub selected: Hsla,
+    pub found: Hsla,
+    pub current_found: Hsla,
     pub foreground: Hsla,
+}
+
+/// Display-byte ranges painted over syntax colors, from lowest to highest priority
+/// except for `marked`, which underlines rather than filling.
+#[derive(Default)]
+pub(super) struct Overlays<'a> {
+    pub changed: &'a [Range<usize>],
+    pub found: &'a [Range<usize>],
+    pub selected: Option<&'a Range<usize>>,
+    pub current_found: Option<&'a Range<usize>>,
+    pub marked: Option<&'a Range<usize>>,
 }
 
 pub(super) fn compose(
     text_len: usize,
     syntax: &[(Range<usize>, HighlightStyle)],
-    changed: &[Range<usize>],
-    selected: Option<&Range<usize>>,
-    marked: Option<&Range<usize>>,
+    overlays: &Overlays<'_>,
     colors: &OverlayColors,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     let mut boundaries = vec![0, text_len];
     for (range, _) in syntax {
         boundaries.extend([range.start, range.end]);
     }
-    for range in changed.iter().chain(selected).chain(marked) {
+    for range in overlays
+        .changed
+        .iter()
+        .chain(overlays.found)
+        .chain(overlays.selected)
+        .chain(overlays.current_found)
+        .chain(overlays.marked)
+    {
         boundaries.extend([range.start, range.end]);
     }
     boundaries.sort_unstable();
@@ -216,17 +234,25 @@ pub(super) fn compose(
                 .find(|(span, _)| span.start <= range.start && span.end >= range.end)
                 .map(|(_, style)| *style)
                 .unwrap_or_default();
-            let overlaps = |span: &Range<usize>| span.start < range.end && span.end > range.start;
+            let touches = |span: &Range<usize>| span.start < range.end && span.end > range.start;
 
-            if changed.iter().any(overlaps) {
+            if overlays.changed.iter().any(touches) {
                 style.background_color = Some(colors.changed);
+            }
+            if overlays.found.iter().any(touches) {
+                style.background_color = Some(colors.found);
             }
 
             // A text selection must remain unambiguous on top of diff emphasis.
-            if selected.is_some_and(overlaps) {
+            if overlays.selected.is_some_and(touches) {
                 style.background_color = Some(colors.selected);
             }
-            if marked.is_some_and(overlaps) {
+
+            // Find selects its current match, so that match needs its own color to stand out.
+            if overlays.current_found.is_some_and(touches) {
+                style.background_color = Some(colors.current_found);
+            }
+            if overlays.marked.is_some_and(touches) {
                 style.underline = Some(UnderlineStyle {
                     color: Some(colors.foreground),
                     thickness: px(1.0),
@@ -241,9 +267,19 @@ pub(super) fn compose(
 
 #[cfg(test)]
 mod tests {
-    use super::{LineStyles, OverlayColors, SyntaxCache, compose};
+    use super::{LineStyles, OverlayColors, Overlays, SyntaxCache, compose};
     use gpui_kit::{HighlightStyle, hsla};
     use std::rc::Rc;
+
+    fn colors(foreground: gpui_kit::Hsla) -> OverlayColors {
+        OverlayColors {
+            changed: hsla(0.1, 0.5, 0.3, 1.0),
+            selected: hsla(0.6, 0.5, 0.3, 1.0),
+            found: hsla(0.12, 0.5, 0.3, 1.0),
+            current_found: hsla(0.12, 0.6, 0.45, 1.0),
+            foreground,
+        }
+    }
 
     #[test]
     fn missing_lines_are_queried_as_contiguous_ranges() {
@@ -262,11 +298,7 @@ mod tests {
     #[test]
     fn selection_wins_over_diff_while_syntax_and_composition_remain_visible() {
         let foreground = hsla(0.6, 0.5, 0.8, 1.0);
-        let colors = OverlayColors {
-            changed: hsla(0.1, 0.5, 0.3, 1.0),
-            selected: hsla(0.6, 0.5, 0.3, 1.0),
-            foreground,
-        };
+        let colors = colors(foreground);
         let syntax = vec![(
             0..6,
             HighlightStyle {
@@ -276,7 +308,17 @@ mod tests {
         )];
         let changes = vec![1..5, 7..8];
 
-        let runs = compose(8, &syntax, &changes, Some(&(2..4)), Some(&(3..5)), &colors);
+        let runs = compose(
+            8,
+            &syntax,
+            &Overlays {
+                changed: &changes,
+                selected: Some(&(2..4)),
+                marked: Some(&(3..5)),
+                ..Overlays::default()
+            },
+            &colors,
+        );
 
         for byte in 0..8 {
             let (_, style) = runs
@@ -301,5 +343,37 @@ mod tests {
         assert_eq!(runs.first().unwrap().0.start, 0);
         assert_eq!(runs.last().unwrap().0.end, 8);
         assert!(runs.windows(2).all(|pair| pair[0].0.end == pair[1].0.start));
+    }
+
+    #[test]
+    fn find_matches_cover_diff_and_only_the_current_match_outranks_the_selection() {
+        let colors = colors(hsla(0.0, 0.0, 0.9, 1.0));
+        let changes = vec![0..4, 8..10];
+        let found = vec![1..3, 5..7];
+
+        // Find selects its current match; the selection lies on the second match.
+        let runs = compose(
+            10,
+            &[],
+            &Overlays {
+                changed: &changes,
+                found: &found,
+                selected: Some(&(5..8)),
+                current_found: Some(&(5..7)),
+                marked: None,
+            },
+            &colors,
+        );
+        let background = |byte: usize| {
+            runs.iter()
+                .find(|(range, _)| range.contains(&byte))
+                .and_then(|(_, style)| style.background_color)
+        };
+
+        assert_eq!(background(0), Some(colors.changed));
+        assert_eq!(background(1), Some(colors.found));
+        assert_eq!(background(5), Some(colors.current_found));
+        assert_eq!(background(7), Some(colors.selected));
+        assert_eq!(background(9), Some(colors.changed));
     }
 }
