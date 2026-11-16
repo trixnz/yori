@@ -1,12 +1,30 @@
 use super::*;
 use yori_document::editing::EditHistory;
 
+/// Stands in for the OS clipboard, which is the only register.
+#[derive(Default)]
+struct TestClipboard {
+    text: Option<String>,
+    writes: usize,
+}
+
+impl Clipboard for TestClipboard {
+    fn read(&mut self) -> Option<String> {
+        self.text.clone()
+    }
+
+    fn write(&mut self, text: String) {
+        self.text = Some(text);
+        self.writes += 1;
+    }
+}
+
 struct Editor {
     vim: Vim,
     document: Document,
     history: EditHistory,
     selection: TextSelection,
-    register: Register,
+    clipboard: TestClipboard,
     writable: bool,
 }
 
@@ -17,7 +35,7 @@ impl Editor {
             document: Document::from_bytes(text.as_bytes().to_vec()).unwrap(),
             history: EditHistory::default(),
             selection: TextSelection::caret(0),
-            register: Register::default(),
+            clipboard: TestClipboard::default(),
             writable: true,
         }
     }
@@ -33,7 +51,7 @@ impl Editor {
                     EditTarget::ReadOnly(&self.document)
                 },
                 self.selection,
-                &mut self.register,
+                &mut self.clipboard,
             )
             .unwrap();
 
@@ -55,6 +73,10 @@ impl Editor {
 
     fn text(&self) -> &str {
         self.document.text()
+    }
+
+    fn copied(&self) -> &str {
+        self.clipboard.text.as_deref().unwrap_or_default()
     }
 }
 
@@ -125,7 +147,7 @@ fn visual_ranges_are_inclusive_and_linewise_ranges_cover_full_source_lines() {
 
     editor.key("u");
     editor.keys("Vjy");
-    assert_eq!(editor.register.text, "abc\ndef\n");
+    assert_eq!(editor.copied(), "abc\ndef\n");
 
     editor.key("G");
     editor.key("p");
@@ -136,7 +158,7 @@ fn visual_ranges_are_inclusive_and_linewise_ranges_cover_full_source_lines() {
 fn backwards_visual_selection_includes_both_endpoints() {
     let mut editor = Editor::new("abc\n");
     editor.keys("$vhy");
-    assert_eq!(editor.register.text, "bc");
+    assert_eq!(editor.copied(), "bc");
 }
 
 #[test]
@@ -194,7 +216,7 @@ fn read_only_pane_allows_navigation_and_yank_but_no_mutation() {
     editor.writable = false;
 
     editor.keys("jyy");
-    assert_eq!(editor.register.text, "right\n");
+    assert_eq!(editor.copied(), "right\n");
 
     editor.keys("ddciwpioxu");
     editor.key("ctrl-r");
@@ -264,12 +286,12 @@ fn mouse_selection_and_insert_repositioning_use_existing_history() {
 }
 
 #[test]
-fn unnamed_register_can_cross_documents_with_different_line_endings() {
+fn clipboard_lines_cross_documents_with_different_line_endings() {
     let mut source = Editor::new("copied\r\n");
     source.keys("yy");
 
     let mut target = Editor::new("unterminated");
-    target.register = source.register;
+    target.clipboard = source.clipboard;
     target.key("p");
     assert_eq!(target.text(), "unterminated\ncopied");
 
@@ -358,7 +380,7 @@ fn merge_vim_groups_changes_and_open_lines_without_consuming_status_history() {
         let mut merge =
             MergeSession::new(doc("base\r\n"), doc("old\r\n"), doc("incoming\r\n")).unwrap();
         let mut vim = Vim::default();
-        let mut register = Register::default();
+        let mut clipboard = TestClipboard::default();
         let mut selection = TextSelection::caret(0);
         merge.set_resolved(ConflictId(0), true, selection).unwrap();
 
@@ -368,7 +390,7 @@ fn merge_vim_groups_changes_and_open_lines_without_consuming_status_history() {
                     &key.to_string(),
                     EditTarget::Merge(&mut merge),
                     selection,
-                    &mut register,
+                    &mut clipboard,
                 )
                 .unwrap()
                 .selection;
@@ -392,21 +414,31 @@ fn merge_vim_groups_changes_and_open_lines_without_consuming_status_history() {
                 "escape",
                 EditTarget::Merge(&mut merge),
                 selection,
-                &mut register,
+                &mut clipboard,
             )
             .unwrap()
             .selection;
         let edited = merge.result().text().to_owned();
 
         selection = vim
-            .handle("u", EditTarget::Merge(&mut merge), selection, &mut register)
+            .handle(
+                "u",
+                EditTarget::Merge(&mut merge),
+                selection,
+                &mut clipboard,
+            )
             .unwrap()
             .selection;
         assert_eq!(merge.result().text(), "old\r\n", "{command}");
         assert!(merge.state(ConflictId(0)).unwrap().resolved);
 
         let status = vim
-            .handle("u", EditTarget::Merge(&mut merge), selection, &mut register)
+            .handle(
+                "u",
+                EditTarget::Merge(&mut merge),
+                selection,
+                &mut clipboard,
+            )
             .unwrap();
         assert!(status.edit.is_none());
         assert!(!merge.state(ConflictId(0)).unwrap().resolved);
@@ -417,7 +449,7 @@ fn merge_vim_groups_changes_and_open_lines_without_consuming_status_history() {
                 "ctrl-r",
                 EditTarget::Merge(&mut merge),
                 status.selection,
-                &mut register,
+                &mut clipboard,
             )
             .unwrap()
             .selection;
@@ -425,7 +457,7 @@ fn merge_vim_groups_changes_and_open_lines_without_consuming_status_history() {
             "ctrl-r",
             EditTarget::Merge(&mut merge),
             selection,
-            &mut register,
+            &mut clipboard,
         )
         .unwrap();
         assert_eq!(merge.result().text(), edited);
@@ -440,12 +472,17 @@ fn merge_vim_reposition_and_cancel_commit_separate_typing_runs() {
     let doc = |text: &str| Document::from_bytes(text.as_bytes().to_vec()).unwrap();
     let mut merge = MergeSession::new(doc("base\n"), doc("old\n"), doc("incoming\n")).unwrap();
     let mut vim = Vim::default();
-    let mut register = Register::default();
+    let mut clipboard = TestClipboard::default();
     let mut selection = TextSelection::caret(0);
 
     for key in ["c", "i", "w"] {
         selection = vim
-            .handle(key, EditTarget::Merge(&mut merge), selection, &mut register)
+            .handle(
+                key,
+                EditTarget::Merge(&mut merge),
+                selection,
+                &mut clipboard,
+            )
             .unwrap()
             .selection;
     }
@@ -465,13 +502,195 @@ fn merge_vim_reposition_and_cancel_commit_separate_typing_runs() {
     assert_eq!(merge.result().text(), "YX\n");
 
     selection = vim
-        .handle("u", EditTarget::Merge(&mut merge), selection, &mut register)
+        .handle(
+            "u",
+            EditTarget::Merge(&mut merge),
+            selection,
+            &mut clipboard,
+        )
         .unwrap()
         .selection;
     assert_eq!(merge.result().text(), "X\n");
 
-    vim.handle("u", EditTarget::Merge(&mut merge), selection, &mut register)
-        .unwrap();
+    vim.handle(
+        "u",
+        EditTarget::Merge(&mut merge),
+        selection,
+        &mut clipboard,
+    )
+    .unwrap();
     assert_eq!(merge.result().text(), "old\n");
     assert!(merge.undo(selection).unwrap().is_none());
+}
+
+#[test]
+fn shift_y_yanks_counted_lines_without_moving_the_cursor() {
+    let mut editor = Editor::new("one two\nthree\nfour\n");
+    editor.keys("wY");
+    assert_eq!(editor.copied(), "one two\n");
+    assert_eq!(editor.selection.head, "one ".len());
+
+    editor.keys("j3Y");
+    assert_eq!(editor.copied(), "three\nfour\n");
+    assert_eq!(editor.text(), "one two\nthree\nfour\n");
+
+    editor.key("p");
+    assert_eq!(editor.text(), "one two\nthree\nthree\nfour\nfour\n");
+}
+
+#[test]
+fn visual_shift_y_yanks_whole_selected_lines() {
+    let mut editor = Editor::new("abc\ndef\nghi\n");
+    editor.keys("lvjY");
+    assert_eq!(editor.copied(), "abc\ndef\n");
+    assert_eq!(editor.vim.mode(), Mode::Normal);
+    assert_eq!(editor.selection, TextSelection::caret(1));
+}
+
+#[test]
+fn big_word_motions_skip_punctuation_inside_whitespace_delimited_words() {
+    let mut editor = Editor::new("foo.bar(baz) next-one\nlast\n");
+    editor.key("W");
+    assert_eq!(editor.selection.head, "foo.bar(baz) ".len());
+
+    editor.key("W");
+    assert_eq!(editor.selection.head, "foo.bar(baz) next-one\n".len());
+
+    editor.key("B");
+    assert_eq!(editor.selection.head, "foo.bar(baz) ".len());
+
+    editor.key("B");
+    assert_eq!(editor.selection.head, 0);
+
+    editor.key("E");
+    assert_eq!(editor.selection.head, "foo.bar(baz".len());
+
+    editor.keys("2E");
+    assert_eq!(editor.selection.head, "foo.bar(baz) next-one\nlas".len());
+}
+
+#[test]
+fn yank_and_delete_big_word_cover_punctuation() {
+    let mut editor = Editor::new("foo.bar baz\n");
+    editor.keys("yW");
+    assert_eq!(editor.copied(), "foo.bar ");
+    assert_eq!(editor.selection.head, 0);
+
+    editor.keys("yw");
+    assert_eq!(editor.copied(), "foo");
+
+    editor.keys("dW");
+    assert_eq!(editor.text(), "baz\n");
+    assert_eq!(editor.copied(), "foo.bar ");
+}
+
+#[test]
+fn change_big_word_keeps_trailing_whitespace_like_cw() {
+    let mut editor = Editor::new("foo.bar baz qux\n");
+    editor.keys("cW");
+    assert_eq!(editor.text(), " baz qux\n");
+
+    editor.key("escape");
+    editor.key("u");
+    editor.keys("c2W");
+    assert_eq!(editor.text(), " qux\n");
+}
+
+#[test]
+fn visual_yank_returns_the_cursor_to_the_selection_start() {
+    let mut editor = Editor::new("abc def\nghi\n");
+    editor.keys("wlvhhy");
+    assert_eq!(editor.copied(), " de");
+    assert_eq!(editor.vim.mode(), Mode::Normal);
+    assert_eq!(editor.selection, TextSelection::caret("abc".len()));
+
+    editor.keys("lVjy");
+    assert_eq!(editor.copied(), "abc def\nghi\n");
+    assert_eq!(editor.vim.mode(), Mode::Normal);
+    assert_eq!(editor.selection, TextSelection::caret("abc ".len()));
+    assert_eq!(editor.text(), "abc def\nghi\n");
+}
+
+#[test]
+fn deletes_and_changes_share_the_clipboard_with_yanks() {
+    for (keys, copied) in [
+        ("x", "a"),
+        ("dw", "abc "),
+        ("cw", "abc"),
+        ("dd", "abc def\n"),
+    ] {
+        let mut editor = Editor::new("abc def\n");
+        editor.keys(keys);
+        assert_eq!(editor.copied(), copied, "{keys}");
+    }
+
+    let mut editor = Editor::new("abc def\n");
+    editor.keys("yewvep");
+    assert_eq!(editor.text(), "abc abc\n");
+    assert_eq!(
+        editor.copied(),
+        "def",
+        "visual paste copies what it replaced"
+    );
+}
+
+#[test]
+fn motions_and_empty_changes_leave_text_from_other_apps_on_the_clipboard() {
+    let mut editor = Editor::new("abc\n");
+    editor.clipboard.text = Some("external".to_owned());
+    editor.keys("lwvlv0");
+    editor.keys("c0");
+    editor.key("escape");
+    assert_eq!(editor.text(), "abc\n");
+    assert_eq!(editor.clipboard.writes, 0);
+    assert_eq!(editor.copied(), "external");
+}
+
+#[test]
+fn paste_shape_follows_the_clipboard_trailing_line_ending() {
+    let mut editor = Editor::new("abc\n");
+    editor.clipboard.text = Some("XY".to_owned());
+    editor.key("p");
+    assert_eq!(editor.text(), "aXYbc\n");
+
+    editor.clipboard.text = Some("line\n".to_owned());
+    editor.key("p");
+    assert_eq!(editor.text(), "aXYbc\nline\n");
+
+    editor.keys("ggyy");
+    assert_eq!(editor.copied(), "aXYbc\n");
+}
+
+#[test]
+fn linewise_yank_of_an_unterminated_line_still_pastes_as_a_line() {
+    let mut editor = Editor::new("a\nb");
+    editor.keys("GyyggP");
+    assert_eq!(editor.text(), "b\na\nb");
+}
+
+#[test]
+fn paste_with_an_empty_clipboard_is_a_no_op() {
+    let mut editor = Editor::new("abc\n");
+    editor.keys("pP");
+    assert_eq!(editor.text(), "abc\n");
+    assert_eq!(editor.clipboard.writes, 0);
+}
+
+#[test]
+fn rejected_visual_paste_keeps_the_clipboard() {
+    let mut editor = Editor::new("abc\n");
+    editor.clipboard.text = Some("x\ry".to_owned());
+    editor.keys("vl");
+
+    let result = editor.vim.handle(
+        "p",
+        EditTarget::Document(&mut editor.document, &mut editor.history),
+        editor.selection,
+        &mut editor.clipboard,
+    );
+
+    assert!(result.is_err());
+    assert_eq!(editor.text(), "abc\n");
+    assert_eq!(editor.copied(), "x\ry");
+    assert_eq!(editor.clipboard.writes, 0);
 }
