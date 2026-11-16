@@ -128,7 +128,9 @@
             buildInputs = runtimeLibraries;
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibraries;
           };
-          kachePackage = kache.packages.${system}.kache;
+          kachePackage = kache.packages.${system}.kache.overrideAttrs (_: {
+            doCheck = false;
+          });
         in {
           default = pkgs.mkShell shellAttributes;
           kache = pkgs.mkShell (shellAttributes // {
