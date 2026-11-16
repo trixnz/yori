@@ -85,6 +85,19 @@ pub(super) fn added() -> DiffColors {
     }
 }
 
+pub(super) struct FindColors {
+    pub found: Hsla,
+    pub current: Hsla,
+}
+
+/// Amber stays clear of the neutral selection and the red/green diff emphasis.
+pub(super) fn find() -> FindColors {
+    FindColors {
+        found: rgb(0x4a3f1f).into(),
+        current: rgb(0x8a6a1c).into(),
+    }
+}
+
 pub(super) fn gap() -> Hsla {
     rgb(0x161616).into()
 }

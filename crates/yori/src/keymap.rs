@@ -47,6 +47,10 @@ struct ActionDefinition {
     binding: fn(&str) -> KeyBinding,
 }
 
+/// Find navigation works from the open find field and from the editor behind it
+/// (the editor's and the find field's key contexts).
+const FIND_NAVIGATION_CONTEXT: &str = "AlignedEditor || FindBar";
+
 macro_rules! action_catalog {
     ($(($builder:ident, $name:literal, [$($default:literal),* $(,)?], $context:expr, $action:path)),* $(,)?) => {
         $(
@@ -180,6 +184,27 @@ action_catalog!(
         [],
         Some(editor::KEY_CONTEXT),
         editor::ToggleWordWrap
+    ),
+    (
+        find,
+        "find",
+        ["primary-f"],
+        Some(editor::KEY_CONTEXT),
+        editor::OpenFind
+    ),
+    (
+        find_next,
+        "find_next",
+        ["f3"],
+        Some(FIND_NAVIGATION_CONTEXT),
+        editor::FindNext
+    ),
+    (
+        find_previous,
+        "find_previous",
+        ["shift-f3"],
+        Some(FIND_NAVIGATION_CONTEXT),
+        editor::FindPrevious
     ),
     (
         copy,
