@@ -295,7 +295,7 @@ mod tests {
             let track = ScrollTrack::new(alignment.rows().len(), 22.0, 600.0);
             let bands = track.bands(&alignment, 22.0);
 
-            assert!(!bands.is_empty());
+            assert_ne!(bands, []);
             assert!(
                 bands
                     .iter()

@@ -98,7 +98,7 @@ fn clearing_a_selection_returns_to_whole_block_restoration(cx: &mut TestAppConte
         window.click(("restore-block", 0usize), cx);
 
         assert_eq!(editor.read(cx).right.document.text(), BASELINE);
-        assert!(editor.read(cx).alignment.blocks().is_empty());
+        assert_eq!(editor.read(cx).alignment.blocks(), []);
 
         let undo = if cfg!(target_os = "macos") {
             "cmd-z"

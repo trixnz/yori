@@ -33,7 +33,7 @@ fn independent_and_identical_changes_merge_without_conflicts() {
 
     let merge = session("old\n", "same change\n", "same change\n");
     assert_eq!(merge.result().text(), "same change\n");
-    assert!(merge.conflicts().is_empty());
+    assert_eq!(merge.conflicts(), []);
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn invalid_edits_do_not_change_result_metadata_or_history() {
 fn empty_inputs_deletion_conflicts_and_final_newlines_remain_source_faithful() {
     let merge = session("", "", "new\r\n");
     assert_eq!(merge.result().text(), "new\r\n");
-    assert!(merge.conflicts().is_empty());
+    assert_eq!(merge.conflicts(), []);
 
     let mut merge = session("old\r\n", "", "changed\r\n");
     let id = merge.conflicts()[0].id;

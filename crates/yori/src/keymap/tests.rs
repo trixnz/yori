@@ -67,7 +67,7 @@ fn missing_actions_use_defaults_and_overrides_replace_them() {
 fn empty_array_disables_an_action() {
     let overrides = validated(&[("redo", &[])]);
 
-    assert!(overrides.bindings_for(action("redo")).is_empty());
+    assert_eq!(overrides.bindings_for(action("redo")), Vec::<&str>::new());
 }
 
 #[test]

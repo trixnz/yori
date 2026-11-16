@@ -149,8 +149,8 @@ fn empty_result_keeps_input_only_rows_ordinary_and_empty_documents_stay_empty() 
 
     let empty = merge_session("", "", "");
     let display = MergeDisplay::build(&empty, None);
-    assert!(display.rows().is_empty());
-    assert!(display.conflicts().is_empty());
+    assert_eq!(display.rows(), []);
+    assert_eq!(display.conflicts(), []);
     assert_sources(&display, &empty);
 }
 

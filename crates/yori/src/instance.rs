@@ -39,15 +39,9 @@ const ELECTION_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_PENDING_CONNECTIONS: usize = 16;
 
 fn socket_name_is_occupied(error: &io::Error) -> bool {
-    if error.kind() == io::ErrorKind::AddrInUse {
-        return true;
-    }
+    let kind = error.kind();
 
-    #[cfg(windows)]
-    return error.kind() == io::ErrorKind::PermissionDenied;
-
-    #[cfg(not(windows))]
-    false
+    kind == io::ErrorKind::AddrInUse || (cfg!(windows) && kind == io::ErrorKind::PermissionDenied)
 }
 
 #[derive(Debug)]
@@ -122,6 +116,10 @@ pub(super) struct Instance {
 struct ConnectionPermit(Arc<AtomicUsize>);
 
 impl ConnectionPermit {
+    #[expect(
+        deprecated,
+        reason = "fetch_update is renamed try_update in Rust 1.99, but try_update needs 1.95 and the MSRV is 1.92"
+    )]
     fn acquire(active: Arc<AtomicUsize>) -> Option<Self> {
         active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {

@@ -501,7 +501,7 @@ fn save_all_closes_the_window_only_after_every_changed_tab_is_written(cx: &mut T
 
     assert!(std::fs::read_to_string(local_a).unwrap().contains('A'));
     assert!(std::fs::read_to_string(local_b).unwrap().contains('B'));
-    cx.cx.update(|cx| assert!(cx.windows().is_empty()));
+    cx.cx.update(|cx| assert_eq!(cx.windows(), []));
 }
 
 #[gpui_kit::test]

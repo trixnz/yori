@@ -227,7 +227,7 @@ fn base_expansion_and_three_pane_hit_testing_preserve_source_identity(cx: &mut T
                 .filter(|(_, row)| matches!(row.kind, RowKind::Base(_)))
                 .map(|(index, _)| index)
                 .collect();
-            assert!(!base_rows.is_empty());
+            assert_ne!(base_rows, Vec::<usize>::new());
             assert!(base_rows.iter().all(|&row| {
                 [Side::Left, Side::Right, Side::Incoming]
                     .iter()

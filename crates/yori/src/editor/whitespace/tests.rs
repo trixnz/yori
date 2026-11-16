@@ -40,7 +40,7 @@ fn whitespace_inventory_preserves_tab_spans_unicode_and_source_mapping() {
 #[test]
 fn blank_lines_and_whitespace_only_lines_do_not_invent_source_content() {
     let empty = DisplayLine::from_source("", 12, 4);
-    assert!(empty.whitespace_marks("").is_empty());
+    assert_eq!(empty.whitespace_marks(""), []);
     assert_eq!(empty.source_offset(0), 12);
 
     let whitespace = DisplayLine::from_source(" \t ", 12, 4);

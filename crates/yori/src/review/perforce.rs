@@ -1263,7 +1263,7 @@ mod tests {
         assert_eq!(added.identity.to_string(), "//depot/added.txt");
         assert_eq!(added.logical_path, PathBuf::from("added.txt"));
         assert_eq!(added.status, ReviewFileStatus::Added);
-        assert!(added_text.baseline.is_empty());
+        assert_eq!(added_text.baseline, b"");
         assert_eq!(added_text.local, b"added\n");
         assert_eq!(added_text.save_destination, Some(paths[0].clone()));
 
@@ -1273,7 +1273,7 @@ mod tests {
         assert_eq!(deleted.logical_path, PathBuf::from("deleted.txt"));
         assert_eq!(deleted.status, ReviewFileStatus::Deleted);
         assert_eq!(deleted_text.baseline, b"deleted\n");
-        assert!(deleted_text.local.is_empty());
+        assert_eq!(deleted_text.local, b"");
         assert_eq!(deleted_text.save_destination, None);
 
         let renamed = &manifest.files[2];
@@ -1669,7 +1669,7 @@ mod tests {
         assert_eq!(deleted.logical_path, PathBuf::from("deleted.txt"));
         assert_eq!(deleted.status, ReviewFileStatus::Deleted);
         assert_eq!(deleted_text.baseline, b"before delete\n");
-        assert!(deleted_text.local.is_empty());
+        assert_eq!(deleted_text.local, b"");
         assert_eq!(deleted_text.save_destination, None);
 
         let binary = &manifest.files[2];
@@ -1793,7 +1793,7 @@ mod tests {
         ));
         let details = text_details(&manifest.files[0]);
         assert_eq!(details.baseline, b"before move\n");
-        assert!(details.local.is_empty());
+        assert_eq!(details.local, b"");
         assert!(!details.editable);
         assert_eq!(details.save_destination, None);
     }
