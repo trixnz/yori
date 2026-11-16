@@ -190,7 +190,7 @@ fn deleting_everything_then_typing_and_undoing_supports_empty_files() {
     let empty = history
         .replace(&mut local, original, original.range(), "")
         .unwrap();
-    assert!(local.lines().is_empty());
+    assert_eq!(local.lines(), []);
 
     let added = history
         .replace(&mut local, empty.selection, 0..0, "界")

@@ -136,7 +136,10 @@ fn does_not_change_line_pairing_or_create_emphasis_on_unpaired_rows() {
     assert_eq!(alignment.rows()[2].kind, DiffKind::Added);
 
     let original = alignment.rows().to_vec();
-    assert!(!alignment.intraline(&left, &right, 1).left.is_empty());
+    assert_ne!(
+        alignment.intraline(&left, &right, 1).left,
+        Vec::<std::ops::Range<usize>>::new()
+    );
     assert_eq!(
         alignment.intraline(&left, &right, 2),
         IntralineDiff::default()

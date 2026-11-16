@@ -232,7 +232,7 @@ fn resize_and_edit_keep_the_track_aligned_and_clamp_short_documents(cx: &mut Tes
         let track = view.scroll_track(&projection);
         assert!(view.vertical_scroll.abs() < f32::EPSILON);
         assert!(track.max_scroll().abs() < f32::EPSILON);
-        assert!(track.bands(&view.alignment, LINE_HEIGHT).is_empty());
+        assert_eq!(track.bands(&view.alignment, LINE_HEIGHT), []);
     });
 }
 

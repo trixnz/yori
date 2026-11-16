@@ -1961,7 +1961,7 @@ mod tests {
             .unwrap()
             .styles(&range, theme.as_ref());
 
-        assert!(!expected.is_empty());
+        assert_ne!(expected, []);
         assert_eq!(
             pane.highlighter
                 .as_ref()

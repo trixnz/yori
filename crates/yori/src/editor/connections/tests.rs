@@ -207,7 +207,7 @@ fn enabled_geometry_supports_right_pane_typing_and_whole_block_restore(cx: &mut 
         window.click(("restore-block", 0usize), cx);
         let view = editor.read(cx);
         assert_eq!(view.right.document.text(), view.left.document.text());
-        assert!(view.alignment.blocks().is_empty());
+        assert_eq!(view.alignment.blocks(), []);
         assert!(view.hovered_connection.is_none());
 
         window.press("ctrl-z", cx);

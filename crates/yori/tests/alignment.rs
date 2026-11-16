@@ -31,7 +31,7 @@ fn splitting_preserves_line_endings_and_final_newline_state() {
     assert_eq!(source.lines()[2].ending, LineEnding::Lf);
     assert_eq!(source.lines()[3].ending, LineEnding::None);
 
-    assert!(doc("").lines().is_empty());
+    assert_eq!(doc("").lines(), []);
     assert_eq!(doc("\n").lines().len(), 1);
 }
 
@@ -186,10 +186,6 @@ fn tab_expanded_horizontal_extent_can_reveal_the_final_source_position() {
 }
 
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "these whole/half pixel fixtures are exactly representable; clipping must match the exact geometry"
-)]
 fn geometry_keeps_gutter_and_header_outside_scrolled_content() {
     let geometry = EditorGeometry::new(21.0, 17.0, 1_000.0, 700.0, 42.0, 58.0, 20.0);
 

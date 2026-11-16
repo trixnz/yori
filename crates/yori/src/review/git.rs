@@ -1310,7 +1310,7 @@ mod tests {
 
         let manifest = load(&fixture.discovered().working_source());
 
-        assert!(manifest.files.is_empty());
+        assert_eq!(manifest.files, []);
     }
 
     #[cfg(unix)]
@@ -1348,7 +1348,7 @@ mod tests {
 
         let manifest = load(&fixture.discovered().working_source());
 
-        assert!(manifest.files.is_empty());
+        assert_eq!(manifest.files, []);
     }
 
     #[cfg(unix)]
@@ -1465,7 +1465,7 @@ mod tests {
         assert_eq!(manifest.files.len(), 1);
         assert_eq!(manifest.files[0].status, ReviewFileStatus::Added);
         let (baseline, local, editable, saveable) = text_bytes(&manifest.files[0]);
-        assert!(baseline.is_empty());
+        assert_eq!(baseline, b"");
         assert_eq!(local, b"first\n");
         assert!(editable);
         assert!(saveable);
