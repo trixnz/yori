@@ -3,5 +3,5 @@
 .DS_Store
 *.swp
 *.swo
-/.direnv/
+/.direnv*/
 /.env
