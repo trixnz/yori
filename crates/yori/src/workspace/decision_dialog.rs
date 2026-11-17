@@ -28,7 +28,10 @@ impl DecisionShortcut {
     }
 
     fn keystroke(self) -> Keystroke {
-        Keystroke::parse(&self.key()).expect("decision shortcuts are valid keystrokes")
+        Keystroke {
+            key: self.key(),
+            ..Keystroke::default()
+        }
     }
 
     fn matches(self, keystroke: &Keystroke) -> bool {
@@ -226,10 +229,8 @@ mod tests {
     struct Harness;
 
     impl Render for Harness {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .size_full()
-                .children(Root::render_dialog_layer(window, cx))
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
         }
     }
 

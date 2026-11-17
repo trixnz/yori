@@ -12,7 +12,7 @@ mod tabs;
 mod tests;
 
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IconName, Root, Sizable, WindowExt,
+    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt,
     button::{Button, ButtonVariants},
     dialog::{Cancel, Confirm, DialogFooter},
     notification::Notification,
@@ -1404,8 +1404,6 @@ impl Render for Workspace {
 
         let bar = self.render_tab_bar(cx);
         let body = self.render_body();
-        let dialogs = Root::render_dialog_layer(window, cx);
-        let notifications = Root::render_notification_layer(window, cx);
 
         div()
             .id("workspace")
@@ -1459,8 +1457,6 @@ impl Render for Workspace {
                     .overflow_hidden()
                     .child(body),
             )
-            .children(dialogs)
-            .children(notifications)
     }
 }
 

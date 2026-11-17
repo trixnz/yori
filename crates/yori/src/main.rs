@@ -12,7 +12,7 @@ mod storage;
 mod window_placement;
 mod workspace;
 use comparison::Comparison;
-use gpui_kit::component::{Root, WindowExt, notification::Notification};
+use gpui_kit::component::{WindowExt, notification::Notification};
 use gpui_kit::{AppContext, AssetSource, SharedString, WindowBounds, WindowOptions};
 use invocation::InvocationRequest;
 use std::{borrow::Cow, env, path::PathBuf, process};
@@ -218,21 +218,14 @@ fn main() {
 
             let window_options = main_window_options(window_placement::saved(cx));
             cx.spawn(async move |cx| {
-                let mut workspace = None;
-                let window = cx
-                    .open_window(window_options, |window, cx| {
-                        let view = cx.new(|cx| Workspace::new(window, cx));
-                        workspace = Some(view.clone());
-                        window.set_window_title("yori");
-
-                        cx.new(|cx| Root::new(view, window, cx))
+                let (window, workspace) = cx
+                    .update(|cx| {
+                        gpui_kit::open_window(window_options, cx, |window, cx| {
+                            window.set_window_title("yori");
+                            cx.new(|cx| Workspace::new(window, cx))
+                        })
                     })
                     .expect("failed to open yori window");
-                let workspace = workspace.expect("workspace initialized with its window");
-
-                // WindowExt updates Root internally. Release the typed Root handle
-                // before reporting startup diagnostics or opening comparisons.
-                let window: gpui_kit::AnyWindowHandle = window.into();
 
                 report_startup_diagnostic(window, cx);
 
@@ -274,18 +267,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_kit::component::Root;
     use gpui_kit::{
-        Bounds, Context, IntoElement, ParentElement, Render, TestAppContext, VisualContext, Window,
-        div, point, px, size, test::TestWindowExt,
+        Bounds, Context, IntoElement, Render, TestAppContext, VisualContext, Window, div, point,
+        px, size, test::TestWindowExt,
     };
 
     struct TestView;
 
     impl Render for TestView {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let notifications = Root::render_notification_layer(window, cx);
-
-            div().children(notifications)
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
         }
     }
 
