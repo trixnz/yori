@@ -144,8 +144,8 @@ impl Document {
         let after = self.text.as_bytes().get(range.end);
 
         match (newline, before, after) {
+            ("\r", Some(b'\r'), Some(b'\n')) | ("\n", Some(b'\r'), _) => "\r\n",
             ("\r", _, Some(b'\n')) => "\n",
-            ("\n", Some(b'\r'), _) => "\r\n",
             _ => newline,
         }
     }

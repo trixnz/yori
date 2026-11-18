@@ -20,6 +20,7 @@ fn inserted_newlines_do_not_coalesce_with_neighboring_endings() {
         ("a\nb\rc", 4..4, "a\nb\r\r\nc"),
         ("a\rb\rc", 3..3, "a\rb\r\rc"),
         ("a\rbX\nc", 3..4, "a\rb\n\nc"),
+        ("a\rbX\nc", 2..4, "a\r\r\n\nc"),
     ] {
         let mut document = Document::from_bytes(text.as_bytes().to_vec()).unwrap();
         let newline = document.newline_for_edit(range.clone());
