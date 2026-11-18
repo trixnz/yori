@@ -14,6 +14,23 @@ fn bare_carriage_returns_load_without_changing_source_bytes() {
 }
 
 #[test]
+fn inserted_newlines_do_not_coalesce_with_neighboring_endings() {
+    for (text, range, expected) in [
+        ("a\rb\nc", 3..3, "a\rb\n\nc"),
+        ("a\nb\rc", 4..4, "a\nb\r\r\nc"),
+        ("a\rb\rc", 3..3, "a\rb\r\rc"),
+        ("a\rbX\nc", 3..4, "a\rb\n\nc"),
+    ] {
+        let mut document = Document::from_bytes(text.as_bytes().to_vec()).unwrap();
+        let newline = document.newline_for_edit(range.clone());
+
+        document.replace(range, newline).unwrap();
+
+        assert_eq!(document.text(), expected);
+    }
+}
+
+#[test]
 fn repeated_carriage_returns_are_individual_line_endings() {
     let mut document = Document::from_bytes(b"one\r\rtwo\r".to_vec()).unwrap();
 

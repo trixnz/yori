@@ -677,6 +677,45 @@ fn paste_with_an_empty_clipboard_is_a_no_op() {
 }
 
 #[test]
+fn cr_linewise_commands_preserve_separators() {
+    let mut editor = Editor::new("aa\rbb\r");
+    editor.keys("yy");
+    assert_eq!(editor.copied(), "aa\r");
+
+    editor.keys("p");
+    assert_eq!(editor.text(), "aa\raa\rbb\r");
+
+    let mut editor = Editor::new("a\rb\r");
+    editor.keys("ccX");
+    assert_eq!(editor.text(), "X\rb\r");
+
+    let mut editor = Editor::new("a\rb\r");
+    editor.keys("Gdd");
+    assert_eq!(editor.text(), "a\r");
+
+    let mut editor = Editor::new("bb\r");
+    editor.clipboard.text = Some("xx\n".to_owned());
+    editor.keys("p");
+    assert_eq!(editor.text(), "bb\rxx\n");
+
+    let mut editor = Editor::new("bb\rcc\r");
+    editor.clipboard.text = Some("xx\r".to_owned());
+    editor.keys("p");
+    assert_eq!(editor.text(), "bb\rxx\rcc\r");
+}
+
+#[test]
+fn cr_blank_lines_and_mixed_endings_support_word_and_open_commands() {
+    let mut editor = Editor::new("a\r\rb");
+    editor.keys("w");
+    assert_eq!(editor.selection.head, 2);
+
+    let mut editor = Editor::new("a\rb\nc");
+    editor.keys("joX");
+    assert_eq!(editor.text(), "a\rb\nX\nc");
+}
+
+#[test]
 fn rejected_visual_paste_keeps_the_clipboard() {
     let mut editor = Editor::new("abc\n");
     editor.clipboard.text = Some("x\0y".to_owned());

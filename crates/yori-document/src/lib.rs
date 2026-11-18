@@ -136,6 +136,20 @@ impl Document {
             })
     }
 
+    /// Choose an inserted separator without combining it with adjacent source bytes.
+    #[must_use]
+    pub fn newline_for_edit(&self, range: Range<usize>) -> &'static str {
+        let newline = self.newline();
+        let before = self.text.as_bytes().get(range.start.wrapping_sub(1));
+        let after = self.text.as_bytes().get(range.end);
+
+        match (newline, before, after) {
+            ("\r", _, Some(b'\n')) => "\n",
+            ("\n", Some(b'\r'), _) => "\r\n",
+            _ => newline,
+        }
+    }
+
     #[must_use]
     pub fn newline(&self) -> &'static str {
         match self
