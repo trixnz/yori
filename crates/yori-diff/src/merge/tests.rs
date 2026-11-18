@@ -22,6 +22,26 @@ fn caret() -> TextSelection {
 }
 
 #[test]
+fn cr_conflict_takes_do_not_add_blank_lines() {
+    for (choice, expected) in [
+        (Take::Incoming, "head\rincoming\rtail\r"),
+        (Take::LocalThenIncoming, "head\rlocal\rincoming\rtail\r"),
+        (Take::IncomingThenLocal, "head\rincoming\rlocal\rtail\r"),
+    ] {
+        let mut merge = session(
+            "head\rbase\rtail\r",
+            "head\rlocal\rtail\r",
+            "head\rincoming\rtail\r",
+        );
+        let id = merge.conflicts()[0].id;
+
+        merge.take(id, choice, caret()).unwrap();
+
+        assert_eq!(merge.result().text(), expected);
+    }
+}
+
+#[test]
 fn independent_and_identical_changes_merge_without_conflicts() {
     let merge = session(
         "one\ntwo\nthree\n",

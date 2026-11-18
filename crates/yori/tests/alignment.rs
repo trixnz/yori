@@ -45,10 +45,6 @@ fn unsupported_bytes_are_rejected_instead_of_transformed() {
         Document::from_bytes(b"a\0b".to_vec()),
         Err(InputError::ContainsNul)
     ));
-    assert!(matches!(
-        Document::from_bytes(b"a\rb".to_vec()),
-        Err(InputError::BareCarriageReturn { offset: 1 })
-    ));
 }
 
 #[test]

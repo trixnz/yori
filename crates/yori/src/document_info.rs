@@ -61,6 +61,7 @@ pub enum LineEndings {
     None,
     Lf,
     CrLf,
+    Cr,
     Mixed,
 }
 
@@ -69,23 +70,27 @@ impl LineEndings {
     pub fn from_document(document: &Document) -> Self {
         let mut lf = false;
         let mut crlf = false;
+        let mut cr = false;
 
         for line in document.lines() {
             match line.ending {
                 LineEnding::Lf => lf = true,
                 LineEnding::CrLf => crlf = true,
+                LineEnding::Cr => cr = true,
                 LineEnding::None => {}
             }
-            if lf && crlf {
+
+            if u8::from(lf) + u8::from(crlf) + u8::from(cr) > 1 {
                 return Self::Mixed;
             }
         }
 
-        match (lf, crlf) {
-            (false, false) => Self::None,
-            (true, false) => Self::Lf,
-            (false, true) => Self::CrLf,
-            (true, true) => Self::Mixed,
+        match (lf, crlf, cr) {
+            (false, false, false) => Self::None,
+            (true, false, false) => Self::Lf,
+            (false, true, false) => Self::CrLf,
+            (false, false, true) => Self::Cr,
+            _ => Self::Mixed,
         }
     }
 
@@ -95,6 +100,7 @@ impl LineEndings {
             Self::None => "—",
             Self::Lf => "LF",
             Self::CrLf => "CRLF",
+            Self::Cr => "CR",
             Self::Mixed => "Mixed",
         }
     }
@@ -105,7 +111,8 @@ impl LineEndings {
             Self::None => "No line endings",
             Self::Lf => "LF line endings",
             Self::CrLf => "CRLF line endings",
-            Self::Mixed => "Mixed LF and CRLF line endings",
+            Self::Cr => "CR line endings",
+            Self::Mixed => "Mixed line endings",
         }
     }
 }
@@ -165,6 +172,10 @@ mod tests {
             ("one\n", LineEndings::Lf),
             ("one\r\n", LineEndings::CrLf),
             ("one\r\ntwo\n", LineEndings::Mixed),
+            ("one\rtwo\r", LineEndings::Cr),
+            ("one\r\rtwo", LineEndings::Cr),
+            ("one\rtwo\n", LineEndings::Mixed),
+            ("one\rtwo\r\n", LineEndings::Mixed),
             ("one\r\ntwo", LineEndings::CrLf),
         ];
 

@@ -73,6 +73,7 @@ impl AlignedEditor {
         let label = SharedString::from(match ending {
             LineEnding::Lf => "LF",
             LineEnding::CrLf => "CRLF",
+            LineEnding::Cr => "CR",
             LineEnding::None => "no newline",
         });
         let font = Font {

@@ -272,7 +272,7 @@ fn bad_edits_leave_document_and_history_untouched() {
     );
     assert!(
         history
-            .replace(&mut local, TextSelection::caret(0), 3..4, "")
+            .replace(&mut local, TextSelection::caret(0), 3..5, "")
             .is_err()
     );
 

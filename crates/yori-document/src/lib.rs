@@ -8,6 +8,7 @@ pub mod editing;
 pub enum LineEnding {
     Lf,
     CrLf,
+    Cr,
     None,
 }
 
@@ -29,7 +30,6 @@ pub enum InputError {
     InvalidUtf8,
     InvalidRange,
     ContainsNul,
-    BareCarriageReturn { offset: usize },
 }
 
 impl fmt::Display for InputError {
@@ -38,10 +38,6 @@ impl fmt::Display for InputError {
             Self::InvalidUtf8 => write!(f, "input is not valid UTF-8"),
             Self::InvalidRange => write!(f, "edit range is not on valid source boundaries"),
             Self::ContainsNul => write!(f, "input contains a NUL byte"),
-            Self::BareCarriageReturn { offset } => write!(
-                f,
-                "input contains an unsupported bare carriage return at byte {offset}"
-            ),
         }
     }
 }
@@ -49,14 +45,14 @@ impl fmt::Display for InputError {
 impl std::error::Error for InputError {}
 
 impl Document {
-    /// Decode source without normalization; reject invalid UTF-8, NUL and bare CR.
+    /// Decode source without normalization; reject invalid UTF-8 and NUL.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, InputError> {
         if bytes.contains(&0) {
             return Err(InputError::ContainsNul);
         }
 
         let text = String::from_utf8(bytes).map_err(|_| InputError::InvalidUtf8)?;
-        let lines = split_lines(&text)?;
+        let lines = split_lines(&text);
         Ok(Self { text, lines })
     }
 
@@ -107,7 +103,7 @@ impl Document {
 
         let mut text = self.text.clone();
         text.replace_range(range, replacement);
-        let lines = split_lines(&text)?;
+        let lines = split_lines(&text);
 
         self.text = text;
         self.lines = lines;
@@ -140,22 +136,35 @@ impl Document {
             })
     }
 
+    /// Choose an inserted separator without combining it with adjacent source bytes.
+    #[must_use]
+    pub fn newline_for_edit(&self, range: Range<usize>) -> &'static str {
+        let newline = self.newline();
+        let before = self.text.as_bytes().get(range.start.wrapping_sub(1));
+        let after = self.text.as_bytes().get(range.end);
+
+        match (newline, before, after) {
+            ("\r", Some(b'\r'), Some(b'\n')) | ("\n", Some(b'\r'), _) => "\r\n",
+            ("\r", _, Some(b'\n')) => "\n",
+            _ => newline,
+        }
+    }
+
     #[must_use]
     pub fn newline(&self) -> &'static str {
-        if self
+        match self
             .lines
             .iter()
             .find(|line| line.ending != LineEnding::None)
-            .is_some_and(|line| line.ending == LineEnding::CrLf)
         {
-            "\r\n"
-        } else {
-            "\n"
+            Some(line) if line.ending == LineEnding::CrLf => "\r\n",
+            Some(line) if line.ending == LineEnding::Cr => "\r",
+            _ => "\n",
         }
     }
 }
 
-fn split_lines(text: &str) -> Result<Vec<SourceLine>, InputError> {
+fn split_lines(text: &str) -> Vec<SourceLine> {
     let bytes = text.as_bytes();
     let mut lines = Vec::new();
     let mut start = 0;
@@ -178,7 +187,12 @@ fn split_lines(text: &str) -> Result<Vec<SourceLine>, InputError> {
                 start = index + 1;
             }
             b'\r' if bytes.get(index + 1) != Some(&b'\n') => {
-                return Err(InputError::BareCarriageReturn { offset: index });
+                lines.push(SourceLine {
+                    content: start..index,
+                    full: start..index + 1,
+                    ending: LineEnding::Cr,
+                });
+                start = index + 1;
             }
             _ => {}
         }
@@ -193,5 +207,5 @@ fn split_lines(text: &str) -> Result<Vec<SourceLine>, InputError> {
         });
     }
 
-    Ok(lines)
+    lines
 }

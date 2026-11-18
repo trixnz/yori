@@ -149,7 +149,12 @@ fn word_end(big: bool) -> Motion {
 }
 
 fn empty_line_at(text: &str, offset: usize) -> bool {
-    let starts_line = offset == 0 || text.as_bytes().get(offset - 1) == Some(&b'\n');
+    let previous = offset
+        .checked_sub(1)
+        .and_then(|index| text.as_bytes().get(index));
+    let starts_line = offset == 0
+        || previous == Some(&b'\n')
+        || (previous == Some(&b'\r') && text.as_bytes().get(offset) != Some(&b'\n'));
     starts_line && matches!(text.as_bytes().get(offset), Some(b'\n' | b'\r'))
 }
 
