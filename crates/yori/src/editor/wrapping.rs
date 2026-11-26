@@ -9,7 +9,7 @@ use std::{
 
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::{App, Font, TextRun, Window};
-use yori::display::DisplayLine;
+use yori::{display::DisplayLine, geometry::whole_rows};
 
 use super::{AlignedEditor, Side, TAB_WIDTH};
 
@@ -52,18 +52,22 @@ pub(super) struct WrapProjection {
 impl WrapProjection {
     #[cfg(test)]
     pub fn build(editor: &AlignedEditor, columns: usize) -> Self {
-        Self::build_with_identity(editor, columns, 0)
+        Self::build_with_identity(editor, [columns; 3], 0)
     }
 
-    fn build_with_identity(editor: &AlignedEditor, columns: usize, identity: u64) -> Self {
+    fn build_with_identity(
+        editor: &AlignedEditor,
+        [left_columns, right_columns, incoming_columns]: [usize; 3],
+        identity: u64,
+    ) -> Self {
         let mut rows = Vec::with_capacity(editor.alignment.rows().len());
         let mut visual_rows = 0;
 
         for row in 0..editor.alignment.rows().len() {
-            let left = editor.wrapped_segments(Side::Left, row, columns);
-            let right = editor.wrapped_segments(Side::Right, row, columns);
-            let incoming = editor.wrapped_segments(Side::Incoming, row, columns);
-            let base = editor.wrapped_base_segments(row, columns);
+            let left = editor.wrapped_segments(Side::Left, row, left_columns);
+            let right = editor.wrapped_segments(Side::Right, row, right_columns);
+            let incoming = editor.wrapped_segments(Side::Incoming, row, incoming_columns);
+            let base = editor.wrapped_base_segments(row, right_columns);
             let height = left
                 .len()
                 .max(right.len())
@@ -171,8 +175,8 @@ impl WrapProjection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ProjectionKey {
     revision: u64,
-    columns: usize,
-    viewport_width: u32,
+    columns: [usize; 3],
+    viewport_widths: [u32; 3],
     cell_width: u32,
     font_size: u32,
     font_family: String,
@@ -212,7 +216,7 @@ impl AlignedEditor {
             return Rc::new(WrapProjection::unwrapped(self.alignment.rows().len()));
         }
 
-        let (key, columns) = self.wrap_projection_key(window, cx);
+        let key = self.wrap_projection_key(window, cx);
         if let Some((cached_key, projection)) = self.wrap_projection_cache.cached.borrow().as_ref()
             && cached_key == &key
         {
@@ -223,7 +227,11 @@ impl AlignedEditor {
         self.wrap_projection_cache
             .next_identity
             .set(identity.wrapping_add(1));
-        let projection = Rc::new(WrapProjection::build_with_identity(self, columns, identity));
+        let projection = Rc::new(WrapProjection::build_with_identity(
+            self,
+            key.columns,
+            identity,
+        ));
         #[cfg(test)]
         self.wrap_projection_cache
             .builds
@@ -243,7 +251,7 @@ impl AlignedEditor {
         self.wrap_projection_cache.builds.get()
     }
 
-    fn wrap_projection_key(&self, window: &mut Window, cx: &App) -> (ProjectionKey, usize) {
+    fn wrap_projection_key(&self, window: &mut Window, cx: &App) -> ProjectionKey {
         let theme = cx.theme();
         let run = TextRun {
             len: 1,
@@ -263,25 +271,19 @@ impl AlignedEditor {
                 .width(),
         )
         .max(f32::EPSILON);
-        let width = self.geometry().text_viewport_width().max(cell_width);
+        let geometry = self.geometry();
+        let widths =
+            [Side::Left, Side::Right, Side::Incoming].map(|side| side.text_width(geometry));
+        let columns = widths.map(|width| whole_rows(width / cell_width).max(1));
 
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "the positive pane width is intentionally floored to a whole display-column count"
-        )]
-        let columns = (width / cell_width).floor() as usize;
-        let columns = columns.max(1);
-        let key = ProjectionKey {
+        ProjectionKey {
             revision: self.wrap_projection_cache.revision,
             columns,
-            viewport_width: width.to_bits(),
+            viewport_widths: widths.map(f32::to_bits),
             cell_width: cell_width.to_bits(),
             font_size: f32::from(theme.mono_font_size).to_bits(),
             font_family: theme.mono_font_family.to_string(),
-        };
-
-        (key, columns)
+        }
     }
 
     fn wrapped_segments(&self, side: Side, row: usize, columns: usize) -> Vec<Range<usize>> {
@@ -422,6 +424,57 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("horizontal-scrollbar").is_none());
             assert!(editor.read(cx).max_horizontal_scroll(window, cx).abs() < f32::EPSILON);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn dragging_the_diff_divider_reflows_each_pane_independently(cx: &mut TestAppContext) {
+        use gpui_kit::{Modifiers, MouseButton};
+
+        initialize(cx);
+        let line = format!("{}\n", "word ".repeat(40));
+        let mut editor = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                AlignedEditor::new(
+                    pane("left.txt", &line),
+                    pane("right.txt", &line),
+                    window,
+                    cx,
+                )
+            });
+            view.update(cx, |editor, cx| editor.set_word_wrap(true, cx));
+            editor = Some(view.clone());
+
+            Root::new(view, window, cx)
+        });
+
+        let divider = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(("editor-divider", 0usize)).bounds().center()
+        });
+        let target = divider + point(px(-150.0), px(0.0));
+        cx.simulate_mouse_down(divider, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            divider + point(px(-35.0), px(0.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(TestWindowExt::render_frame);
+        cx.simulate_mouse_move(target, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        let editor = editor.unwrap();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let resized = window.find(("editor-divider", 0usize)).bounds().center();
+            let view = editor.read(cx);
+            let projection = view.wrap_projection(window, cx);
+            let row = projection.row(view, 0).unwrap();
+
+            assert!((f32::from(resized.x - target.x)).abs() < 1.0);
+            assert!(row.segments(Side::Left).len() > row.segments(Side::Right).len());
         });
     }
 

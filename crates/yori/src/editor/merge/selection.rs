@@ -123,7 +123,8 @@ impl AlignedEditor {
                     cx.theme().muted_foreground
                 };
                 for side in [input_side(input), Side::Right] {
-                    let horizontal = outline_bounds(self.pane_left(side), geometry.pane_width());
+                    let horizontal =
+                        outline_bounds(self.pane_left(side), side.pane_width(geometry));
                     controls = controls.child(
                         div()
                             .absolute()

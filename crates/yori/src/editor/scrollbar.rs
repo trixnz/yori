@@ -30,7 +30,7 @@ impl AlignedEditor {
         let geometry = self.geometry();
 
         HorizontalScrollTrack::new(
-            geometry.text_viewport_width() - 2.0,
+            self.narrowest_text_width(geometry) - 2.0,
             max_scroll,
             geometry.content_width(),
         )

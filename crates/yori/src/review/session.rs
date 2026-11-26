@@ -385,6 +385,7 @@ pub(crate) struct ReviewSession {
     /// can rest here and move the selection without committing, turns it on.
     navigator_focus_visible: bool,
     navigator_scroll: ScrollHandle,
+    navigator_width: f32,
     non_text_body_focus: FocusHandle,
     refreshing: bool,
     saving: bool,
@@ -402,6 +403,7 @@ impl ReviewSession {
             navigator_focus: cx.focus_handle(),
             navigator_focus_visible: true,
             navigator_scroll: ScrollHandle::new(),
+            navigator_width: 280.0,
             non_text_body_focus: cx.focus_handle(),
             refreshing: false,
             saving: false,
@@ -1267,7 +1269,18 @@ impl ReviewSession {
             )
     }
 
-    fn render_navigator(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn navigator_width_limits(window: &Window) -> (f32, f32) {
+        let viewport = f32::from(window.viewport_size().width);
+        let minimum = (viewport / 2.0).clamp(0.0, 160.0);
+        (minimum, (viewport - 240.0).max(minimum))
+    }
+
+    fn render_navigator(
+        &self,
+        width: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let visible = self.entries.iter().collect::<Vec<_>>();
         let selected = self.selected.clone();
         let visible_count = visible.len();
@@ -1275,7 +1288,7 @@ impl ReviewSession {
             self.navigator_focus.is_focused(window) && self.navigator_focus_visible;
 
         div()
-            .w(px(280.0))
+            .w(px(width))
             .h_full()
             .flex_shrink_0()
             .flex()
@@ -1451,14 +1464,17 @@ impl Render for ReviewSession {
             .map(|conflict| Self::render_conflict(&conflict, cx));
         let non_text_body = self.selected_is_non_text();
         let body = self.render_body(cx);
+        let (minimum, maximum) = Self::navigator_width_limits(window);
+        let navigator_width = self.navigator_width.clamp(minimum, maximum);
 
         div()
             .id("review-session")
+            .relative()
             .size_full()
             .flex()
             .overflow_hidden()
             .on_action(cx.listener(Self::toggle_word_wrap))
-            .child(self.render_navigator(window, cx))
+            .child(self.render_navigator(navigator_width, window, cx))
             .child(
                 div()
                     .flex_1()
@@ -1505,6 +1521,21 @@ impl Render for ReviewSession {
                             .child(body),
                     ),
             )
+            .child(crate::pane_resize::handle(
+                "review-divider",
+                0,
+                navigator_width,
+                0.0,
+                |session: &mut Self, x, window, cx| {
+                    let (minimum, maximum) = Self::navigator_width_limits(window);
+                    let width = x.clamp(minimum, maximum);
+                    if (width - session.navigator_width).abs() > f32::EPSILON {
+                        session.navigator_width = width;
+                        cx.notify();
+                    }
+                },
+                cx,
+            ))
     }
 }
 

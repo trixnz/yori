@@ -16,7 +16,7 @@ use super::{AlignedEditor, FOOTER_HEIGHT, Language, PaneDocument, Side, ToggleWo
 impl AlignedEditor {
     pub(super) fn render_footer(
         &self,
-        pane_width: f32,
+        geometry: yori::geometry::EditorGeometry,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
@@ -37,16 +37,16 @@ impl AlignedEditor {
             .bg(cx.theme().secondary)
             .border_t_1()
             .border_color(cx.theme().border)
-            .child(self.render_pane_status(Side::Left, pane_width, cx))
+            .child(self.render_pane_status(Side::Left, geometry.pane_width(), cx))
             .child(
                 div()
-                    .w(px(self.geometry().center_width()))
+                    .w(px(geometry.center_width()))
                     .h_full()
                     .flex_shrink_0(),
             )
             .child(self.render_pane_status(
                 Side::Right,
-                pane_width
+                geometry.right_pane_width()
                     + if self.merge.is_none() {
                         super::scrollbar::WIDTH
                     } else {
@@ -55,7 +55,11 @@ impl AlignedEditor {
                 cx,
             ))
             .children(self.merge.as_ref().map(|_| {
-                self.render_pane_status(Side::Incoming, pane_width + super::scrollbar::WIDTH, cx)
+                self.render_pane_status(
+                    Side::Incoming,
+                    geometry.incoming_pane_width() + super::scrollbar::WIDTH,
+                    cx,
+                )
             }))
     }
 

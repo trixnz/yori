@@ -43,6 +43,7 @@ pub struct EditorGeometry {
     line_height: f32,
     center_width: f32,
     merge_layout: bool,
+    divider_ratios: Option<[f32; 2]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -75,6 +76,7 @@ impl EditorGeometry {
             line_height: line_height.max(f32::EPSILON),
             center_width: 0.0,
             merge_layout: false,
+            divider_ratios: None,
         }
     }
 
@@ -94,8 +96,75 @@ impl EditorGeometry {
     }
 
     #[must_use]
+    pub fn with_divider_ratios(mut self, ratios: Option<[f32; 2]>) -> Self {
+        self.divider_ratios = ratios;
+        self
+    }
+
+    fn pane_space(self) -> f32 {
+        self.viewport_width - self.center_width
+    }
+
+    fn equal_pane_width(self) -> f32 {
+        self.pane_space() / if self.merge_layout { 3.0 } else { 2.0 }
+    }
+
+    fn minimum_pane_width(self) -> f32 {
+        self.equal_pane_width().min(120.0)
+    }
+
+    fn dividers(self) -> [f32; 2] {
+        let total = self.pane_space();
+        let minimum = self.minimum_pane_width();
+        let Some(ratios) = self.divider_ratios else {
+            let equal = self.equal_pane_width();
+            return [
+                equal,
+                if self.merge_layout {
+                    equal * 2.0
+                } else {
+                    total
+                },
+            ];
+        };
+
+        let reserved = if self.merge_layout {
+            minimum * 2.0
+        } else {
+            minimum
+        };
+        let first = (ratios[0] * total).clamp(minimum, (total - reserved).max(minimum));
+        let second = if self.merge_layout {
+            (ratios[1] * total).clamp(first + minimum, (total - minimum).max(first + minimum))
+        } else {
+            total
+        };
+
+        [first, second]
+    }
+
+    /// Move one divider without moving its neighbor. Coordinates are local to the editor.
+    #[must_use]
+    pub fn resized_dividers(self, divider: usize, x: f32) -> Option<[f32; 2]> {
+        let total = self.pane_space();
+        let minimum = self.minimum_pane_width();
+        if self.equal_pane_width() <= minimum {
+            return self.divider_ratios;
+        }
+
+        let [first, second] = self.dividers();
+        if divider == 0 {
+            let first = x.clamp(minimum, (second - minimum).max(minimum));
+            Some([first / total, second / total])
+        } else {
+            let second = x.clamp(first + minimum, (total - minimum).max(first + minimum));
+            Some([first / total, second / total])
+        }
+    }
+
+    #[must_use]
     pub fn incoming_pane_left(self) -> f32 {
-        self.pane_width() * 2.0
+        self.dividers()[1]
     }
 
     #[must_use]
@@ -105,7 +174,18 @@ impl EditorGeometry {
 
     #[must_use]
     pub fn pane_width(self) -> f32 {
-        (self.viewport_width - self.center_width) / if self.merge_layout { 3.0 } else { 2.0 }
+        self.dividers()[0]
+    }
+
+    #[must_use]
+    pub fn right_pane_width(self) -> f32 {
+        let [first, second] = self.dividers();
+        second - first
+    }
+
+    #[must_use]
+    pub fn incoming_pane_width(self) -> f32 {
+        (self.pane_space() - self.incoming_pane_left()).max(0.0)
     }
 
     #[must_use]
@@ -125,7 +205,12 @@ impl EditorGeometry {
 
     #[must_use]
     pub fn text_viewport_width(self) -> f32 {
-        (self.pane_width() - self.gutter_width).max(0.0)
+        self.text_width(self.pane_width())
+    }
+
+    #[must_use]
+    pub fn text_width(self, pane_width: f32) -> f32 {
+        (pane_width - self.gutter_width).max(0.0)
     }
 
     #[must_use]

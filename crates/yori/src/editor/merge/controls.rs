@@ -94,7 +94,7 @@ impl AlignedEditor {
                 } else {
                     0.0
                 };
-                let horizontal = outline_bounds(self.pane_left(side), geometry.pane_width());
+                let horizontal = outline_bounds(self.pane_left(side), side.pane_width(geometry));
                 controls = controls.child(
                     div()
                         .absolute()

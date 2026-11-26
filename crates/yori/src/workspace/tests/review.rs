@@ -191,6 +191,41 @@ fn source_identity_deduplicates_and_navigation_lazily_retains_editors(cx: &mut T
 }
 
 #[gpui_kit::test]
+fn dragging_the_review_divider_gives_width_back_to_the_comparison(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, MouseButton};
+
+    let (workspace, cx) = harness(cx);
+    let manifest =
+        ReviewManifest::new(vec![text_file("first", "src/first.rs", "old\n", "new\n")]).unwrap();
+    open_review(
+        &workspace,
+        source(TestProvider::new([manifest]), "resize"),
+        cx,
+    );
+
+    let (divider, original_width) = cx.update(|window, _| {
+        (
+            window.find(("review-divider", 0usize)).bounds().center(),
+            window.find("review-file-body").bounds().size.width,
+        )
+    });
+    let target = divider + point(px(-80.0), px(0.0));
+    cx.simulate_mouse_down(divider, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(target, MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_up(target, MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let body = window.find("review-file-body").bounds();
+        let rows = window.find("rows-viewport").bounds();
+
+        assert!((f32::from(body.size.width - original_width) - 80.0).abs() < 1.0);
+        assert_eq!(rows.left(), body.left());
+    });
+}
+
+#[gpui_kit::test]
 fn review_word_wrap_reaches_current_and_future_file_comparisons(cx: &mut TestAppContext) {
     let (workspace, cx) = harness(cx);
     let first = ReviewFileIdentity::new("first");
