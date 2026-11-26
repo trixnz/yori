@@ -43,7 +43,7 @@ impl AlignedEditor {
                 div()
                     .absolute()
                     .left(px(geometry.right_pane_left() + RESTORE_WIDTH))
-                    .w(px((geometry.pane_width() - RESTORE_WIDTH).max(0.0)))
+                    .w(px((geometry.right_pane_width() - RESTORE_WIDTH).max(0.0)))
                     .h(px(LINE_HEIGHT))
                     .overflow_hidden()
                     .child(self.render_conflict_menu(id, cx)),

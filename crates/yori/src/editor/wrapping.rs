@@ -176,7 +176,6 @@ impl WrapProjection {
 struct ProjectionKey {
     revision: u64,
     columns: [usize; 3],
-    viewport_widths: [u32; 3],
     cell_width: u32,
     font_size: u32,
     font_family: String,
@@ -272,14 +271,12 @@ impl AlignedEditor {
         )
         .max(f32::EPSILON);
         let geometry = self.geometry();
-        let widths =
-            [Side::Left, Side::Right, Side::Incoming].map(|side| side.text_width(geometry));
-        let columns = widths.map(|width| whole_rows(width / cell_width).max(1));
+        let columns = [Side::Left, Side::Right, Side::Incoming]
+            .map(|side| whole_rows(side.text_width(geometry) / cell_width).max(1));
 
         ProjectionKey {
             revision: self.wrap_projection_cache.revision,
             columns,
-            viewport_widths: widths.map(f32::to_bits),
             cell_width: cell_width.to_bits(),
             font_size: f32::from(theme.mono_font_size).to_bits(),
             font_family: theme.mono_font_family.to_string(),
@@ -714,6 +711,27 @@ mod tests {
             assert!(view.right.document.text().contains('Z'));
             let _ = view.source_position(Side::Right, 0, window, cx);
             assert!(view.wrap_projection_build_count() > builds);
+        });
+
+        cx.update(|window, cx| {
+            let view = editor.read(cx);
+            let cell = f32::from_bits(view.wrap_projection_key(window, cx).cell_width);
+            let pane_width = GUTTER_WIDTH + 40.5 * cell;
+            let mut bounds = view.content_bounds.get();
+            bounds.size.width = px(2.0 * pane_width
+                + view.geometry().center_width()
+                + super::super::scrollbar::WIDTH);
+            view.content_bounds.set(bounds);
+            let projection = view.wrap_projection(window, cx);
+
+            editor.update(cx, |view, _| {
+                view.divider_ratios = view
+                    .geometry()
+                    .resized_dividers(0, pane_width + 0.25 * cell);
+            });
+
+            let resized = editor.read(cx).wrap_projection(window, cx);
+            assert!(Rc::ptr_eq(&projection, &resized));
         });
     }
 
