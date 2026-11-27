@@ -537,7 +537,10 @@ impl AlignedEditor {
             return;
         };
 
-        self.replace(selection.range(), self.right.document.newline(), window, cx);
+        let range = selection.range();
+        let newline = self.right.document.newline_for_edit(range.clone());
+
+        self.replace(range, newline, window, cx);
     }
 
     pub(super) fn insert_tab(

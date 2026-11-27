@@ -430,7 +430,7 @@ impl Vim {
         let replacement = if operator == Operator::Change
             && linewise
             && range.end > range.start
-            && document.text()[range.clone()].ends_with('\n')
+            && document.text()[range.clone()].ends_with(['\r', '\n'])
         {
             document.newline()
         } else {
@@ -442,7 +442,7 @@ impl Vim {
         if operator == Operator::Delete
             && linewise
             && range.end == document.text().len()
-            && !document.text().ends_with('\n')
+            && !document.text().ends_with(['\r', '\n'])
             && range.start > 0
         {
             range.start = editing::previous_grapheme(document.text(), range.start);
@@ -488,7 +488,7 @@ impl Vim {
         self.column = None;
 
         if matches!(insert, Insert::Above | Insert::Below) {
-            let newline = document.newline().to_owned();
+            let newline = document.newline_for_edit(offset..offset).to_owned();
             let update = source.replace(offset..offset, &newline)?;
             let head = if insert == Insert::Above {
                 offset
@@ -519,7 +519,7 @@ impl Vim {
             document,
             self.visual.map_or(selection.head, |(_, head)| head),
         );
-        let linewise = text.ends_with('\n');
+        let linewise = text.ends_with(['\r', '\n']);
         let mut text = text.repeat(count);
 
         let content = document.line_content_range(document.line_at_offset(cursor));
@@ -544,7 +544,7 @@ impl Vim {
         if linewise
             && range.start == document.text().len()
             && !document.text().is_empty()
-            && !document.text().ends_with('\n')
+            && !document.text().ends_with(['\r', '\n'])
         {
             let ending_len = if text.ends_with("\r\n") { 2 } else { 1 };
             text.truncate(text.len() - ending_len);
@@ -581,7 +581,7 @@ impl Vim {
 /// Linewise text always carries a line ending, so its shape survives the clipboard.
 fn clipboard_text(document: &Document, range: Range<usize>, linewise: bool) -> String {
     let mut text = document.copy_range(range).to_owned();
-    if linewise && !text.ends_with('\n') {
+    if linewise && !text.ends_with(['\r', '\n']) {
         text.push_str(document.newline());
     }
 

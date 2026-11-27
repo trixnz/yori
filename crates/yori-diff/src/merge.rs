@@ -245,11 +245,14 @@ impl MergeSession {
 
         // Missing final newlines in an input must not glue accepted code to a
         // retained neighboring line. Preserve its bytes otherwise, including CRLF.
-        if !text.is_empty() && range.start > 0 && !self.result.text()[..range.start].ends_with('\n')
+        if !text.is_empty()
+            && range.start > 0
+            && !self.result.text()[..range.start].ends_with(['\r', '\n'])
         {
             text.insert_str(0, newline);
         }
-        if !text.is_empty() && range.end < self.result.text().len() && !text.ends_with('\n') {
+        if !text.is_empty() && range.end < self.result.text().len() && !text.ends_with(['\r', '\n'])
+        {
             text.push_str(newline);
         }
 
@@ -373,7 +376,7 @@ fn byte_range(document: &Document, lines: Range<usize>) -> Range<usize> {
 
 fn concatenate(first: &str, second: &str, newline: &str) -> String {
     let mut text = first.to_owned();
-    if !first.is_empty() && !second.is_empty() && !first.ends_with('\n') {
+    if !first.is_empty() && !second.is_empty() && !first.ends_with(['\r', '\n']) {
         text.push_str(newline);
     }
     text.push_str(second);

@@ -14,7 +14,7 @@ fn reject_input(source: &mut dyn SourceEdit) {
     let original = source.document().text().to_owned();
     let marked = source.marked_range();
 
-    for (range, text) in [(1..2, "x"), (3..4, ""), (0..0, "\0"), (99..100, "x")] {
+    for (range, text) in [(1..2, "x"), (3..5, ""), (0..0, "\0"), (99..100, "x")] {
         assert!(source.replace(range.clone(), text).is_err());
         assert!(source.replace_marked(range, text, None).is_err());
         assert_eq!(source.document().text(), original);
