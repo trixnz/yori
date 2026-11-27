@@ -7,6 +7,7 @@ mod editor;
 mod instance;
 mod invocation;
 mod keymap;
+mod pane_resize;
 mod review;
 mod storage;
 mod window_placement;

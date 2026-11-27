@@ -43,7 +43,7 @@ impl AlignedEditor {
                 div()
                     .absolute()
                     .left(px(geometry.right_pane_left() + RESTORE_WIDTH))
-                    .w(px((geometry.pane_width() - RESTORE_WIDTH).max(0.0)))
+                    .w(px((geometry.right_pane_width() - RESTORE_WIDTH).max(0.0)))
                     .h(px(LINE_HEIGHT))
                     .overflow_hidden()
                     .child(self.render_conflict_menu(id, cx)),
@@ -94,7 +94,7 @@ impl AlignedEditor {
                 } else {
                     0.0
                 };
-                let horizontal = outline_bounds(self.pane_left(side), geometry.pane_width());
+                let horizontal = outline_bounds(self.pane_left(side), side.pane_width(geometry));
                 controls = controls.child(
                     div()
                         .absolute()

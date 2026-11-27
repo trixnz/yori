@@ -8,7 +8,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
 };
 use gpui_kit::{
-    Context, Div, InteractiveElement, MouseButton, ParentElement, StatefulInteractiveElement,
+    App, Context, Div, InteractiveElement, MouseButton, ParentElement, StatefulInteractiveElement,
     Styled, div, px,
 };
 use yori::geometry::{EditorGeometry, display_units, whole_rows};
@@ -84,20 +84,7 @@ impl AlignedEditor {
             if let Some(plan) = self.selection_restore() {
                 if !self.show_connections {
                     let visual = projection.visual_range(plan.rows.clone());
-                    let top = display_units(visual.start) * LINE_HEIGHT - self.vertical_scroll;
-                    let height = display_units(visual.len()) * LINE_HEIGHT;
-                    for left in [0.0, geometry.right_pane_left()] {
-                        controls = controls.child(
-                            div()
-                                .absolute()
-                                .left(px(left + RESTORE_WIDTH))
-                                .top(px(top))
-                                .w(px((geometry.pane_width() - RESTORE_WIDTH).max(0.0)))
-                                .h(px(height))
-                                .border_1()
-                                .border_color(cx.theme().muted_foreground),
-                        );
-                    }
+                    controls = controls.children(self.restore_outlines(geometry, visual, cx));
                 }
 
                 if let Some(top) = button_top(&plan.rows) {
@@ -159,6 +146,27 @@ impl AlignedEditor {
         }
 
         controls
+    }
+
+    fn restore_outlines(
+        &self,
+        geometry: EditorGeometry,
+        visual: std::ops::Range<usize>,
+        cx: &App,
+    ) -> [Div; 2] {
+        let top = display_units(visual.start) * LINE_HEIGHT - self.vertical_scroll;
+        let height = display_units(visual.len()) * LINE_HEIGHT;
+
+        [Side::Left, Side::Right].map(|side| {
+            div()
+                .absolute()
+                .left(px(self.pane_left(side) + RESTORE_WIDTH))
+                .top(px(top))
+                .w(px((side.pane_width(geometry) - RESTORE_WIDTH).max(0.0)))
+                .h(px(height))
+                .border_1()
+                .border_color(cx.theme().muted_foreground)
+        })
     }
 
     fn restore_button_container(

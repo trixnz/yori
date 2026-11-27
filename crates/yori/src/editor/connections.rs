@@ -207,9 +207,13 @@ impl AlignedEditor {
                 .is_some_and(|index| self.alignment.blocks()[index].rows == connection.rows);
 
             if hovered || selected {
-                for (left, rows) in [
-                    (0.0, &connection.left),
-                    (geometry.right_pane_left(), &connection.right),
+                for (left, width, rows) in [
+                    (0.0, geometry.pane_width(), &connection.left),
+                    (
+                        geometry.right_pane_left(),
+                        geometry.right_pane_width(),
+                        &connection.right,
+                    ),
                 ] {
                     surface = surface.child(
                         div()
@@ -219,7 +223,7 @@ impl AlignedEditor {
                                 projection.visual_range(rows.clone()).start,
                             ) * LINE_HEIGHT
                                 - self.vertical_scroll))
-                            .w(px((geometry.pane_width() - RESTORE_WIDTH).max(0.0)))
+                            .w(px((width - RESTORE_WIDTH).max(0.0)))
                             .h(px((display_units(
                                 projection.visual_range(rows.clone()).len(),
                             ) * LINE_HEIGHT)

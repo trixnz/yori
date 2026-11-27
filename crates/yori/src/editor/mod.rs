@@ -101,6 +101,20 @@ enum Side {
     Incoming,
 }
 
+impl Side {
+    fn pane_width(self, geometry: EditorGeometry) -> f32 {
+        match self {
+            Self::Left => geometry.pane_width(),
+            Self::Right => geometry.right_pane_width(),
+            Self::Incoming => geometry.incoming_pane_width(),
+        }
+    }
+
+    fn text_width(self, geometry: EditorGeometry) -> f32 {
+        geometry.text_width(self.pane_width(geometry))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PaneFocusBoundary {
     Previous,
@@ -402,6 +416,7 @@ pub(super) struct AlignedEditor {
     find: Option<find::FindBar>,
     // Mouse events are window-local; measured bounds provide the editor's content-local inset.
     content_bounds: Rc<Cell<Bounds<Pixels>>>,
+    divider_ratios: Option<[f32; 2]>,
 }
 
 impl AlignedEditor {
@@ -576,6 +591,7 @@ impl AlignedEditor {
             horizontal_scrollbar_grab: None,
             horizontal_scrollbar_visibility: HorizontalScrollbarVisibility::Hidden,
             find: None,
+            divider_ratios: None,
             content_bounds: Rc::new(Cell::new(Bounds::new(
                 point(px(0.0), px(0.0)),
                 window.viewport_size(),
@@ -1009,12 +1025,13 @@ impl AlignedEditor {
             GUTTER_WIDTH,
             LINE_HEIGHT,
         )
-        .with_merge_layout(self.merge.is_some())
         .with_center_width(if self.show_connections {
             connections::WIDTH
         } else {
             0.0
         })
+        .with_merge_layout(self.merge.is_some())
+        .with_divider_ratios(self.divider_ratios)
     }
 
     fn source_location_at(
@@ -1053,6 +1070,17 @@ impl AlignedEditor {
         (location.side, location.offset)
     }
 
+    fn narrowest_text_width(&self, geometry: EditorGeometry) -> f32 {
+        let width = Side::Left
+            .text_width(geometry)
+            .min(Side::Right.text_width(geometry));
+        if self.merge.is_some() {
+            width.min(Side::Incoming.text_width(geometry))
+        } else {
+            width
+        }
+    }
+
     fn max_horizontal_scroll(&self, window: &mut Window, cx: &App) -> f32 {
         if self.word_wrap.enabled() {
             return 0.0;
@@ -1077,28 +1105,30 @@ impl AlignedEditor {
                 .width(),
         );
 
-        let max_columns = self
-            .left
-            .max_display_columns
-            .max(self.right.max_display_columns)
-            .max(self.merge.as_ref().map_or(0, |merge| {
-                merge.incoming.max_display_columns.max(if merge.show_base {
-                    merge.base_columns
-                } else {
-                    0
-                })
-            }));
+        let geometry = self.geometry();
         let marker_columns = if self.show_whitespace {
             whitespace::ENDING_LABEL_COLUMNS
         } else {
             0
         };
 
-        horizontal_scroll_limit(
-            max_columns + marker_columns,
-            cell_width,
-            self.geometry().text_viewport_width() - 2.0,
-        )
+        let limit = |side: Side, columns| {
+            horizontal_scroll_limit(
+                columns + marker_columns,
+                cell_width,
+                side.text_width(geometry) - 2.0,
+            )
+        };
+        let two_way = limit(Side::Left, self.left.max_display_columns)
+            .max(limit(Side::Right, self.right.max_display_columns));
+        self.merge.as_ref().map_or(two_way, |merge| {
+            let result = if merge.show_base {
+                two_way.max(limit(Side::Right, merge.base_columns))
+            } else {
+                two_way
+            };
+            result.max(limit(Side::Incoming, merge.incoming.max_display_columns))
+        })
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1341,8 +1371,8 @@ impl AlignedEditor {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let top = display_units(projected.visual_start) * LINE_HEIGHT - self.vertical_scroll;
-        let pane_width = geometry.pane_width();
-        let text_viewport_width = geometry.text_viewport_width();
+        let pane_width = side.pane_width(geometry);
+        let text_viewport_width = side.text_width(geometry);
 
         let row = &self.alignment.rows()[row_index];
         let pane = self.document(side);
@@ -1529,7 +1559,6 @@ impl AlignedEditor {
         let projection = self.wrap_projection(window, cx);
         let width = geometry.content_width();
         let pane_width = geometry.pane_width();
-        let text_viewport_width = geometry.text_viewport_width();
 
         self.horizontal_scroll = self.horizontal_scroll.min(max_horizontal_scroll);
         self.vertical_scroll = self
@@ -1691,7 +1720,7 @@ impl AlignedEditor {
                     .absolute()
                     .left(px(self.pane_left(selection.side) + GUTTER_WIDTH))
                     .top(px(0.0))
-                    .w(px(text_viewport_width))
+                    .w(px(selection.side.text_width(geometry)))
                     .h(px(geometry.rows_viewport_height()))
                     .overflow_hidden()
                     .child(
@@ -1832,23 +1861,34 @@ impl AlignedEditor {
                     .border_b_1()
                     .border_color(cx.theme().border),
             )
-            .child(self.render_footer(pane_width, cx))
+            .child(self.render_footer(geometry, cx))
             .child(self.render_pane_header(Side::Left, pane_width, cx))
-            .child(self.render_pane_header(Side::Right, pane_width, cx))
-            .children(
-                self.merge
-                    .as_ref()
-                    .map(|_| self.render_pane_header(Side::Incoming, pane_width, cx)),
-            )
-            .children((1..if self.merge.is_some() { 3 } else { 2 }).map(|column| {
-                div()
-                    .absolute()
-                    .top_0()
-                    .left(px(display_units(column) * pane_width))
-                    .w(px(1.0))
-                    .h(px(HEADER_HEIGHT + geometry.rows_viewport_height()))
-                    .bg(cx.theme().border)
+            .child(self.render_pane_header(Side::Right, geometry.right_pane_width(), cx))
+            .children(self.merge.as_ref().map(|_| {
+                self.render_pane_header(Side::Incoming, geometry.incoming_pane_width(), cx)
             }))
+            .children(
+                [pane_width, geometry.incoming_pane_left()]
+                    .into_iter()
+                    .take(if self.merge.is_some() { 2 } else { 1 })
+                    .enumerate()
+                    .map(|(divider, x)| {
+                        crate::pane_resize::handle(
+                            "editor-divider",
+                            divider,
+                            x,
+                            FOOTER_HEIGHT + self.horizontal_scrollbar_visibility.height(),
+                            move |editor: &mut Self, x, _, cx| {
+                                let ratios = editor.geometry().resized_dividers(divider, x);
+                                if ratios != editor.divider_ratios {
+                                    editor.divider_ratios = ratios;
+                                    cx.notify();
+                                }
+                            },
+                            cx,
+                        )
+                    }),
+            )
     }
 }
 

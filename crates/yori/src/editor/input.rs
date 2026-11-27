@@ -310,7 +310,7 @@ impl AlignedEditor {
         if self.word_wrap.enabled() {
             self.horizontal_scroll = 0.0;
         } else {
-            let width = geometry.text_viewport_width();
+            let width = side.text_width(geometry);
             if x < self.horizontal_scroll {
                 self.horizontal_scroll = x;
             } else if x + 2.0 > self.horizontal_scroll + width {

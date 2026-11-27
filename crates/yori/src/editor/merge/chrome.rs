@@ -32,7 +32,7 @@ impl AlignedEditor {
         let mut text_area = div()
             .absolute()
             .left(px(GUTTER_WIDTH))
-            .w(px(geometry.text_viewport_width()))
+            .w(px(geometry.text_width(geometry.right_pane_width())))
             .h(px(
                 yori::geometry::display_units(projected.height) * LINE_HEIGHT
             ))
@@ -62,7 +62,7 @@ impl AlignedEditor {
             .absolute()
             .top(px(top))
             .left(px(geometry.right_pane_left()))
-            .w(px(geometry.pane_width()))
+            .w(px(geometry.right_pane_width()))
             .h(px(
                 yori::geometry::display_units(projected.height) * LINE_HEIGHT
             ))
